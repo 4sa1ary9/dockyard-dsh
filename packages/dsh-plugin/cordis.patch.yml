@@ -1,0 +1,3 @@
+- insert:
+    - id: dockyard-dsh
+      name: '@dockyard-dsh/plugin'

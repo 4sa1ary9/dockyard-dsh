@@ -1,0 +1,66 @@
+{
+  "name": "@dockyard-dsh/plugin",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AITabby/dockyard-dsh.git"
+  },
+  "main": "./packages/dsh-plugin/dist/index.mjs",
+  "exports": {
+    ".": "./packages/dsh-plugin/dist/index.mjs",
+    "./client": "./packages/dsh-plugin/lib/client.js",
+    "./remote": "./packages/dsh-plugin/src/dockyard-typert.remote.mjs",
+    "./typert": "./packages/dsh-plugin/src/dockyard-typert.host.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "packages/dsh-plugin/dist",
+    "packages/dsh-plugin/lib/client.js",
+    "packages/dsh-plugin/cordis.patch.yml",
+    "SECURITY.md",
+    "packages/dsh-plugin/src/dockyard-typert-shared.mjs",
+    "packages/dsh-plugin/src/dockyard-typert.remote.mjs",
+    "packages/dsh-plugin/src/dockyard-typert.host.mjs"
+  ],
+  "scripts": {
+    "dev": "node apps/local-page/server.mjs",
+    "start": "node apps/local-page/server.mjs",
+    "build": "node scripts/build.mjs && node packages/dsh-plugin/scripts/build-package.mjs",
+    "build:plugin": "node packages/dsh-plugin/scripts/build-package.mjs",
+    "prepare": "node packages/dsh-plugin/scripts/build-package.mjs",
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./packages/dsh-plugin/cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-model-selection"
+      ],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-api-remotes": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.6",
+    "@earendil-works/pi-ai": "^0.82.1",
+    "react": "^18.3.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

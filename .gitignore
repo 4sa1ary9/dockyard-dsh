@@ -1,0 +1,14 @@
+node_modules/
+.pnpm-store/
+.DS_Store
+
+.env
+.env.*
+!.env.example
+*.log
+*.tgz
+
+.dockyard-dsh/
+
+# Keep packages/dsh-plugin/dist and packages/dsh-plugin/lib/client.js tracked:
+# they are the prebuilt entry points used by GitHub installs.
