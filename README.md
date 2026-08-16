@@ -60,7 +60,7 @@ dsh --version
 pnpm --version
 ```
 
-上游安装和兼容性变化以 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness) 为准。
+上游安装和兼容性变化以 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness) 为准。当前 bundle 已按 `@deepseek-ai/dsh@0.1.0-rc.6` 验证。
 
 #### 最简便的方式：直接安装到 DSH Web profile
 
@@ -235,7 +235,7 @@ dsh --version
 pnpm --version
 ```
 
-Follow the [official DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) for upstream installation and compatibility changes.
+Follow the [official DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) for upstream installation and compatibility changes. The current bundle is verified against `@deepseek-ai/dsh@0.1.0-rc.6`.
 
 #### Shortest path: install directly into the DSH Web profile
 
