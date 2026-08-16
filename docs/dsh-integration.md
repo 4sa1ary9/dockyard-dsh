@@ -33,13 +33,14 @@ The Codex module uses the locally imported OAuth account and the native Codex Re
 
 Browser-imported accounts are stored as provider-owned official OAuth sessions with opaque credential references. Refresh tokens remain in secure storage so providers with refresh support can renew short-lived access tokens after a DSH/computer restart; provider revocation or protocol changes still require reauthorization. Scanning an existing desktop/CLI session is separate from browser Add, and an existing account never causes Add to re-import the current active session. Provider changes to OAuth endpoints or token fields are treated as unavailable/degraded until verified.
 
-## Isolated local profile test
+## Isolated local Web profile test
 
-Do not change the normal DSH profile while testing. Install the local bundle into a temporary profile/home, then boot that profile:
+Do not change the normal DSH profile while testing. Install the local bundle into a temporary Web profile/home, then boot the actual Web runner:
 
 ```sh
-DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile dockyard-test add /Users/aitabby/projects/Dockyard\ DSH
-DSH_HOME=/tmp/dockyard-dsh-home dsh --profile dockyard-test
+DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add /Users/aitabby/projects/Dockyard\ DSH
+DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
+DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
 The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.0` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.

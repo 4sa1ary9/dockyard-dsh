@@ -44,7 +44,7 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 
 纯 JavaScript 的部分未来可以继续做跨平台抽象，但本仓库当前不能宣传为 macOS/Windows 通用。如果你使用 Windows，请等待 Windows backend 和真实 E2E 验证完成。
 
-### 安装前提：先安装 DSH，再克隆 Dockyard DSH
+### 安装前提：先安装 DSH，再安装 Dockyard DSH
 
 Dockyard DSH 是 DSH plugin，不是独立的 agent。请先安装 DSH CLI，并确认 `dsh` 命令可用。
 
@@ -54,65 +54,59 @@ Dockyard DSH 是 DSH plugin，不是独立的 agent。请先安装 DSH CLI，并
 # DSH 当前是 developer preview；请使用上游要求的 Node.js 版本。
 # 当前上游 package.json 要求 Node 22.19+ 的 22.x，或 Node 24+。
 npm install --global @deepseek-ai/dsh
+npm install --global pnpm
+
 dsh --version
+pnpm --version
 ```
 
 上游安装和兼容性变化以 [DeepSeek Harness 官方仓库](https://github.com/deepseek-ai/deepseek-harness) 为准。
 
-#### 最稳妥的方式：克隆后安装
+#### 最简便的方式：直接安装到 DSH Web profile
+
+`web` 是 DSH 自带的完整 Web profile；不要新建只包含 Dockyard bundle 的空 profile，否则不会启动 Web GUI。
+
+```sh
+dsh plugin --profile web add github:AITabby/dockyard-dsh
+dsh web
+```
+
+默认访问 `http://127.0.0.1:3080`。首次启动可先检查组合配置：
+
+```sh
+dsh web --dump-config
+```
+
+如需固定版本，建议 pin 到已验证的 commit：
+
+```sh
+dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
+```
+
+当前发布 commit 已提交可运行的 host/client bundle，安装时不执行 `prepare`，因此 GitHub 直装不需要额外的 `allowBuilds` 配置。若你 pin 到旧 commit，或 pnpm 明确报告了其他构建脚本，请只在检查源码后按终端提示配置对应 profile 的 `pnpm-workspace.yaml`。
+
+#### 需要本地修改时：克隆后安装
 
 ```sh
 git clone https://github.com/AITabby/dockyard-dsh.git
 cd dockyard-dsh
-
-# 安装仓库依赖；prepare 会生成/刷新可分发 bundle。
 npm install
+npm test                 # 可选：验证环境
+npm run build            # 修改 source 或 bundle 过期时需要
 
-# 推荐先做一次本地验证。
-npm test
-npm run build
+dsh plugin --profile web add .
+dsh web
 ```
 
-把本地 checkout 安装到一个隔离的 DSH profile：
+要隔离测试、不影响默认 DSH home：
 
 ```sh
-DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile dockyard-dsh add .
-DSH_HOME=/tmp/dockyard-dsh-home dsh --profile dockyard-dsh --dump-config
-DSH_HOME=/tmp/dockyard-dsh-home dsh --profile dockyard-dsh
+DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add .
+DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
+DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
-验证通过后，日常使用可以省略临时 `DSH_HOME`，直接安装到默认 DSH home：
-
-```sh
-dsh plugin --profile dockyard-dsh add .
-dsh --profile dockyard-dsh
-```
-
-首次运行建议保留 `--dump-config`，确认配置中出现 `@dockyard-dsh/plugin` bundle。
-
-#### 更简单的方式：不克隆，直接从 GitHub 安装
-
-仓库公开后，可以直接让 DSH 从 GitHub 安装：
-
-```sh
-dsh plugin --profile dockyard-dsh add github:AITabby/dockyard-dsh
-dsh --profile dockyard-dsh
-```
-
-如需固定到某一次提交，使用：
-
-```sh
-dsh plugin --profile dockyard-dsh add github:AITabby/dockyard-dsh#<commit-sha>
-```
-
-GitHub 直装最短，但 DSH 使用 pnpm 安装 git dependency 时，可能会提示允许执行该包的 `prepare`。这是安装器对远程代码执行的安全确认：请先阅读源码，只对信任的版本允许构建，再按终端输出把准确的包名加入对应 profile 的 `pnpm-workspace.yaml`，通常形如：
-
-```yaml
-allowBuilds:
-  '@dockyard-dsh/plugin': true
-```
-
-如果你不想处理这个确认，使用上面的“克隆后安装”方式最简单、最可控。本仓库会提交已经生成的 `packages/dsh-plugin/dist/index.mjs` 和 `packages/dsh-plugin/lib/client.js`，确保 checkout 本身包含可运行的发布入口。
+仓库已提交 `packages/dsh-plugin/dist/index.mjs` 和 `packages/dsh-plugin/lib/client.js`；普通用户不需要先运行测试或构建即可使用已发布 commit。
 
 ### DSH 内的命令
 
@@ -136,7 +130,7 @@ allowBuilds:
 
 - **Codex、Antigravity、Grok、Claude、Cursor** 的“登录添加账号”默认由 DSH 直接打开官方浏览器授权页，不要求本机先安装 CLI；CLI 仅作为兼容性 fallback。
 - Codex 使用 loopback PKCE；Antigravity 使用 Google loopback OAuth；Grok 使用 xAI loopback OAuth；Cursor 使用官方 `loginDeepControl` + `/auth/poll`；Claude 使用官方网页回调，手动输入时要求粘贴带 `state` 的完整回调地址或 `code#state`。
-- Antigravity 的 Google OAuth client ID/secret 必须通过 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` 和 `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET` 提供，仓库不内置凭据。
+- Antigravity 的 Google OAuth client ID/secret 必须通过 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` 和 `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET` 提供，仓库不内置凭据；需要浏览器 OAuth 时，先在启动 DSH 的 shell 中设置这两个环境变量（或写入 `~/.zshrc`），不要提交到仓库。
 - **扫描**仍可读取本机已有的官方客户端/CLI 会话；扫描和浏览器新增账号不会互相替代。
 - provider 的 OAuth endpoint、token response 或授权范围变化时，Dockyard 会显示 unavailable/degraded，不猜测未验证的字段。
 
@@ -200,7 +194,7 @@ Current provider modules:
 - **Codex** — official browser OAuth, CLI fallback, and native Responses transport.
 - **Antigravity** — Google browser OAuth, official local session, live model catalog, quota/credits, and native Gemini SSE transport.
 - **Grok** — xAI browser OAuth, CLI fallback, live model catalog, official Build credits periods, and provider-native streaming. Quota uses the official `/billing?format=credits` surface (forwarding `GetGrokCreditsConfig`); if the upstream only returns a period, the remaining value stays unknown.
-- **Claude** — official browser OAuth (including manual authorization-code entry), CLI fallback, and native request adapter.
+- **Claude** — official browser OAuth (including state-bound manual callback/code entry), CLI fallback, and native request adapter.
 - **Cursor** — official browser login polling, CLI fallback, and native request adapter.
 
 When an official client, CLI, or OAuth source is missing or not signed in, Dockyard reports an explicit unavailable/degraded state. It does not invent accounts, models, versions, plans, or quota values.
@@ -227,7 +221,7 @@ The complete integration currently depends on macOS-specific behavior:
 
 Some pure JavaScript layers can be abstracted for other platforms later, but this repository must currently be treated as a macOS-only plugin.
 
-### Prerequisite: install DSH before cloning
+### Prerequisite: install DSH before installing Dockyard DSH
 
 Dockyard DSH is a DSH plugin, not a standalone agent. Install the DSH CLI first and verify that the `dsh` command is available:
 
@@ -235,59 +229,59 @@ Dockyard DSH is a DSH plugin, not a standalone agent. Install the DSH CLI first 
 # DSH is currently a developer preview. Use the Node.js version required by DSH.
 # The current upstream package declares Node 22.19+ on the 22.x line, or Node 24+.
 npm install --global @deepseek-ai/dsh
+npm install --global pnpm
+
 dsh --version
+pnpm --version
 ```
 
 Follow the [official DeepSeek Harness repository](https://github.com/deepseek-ai/deepseek-harness) for upstream installation and compatibility changes.
 
-#### Recommended: clone and install
+#### Shortest path: install directly into the DSH Web profile
+
+`web` is DSH's complete built-in Web profile. Do not create an empty custom profile if you want the GUI.
+
+```sh
+dsh plugin --profile web add github:AITabby/dockyard-dsh
+dsh web
+```
+
+The default URL is `http://127.0.0.1:3080`. To inspect the composed configuration first:
+
+```sh
+dsh web --dump-config
+```
+
+For a reproducible install, pin a verified commit:
+
+```sh
+dsh plugin --profile web add github:AITabby/dockyard-dsh#<commit-sha>
+```
+
+The current release commit includes the runnable host/client bundles and does not run `prepare` at install time, so a direct GitHub install does not need an extra `allowBuilds` setting. If you pin an older commit, or pnpm explicitly reports another build hook, inspect the source and follow the exact profile configuration printed by the command.
+
+#### When you need local changes: clone and install
 
 ```sh
 git clone https://github.com/AITabby/dockyard-dsh.git
 cd dockyard-dsh
 npm install
-npm test
-npm run build
+npm test                 # optional environment check
+npm run build            # needed after source or bundle changes
+
+dsh plugin --profile web add .
+dsh web
 ```
 
-Install the checkout into an isolated profile first:
+For an isolated test that does not touch the default DSH home:
 
 ```sh
-DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile dockyard-dsh add .
-DSH_HOME=/tmp/dockyard-dsh-home dsh --profile dockyard-dsh --dump-config
-DSH_HOME=/tmp/dockyard-dsh-home dsh --profile dockyard-dsh
+DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add .
+DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
+DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
-After verification, omit the temporary `DSH_HOME` to use the default DSH home:
-
-```sh
-dsh plugin --profile dockyard-dsh add .
-dsh --profile dockyard-dsh
-```
-
-#### Shortest path: install directly from GitHub
-
-Once the repository is public, DSH can install it without a manual clone:
-
-```sh
-dsh plugin --profile dockyard-dsh add github:AITabby/dockyard-dsh
-dsh --profile dockyard-dsh
-```
-
-For a reproducible install, pin a commit:
-
-```sh
-dsh plugin --profile dockyard-dsh add github:AITabby/dockyard-dsh#<commit-sha>
-```
-
-Because a GitHub install is a pnpm git dependency, DSH may ask for permission to run the package's `prepare` script. Review the source and allow the exact package key printed by pnpm, usually:
-
-```yaml
-allowBuilds:
-  '@dockyard-dsh/plugin': true
-```
-
-If you want to avoid that prompt, clone the repository and run `npm install` instead. The repository intentionally carries the generated `packages/dsh-plugin/dist/index.mjs` and `packages/dsh-plugin/lib/client.js` artifacts so a checkout contains the runnable release entry points.
+The repository commits `packages/dsh-plugin/dist/index.mjs` and `packages/dsh-plugin/lib/client.js`, so normal users do not need to run tests or build before using a released commit.
 
 ### DSH commands
 
@@ -308,7 +302,8 @@ For a new account, use `/dockyard login <provider>` to open official browser OAu
 ### Official browser OAuth and active-session boundaries
 
 - **Codex, Antigravity, Grok, Claude, and Cursor** open the provider's official browser authorization page directly when Login/Add is clicked; a local CLI is not required. The CLI remains a compatibility fallback.
-- Codex uses loopback PKCE; Antigravity uses Google loopback OAuth; Grok uses xAI loopback OAuth; Cursor uses the official `loginDeepControl` + `/auth/poll` flow; Claude uses the official hosted callback and supports manual authorization-code entry.
+- Codex uses loopback PKCE; Antigravity uses Google loopback OAuth; Grok uses xAI loopback OAuth; Cursor uses the official `loginDeepControl` + `/auth/poll` flow; Claude uses the official hosted callback and requires a callback URL containing `state` (or `code#state`) for manual entry.
+- Antigravity browser OAuth requires `DOCKYARD_ANTIGRAVITY_CLIENT_ID` and `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET`; the repository does not embed OAuth credentials. Set them in the shell that launches DSH (or in `~/.zshrc`), never commit them. Without them, use an existing local/CLI session through Scan or the CLI fallback.
 - **Scan** can still read an existing official desktop/CLI session. Scan and browser account addition are separate operations.
 - If a provider changes an OAuth endpoint, token response, or scope, Dockyard reports unavailable/degraded rather than guessing undocumented fields.
 
