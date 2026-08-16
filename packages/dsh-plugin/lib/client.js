@@ -15077,14 +15077,14 @@ button[role="menuitemradio"] [class$="_description"]{display:none!important}
 .dockyard-dsh-model-group-toggle:hover,.dockyard-dsh-model-group-toggle:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-model-group-toggle .dockyard-dsh-model-group-chevron{margin-left:auto}
 section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{display:none!important}
-.dockyard-dsh-trigger{display:inline-flex;align-items:center;gap:4px;max-width:160px;height:28px;padding:0 8px;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#c7ccd5);background:transparent;cursor:pointer;font:500 13px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
+.dockyard-dsh-trigger{display:inline-flex;align-items:center;gap:5px;max-width:160px;height:28px;padding:0 8px;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#c7ccd5);background:transparent;cursor:pointer;font:500 13px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
 .dockyard-dsh-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-trigger:focus-visible{outline:2px solid var(--dsw-alias-border-l3,#8fa3c7);outline-offset:1px}
 .dockyard-dsh-trigger[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-add-trigger{display:inline-flex;align-items:center;justify-content:center;gap:3px;height:28px;margin-left:2px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(255,255,255,.16));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,#c7ccd5);cursor:pointer;font:500 12px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
 .dockyard-dsh-add-trigger:hover,.dockyard-dsh-add-trigger:focus-visible{border-color:rgba(121,214,200,.6);background:rgba(121,214,200,.09);color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-add-trigger:focus-visible{outline:2px solid var(--dsw-alias-border-l3,#8fa3c7);outline-offset:1px}
-.dockyard-dsh-dot{width:6px;height:6px;flex:none;border-radius:50%;background:var(--dsw-alias-label-caption,#8b93a1)}
+.dockyard-dsh-dot{display:inline-block;width:6px;height:6px;flex:none;border-radius:50%;background:var(--dsw-alias-label-caption,#8b93a1);margin-top:0.5px}
 .dockyard-dsh-dot[data-live=true]{background:#79d6c8;box-shadow:0 0 8px rgba(121,214,200,.8)}
 .dockyard-dsh-dot[data-loading=true]{background:#cbb7ff;animation:dockyard-dsh-pulse 1s ease-in-out infinite}
 .dockyard-dsh-label{min-width:0;overflow:hidden;text-overflow:ellipsis}
@@ -15301,11 +15301,16 @@ function providerFromSnapshot(snapshot, providerId) {
   return snapshot?.providers?.find((provider) => provider.providerId === providerId) ?? null;
 }
 function providerDisplayName(providerId, manifest) {
-  if (providerId === "antigravity") return "Gemini / Antigravity";
+  if (providerId === "antigravity") return "Antigravity";
   if (providerId === "minimax" || providerId === "minimax-cn") return "MiniMax";
   if (providerId === "deepseek" || providerId === "deepseek-official") return "DeepSeek";
   if (providerId === "openrouter") return "OpenRouter";
   return manifest?.displayName ?? providerId ?? "provider";
+}
+function displayModelId(providerId, modelId) {
+  const value = String(modelId ?? "");
+  if (providerId === "antigravity") return value.replace(/^gemini[-_:]/i, "");
+  return value;
 }
 function connectedAccountSignature(snapshot) {
   if (!Array.isArray(snapshot?.providers)) return "";
@@ -15353,6 +15358,7 @@ function quotaSummary(account) {
   const percent = quotaPercent(first);
   if (percent !== null) return `${percent}%`;
   if (first?.remaining !== null && first?.remaining !== void 0) return formatNumber(first.remaining);
+  if (account?.resources?.quotaDiagnostic) return "\u989D\u5EA6\u672A\u77E5";
   return account ? "\u5DF2\u8FDE\u63A5" : "\u672A\u6DFB\u52A0";
 }
 function providerAccount(provider) {
@@ -15373,7 +15379,8 @@ function accountName(account) {
 }
 function accountIdentityLine(account) {
   const identitySource = account?.resources?.identitySource;
-  if (identitySource === "official_cli_auth_status") return "\u5B98\u65B9\u767B\u5F55\u6001 \xB7 \u90AE\u7BB1\u5DF2\u8BC6\u522B";
+  if (account?.email && account?.resources?.authSource === "official_cursor_browser_oauth") return "\u5B98\u65B9\u6D4F\u89C8\u5668 OAuth \xB7 \u90AE\u7BB1\u5DF2\u8BC6\u522B";
+  if (["official_cli_auth_status", "official_client_auth_status"].includes(identitySource)) return "\u5B98\u65B9\u767B\u5F55\u6001 \xB7 \u90AE\u7BB1\u5DF2\u8BC6\u522B";
   if (account?.resources?.sessionFingerprint) return `\u5B98\u65B9\u4F1A\u8BDD\u6307\u7EB9 \xB7 ${account.resources.sessionFingerprint}`;
   return account?.accountId ?? "\u672A\u77E5\u8D26\u53F7";
 }
@@ -15439,6 +15446,7 @@ var DockyardClientController = class {
         authorizationUrl: result.authorizationUrl ?? null,
         instructions: result.instructions ?? null,
         inputRequired: result.inputRequired === true,
+        authorizationCodeRequired: result.authorizationCodeRequired === true,
         diagnostic: result.diagnostic ?? null
       };
       if (result.diagnostic) next.message = result.diagnostic;
@@ -15562,18 +15570,30 @@ var DockyardClientController = class {
     const current = this.store.getSnapshot();
     if (current.auth?.providerId === providerId && ["pending", "processing"].includes(current.auth.status) && current.auth.sessionId) {
       this.scheduleAuth(providerId, current.auth.sessionId);
-      this.setState({ action: null, status: "ready", error: null, message: "\u5DF2\u6709\u767B\u5F55\u9A8C\u8BC1\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u4F7F\u7528\u5F53\u524D Google \u9875\u9762\uFF1B\u4E0D\u4F1A\u91CD\u590D\u6253\u5F00\u3002" });
+      this.setState({ action: null, status: "ready", error: null, message: "\u5DF2\u6709\u767B\u5F55\u9A8C\u8BC1\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u4F7F\u7528\u5F53\u524D\u5B98\u65B9\u6388\u6743\u9875\u9762\uFF1B\u4E0D\u4F1A\u91CD\u590D\u6253\u5F00\u3002" });
       return current.auth;
     }
     this.setState({ action: "login", status: "loading", providerId, error: null, message: null });
+    const authWindow = typeof window !== "undefined" && typeof window.open === "function" ? window.open("about:blank", "dockyard-dsh-oauth", "popup") : null;
+    try {
+      if (authWindow) authWindow.opener = null;
+    } catch {
+    }
     try {
       const value = await this.call("login", { providerId });
       const result = this.applyValue(value, providerId);
+      if (result?.authorizationUrl) {
+        if (authWindow && !authWindow.closed) authWindow.location.href = result.authorizationUrl;
+        else if (typeof window !== "undefined") window.open(result.authorizationUrl, "dockyard-dsh-oauth", "popup");
+      } else {
+        authWindow?.close?.();
+      }
       if (["pending", "processing"].includes(result?.status) && result.sessionId) {
         this.scheduleAuth(providerId, result.sessionId);
       }
       return result;
     } catch (error51) {
+      authWindow?.close?.();
       this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
       return null;
     }
@@ -15585,7 +15605,7 @@ var DockyardClientController = class {
       const result = this.applyValue(value, providerId);
       if (["pending", "processing"].includes(result?.status) && result.sessionId) {
         this.scheduleAuth(providerId, result.sessionId);
-        this.setState({ message: "\u6388\u6743\u7801\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7B49\u5F85 Google \u9A8C\u8BC1\u7ED3\u679C\u2026" });
+        this.setState({ message: "\u6388\u6743\u7801\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7B49\u5F85\u5B98\u65B9\u9A8C\u8BC1\u7ED3\u679C\u2026" });
       }
       return result;
     } catch (error51) {
@@ -15649,7 +15669,7 @@ var DockyardClientController = class {
       const scanNotice = discovery.error ? `\uFF1B\u53D1\u73B0\u767B\u9646\u6001\u5237\u65B0\u5931\u8D25\uFF1A${discovery.error}` : "";
       const provider = providerFromSnapshot(this.store.getSnapshot().snapshot, providerId);
       const supportsOAuthLogin = provider?.manifest?.capabilities?.includes("oauth_authorization");
-      const reentry = supportsOAuthLogin ? "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u70B9\u51FB\u91CD\u65B0\u6388\u6743\u3002" : "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u5148\u5728\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u3002";
+      const reentry = supportsOAuthLogin ? "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u70B9\u51FB\u91CD\u65B0\u6388\u6743\u3002" : "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u3002";
       this.setState({ auth: null, message: `\u8D26\u53F7\u5DF2\u79FB\u9664${diagnostics}${scanNotice}\uFF1B${reentry}` });
       return value;
     } catch (error51) {
@@ -15700,7 +15720,20 @@ function ChevronIcon({ open }) {
 }
 function quotaView(account) {
   const rows = quotaRowsForAccount(account);
-  if (rows.length === 0) return h("div", { className: "dockyard-dsh-muted" }, "provider \u5C1A\u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3");
+  if (rows.length === 0) {
+    const diagnostic = account?.resources?.quotaDiagnostic ?? "provider \u5C1A\u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3";
+    const quotaUrl = account?.resources?.quotaUrl;
+    return h(
+      "div",
+      { className: "dockyard-dsh-muted" },
+      diagnostic,
+      quotaUrl ? h("span", null, " \xB7 ", h("a", {
+        href: quotaUrl,
+        target: "_blank",
+        rel: "noreferrer noopener"
+      }, "\u6253\u5F00\u5B98\u65B9\u7528\u91CF\u9875\u9762")) : null
+    );
+  }
   return h("div", { className: "dockyard-dsh-quota" }, rows.map((window2, index) => {
     const percent = quotaPercent(window2);
     const value = window2.limit === null || window2.limit === void 0 ? formatNumber(window2.remaining) : `${formatNumber(window2.remaining)} / ${formatNumber(window2.limit)}`;
@@ -15797,7 +15830,7 @@ function CandidateList({ scan, providerId, controller, busy, accounts = [] }) {
     }, "\u6DFB\u52A0")
   )));
 }
-function AntigravityLoginGuide({ auth, providerId, controller, busy }) {
+function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
   const [code, setCode] = useState("");
   const submit = async (event) => {
     event.preventDefault();
@@ -15805,11 +15838,12 @@ function AntigravityLoginGuide({ auth, providerId, controller, busy }) {
     const result = await controller.submitAuthorizationCode(providerId, auth.sessionId, code);
     if (result) setCode("");
   };
+  const providerLabel = providerId === "antigravity" ? "Antigravity" : "\u5B98\u65B9\u8BA2\u9605";
   return h(
     "div",
     { className: "dockyard-dsh-login-guide" },
-    h("div", { className: "dockyard-dsh-login-guide-title" }, "Google \u9A8C\u8BC1\u767B\u5F55 Antigravity"),
-    h("div", { className: "dockyard-dsh-login-guide-copy" }, "DSH \u5DF2\u5728\u540E\u53F0\u542F\u52A8 agy \u5B98\u65B9\u9A8C\u8BC1\u6D41\u7A0B\uFF0C\u4E0D\u9700\u8981\u5BA2\u6237\u7AEF\u6216\u7EC8\u7AEF\uFF1A"),
+    h("div", { className: "dockyard-dsh-login-guide-title" }, `${providerLabel} \u6D4F\u89C8\u5668\u6388\u6743`),
+    h("div", { className: "dockyard-dsh-login-guide-copy" }, "DSH \u5DF2\u6253\u5F00\u5B98\u65B9\u6388\u6743\u9875\u9762\uFF0C\u8BF7\u9009\u62E9\u8981\u6DFB\u52A0\u7684\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1A"),
     h(
       "ol",
       { className: "dockyard-dsh-login-guide-steps" },
@@ -15817,19 +15851,19 @@ function AntigravityLoginGuide({ auth, providerId, controller, busy }) {
         "li",
         { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "1"),
-        h("span", null, "\u5728\u81EA\u52A8\u6253\u5F00\u7684 Google \u9875\u9762\u9009\u62E9\u8981\u6DFB\u52A0\u7684\u8D26\u53F7\u5E76\u5B8C\u6210\u9A8C\u8BC1\u3002")
+        h("span", null, "\u5728\u5B98\u65B9\u9875\u9762\u9009\u62E9\u8981\u6DFB\u52A0\u7684\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\u3002")
       ),
       h(
         "li",
         { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "2"),
-        h("span", null, "\u9A8C\u8BC1\u5B8C\u6210\u540E\u56DE\u5230\u8FD9\u91CC\uFF0CDSH \u4F1A\u81EA\u52A8\u63A5\u5165\u8D26\u53F7\u548C\u989D\u5EA6\u3002")
+        h("span", null, "\u6388\u6743\u5B8C\u6210\u540E\u56DE\u5230\u8FD9\u91CC\uFF0CDSH \u4F1A\u81EA\u52A8\u63A5\u5165\u8D26\u53F7\uFF0C\u5E76\u663E\u793A\u5B98\u65B9\u8FD4\u56DE\u7684\u53EF\u7528\u6027\u6216\u989D\u5EA6\u4FE1\u606F\u3002")
       ),
       h(
         "li",
         { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "3"),
-        h("span", null, "\u5982\u679C\u6D4F\u89C8\u5668\u6CA1\u6709\u81EA\u52A8\u56DE\u8C03\uFF0C\u628A\u9875\u9762\u7ED9\u51FA\u7684\u6388\u6743\u7801\u6216\u56DE\u8C03\u5730\u5740\u7C98\u8D34\u5230\u4E0B\u9762\u3002")
+        h("span", null, "\u5982\u679C\u9875\u9762\u8FD4\u56DE\u6388\u6743\u7801\uFF0C\u8BF7\u7C98\u8D34\u5305\u542B state \u7684\u5B8C\u6574\u56DE\u8C03\u5730\u5740\uFF0C\u6216\u4F7F\u7528 code#state \u683C\u5F0F\u3002")
       )
     ),
     h(
@@ -15839,8 +15873,8 @@ function AntigravityLoginGuide({ auth, providerId, controller, busy }) {
         value: code,
         disabled: busy,
         onChange: (event) => setCode(event.target.value),
-        placeholder: "\u6388\u6743\u7801 / \u56DE\u8C03\u5730\u5740\uFF08\u53EF\u9009\uFF09",
-        "aria-label": "Google \u6388\u6743\u7801\u6216\u56DE\u8C03\u5730\u5740"
+        placeholder: "\u5B8C\u6574\u56DE\u8C03\u5730\u5740\u6216 code#state",
+        "aria-label": "\u5B98\u65B9\u6388\u6743\u7801\u6216\u56DE\u8C03\u5730\u5740"
       }),
       h("button", { type: "submit", className: "dockyard-dsh-action", disabled: busy || !code.trim() }, "\u63D0\u4EA4\u9A8C\u8BC1")
     ),
@@ -15923,6 +15957,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
   const [labelDraft, setLabelDraft] = useState("");
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
   const modelLabel = model?.name ?? current?.model ?? "\u672A\u9009\u62E9\u6A21\u578B";
+  const compactModelId = displayModelId(providerId, current?.model);
   const tier = current?.reasoningEffort ?? model?.reasoning?.defaultEffort ?? null;
   const busy = native.action !== null;
   const keys = native.keys ?? [];
@@ -15961,7 +15996,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
         { className: "dockyard-dsh-head-copy" },
         h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD KEY PROVIDER"),
         h("div", { className: "dockyard-dsh-title" }, title),
-        h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${current?.model && modelLabel !== current.model ? ` \xB7 ${current.model}` : ""}`),
+        h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${compactModelId && modelLabel !== current.model && modelLabel !== compactModelId ? ` \xB7 ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null
       ),
       h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "\u5173\u95ED" }, "\xD7")
@@ -16146,6 +16181,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
   const [tierBusy, setTierBusy] = useState(false);
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
   const modelLabel = model?.name ?? current?.model ?? "\u672A\u9009\u62E9\u6A21\u578B";
+  const compactModelId = displayModelId(providerId, current?.model);
   const tier = current?.reasoningEffort ?? model?.reasoning?.defaultEffort ?? null;
   const accounts = provider?.accounts ?? [];
   const activeId = provider?.defaultAccountId ?? null;
@@ -16178,7 +16214,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         { className: "dockyard-dsh-head-copy" },
         h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD SUBSCRIPTION"),
         h("div", { className: "dockyard-dsh-title" }, providerDisplayName(providerId, provider?.manifest) || group?.name),
-        h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${current?.model && modelLabel !== current.model ? ` \xB7 ${current.model}` : ""}`),
+        h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${compactModelId && modelLabel !== current.model && modelLabel !== compactModelId ? ` \xB7 ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null
       ),
       h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "\u5173\u95ED" }, "\xD7")
@@ -16196,7 +16232,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
     h(
       "div",
       { className: "dockyard-dsh-popup-scroll" },
-      providerId === "antigravity" ? h("div", { className: "dockyard-dsh-account-note" }, "\u6DFB\u52A0\u8D26\u53F7\u65F6\uFF0CDSH \u4F1A\u81EA\u52A8\u6253\u5F00 Google \u5B98\u65B9\u9A8C\u8BC1\u9875\uFF1B\u9009\u62E9\u8D26\u53F7\u540E\u4F1A\u81EA\u52A8\u63A5\u5165\u989D\u5EA6\uFF0C\u4E0D\u9700\u8981\u5BA2\u6237\u7AEF\u6216\u7EC8\u7AEF\u3002") : null,
+      providerId === "antigravity" ? h("div", { className: "dockyard-dsh-account-note" }, "\u6DFB\u52A0\u8D26\u53F7\u65F6\uFF0CDSH \u4F1A\u63A5\u5165 Google \u5B98\u65B9\u4F1A\u8BDD\u5E76\u8BFB\u53D6\u5B9E\u65F6\u989D\u5EA6\uFF1B\u8BF7\u6309\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u6388\u6743\u9875\u63D0\u793A\u5B8C\u6210\u767B\u5F55\u3002") : null,
       h(
         "div",
         { className: "dockyard-dsh-toolbar" },
@@ -16205,7 +16241,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login" ? supportsOAuthLogin ? "\u7B49\u5F85\u9A8C\u8BC1\u2026" : "\u8BFB\u53D6\u8BF4\u660E\u2026" : authInProgress ? "\u9A8C\u8BC1\u8FDB\u884C\u4E2D\u2026" : needsReauthorization && supportsOAuthLogin ? "\u21BB \u91CD\u65B0\u6388\u6743" : supportsOAuthLogin ? "\uFF0B \u767B\u5F55\u6DFB\u52A0\u8D26\u53F7" : "\u5B98\u65B9\u767B\u5F55\u8BF4\u660E"),
         h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: () => controller.scan(providerId) }, controlState.action === "scan" ? "\u626B\u63CF\u4E2D\u2026" : "\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001")
       ),
-      controlState.auth?.providerId === providerId ? providerId === "antigravity" ? h(AntigravityLoginGuide, { auth: controlState.auth, providerId, controller, busy }) : h(
+      controlState.auth?.providerId === providerId ? controlState.auth.authorizationCodeRequired || providerId === "antigravity" ? h(AuthorizationCodeLoginGuide, { auth: controlState.auth, providerId, controller, busy }) : h(
         "div",
         { className: "dockyard-dsh-status dockyard-dsh-auth-status" },
         h("span", { className: "dockyard-dsh-status-copy" }, `${controlState.auth.status}${controlState.auth.instructions ? ` \xB7 ${controlState.auth.instructions}` : ""}`),
@@ -16241,7 +16277,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         "div",
         { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u5DF2\u8FDE\u63A5\u8D26\u53F7"), h("span", { className: "dockyard-dsh-section-value" }, `${accounts.length}`)),
-        accounts.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, supportsOAuthLogin ? "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u70B9\u51FB\u201C\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u201D\u540E\u4F1A\u6253\u5F00 provider \u5B98\u65B9\u9A8C\u8BC1\u9875\u3002" : "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u5E76\u6DFB\u52A0\u5019\u9009\u3002") : accounts.map((account) => h(AccountCard, {
+        accounts.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, supportsOAuthLogin ? "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u70B9\u51FB\u201C\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u201D\u540E\u4F1A\u6253\u5F00 provider \u5B98\u65B9\u9A8C\u8BC1\u9875\u3002" : "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u5E76\u6DFB\u52A0\u5019\u9009\u3002") : accounts.map((account) => h(AccountCard, {
           key: account.accountId,
           account,
           current: account.accountId === activeId,
@@ -16320,7 +16356,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     if (typeof modelDirectory?.load !== "function") return void 0;
     const previous = accountSignatureRef.current;
     accountSignatureRef.current = accountSignature;
-    if (previous === void 0 || previous === accountSignature) return void 0;
+    if (!accountSignature || previous !== void 0 && previous === accountSignature) return void 0;
     const timer = setTimeout(() => {
       const loading2 = modelDirectory.load();
       loading2?.catch?.(() => {
@@ -16341,7 +16377,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     const hasProvider = Boolean(provider);
     if (hasProvider) {
       void controller.refresh(providerId);
-      const needsAntigravityIdentityScan = providerId === "antigravity" && (provider.accounts ?? []).some((account) => !account.email && !["official_cli_auth_status", "local_oauth_session_fingerprint"].includes(account.resources?.identitySource));
+      const needsAntigravityIdentityScan = providerId === "antigravity" && (provider.accounts ?? []).some((account) => !account.email && !["official_cli_auth_status", "official_client_auth_status", "local_oauth_session_fingerprint"].includes(account.resources?.identitySource));
       if (needsAntigravityIdentityScan) void controller.scan(providerId);
       const timer2 = setInterval(() => controller.refresh(providerId), 3e4);
       return () => clearInterval(timer2);

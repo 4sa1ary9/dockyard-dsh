@@ -65,6 +65,13 @@ export async function fetchJson(url, init = {}, { timeoutMs = 20_000, fetchImpl 
       const error = new Error(`Provider request failed (${response.status})`);
       error.status = response.status;
       error.bodyKeys = body && typeof body === "object" ? Object.keys(body) : [];
+      const upstreamError = body?.error;
+      const upstreamCode = typeof upstreamError === "string"
+        ? upstreamError
+        : upstreamError && typeof upstreamError === "object"
+          ? upstreamError.code ?? upstreamError.type
+          : body?.error_code ?? body?.code;
+      if (typeof upstreamCode === "string" && upstreamCode.length > 0) error.upstreamCode = upstreamCode;
       throw error;
     }
     return { body, response };
@@ -82,6 +89,10 @@ export function redactError(error) {
   return `${message}${detail}${code}`
     .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]")
     .replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]")
+    // Vendor API key shapes: sk-…/sk-ant-…, xai-…, ghp_…, etc. Require a
+    // dash/underscore prefix plus a long tail so normal words are not hit.
+    .replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]")
+    .replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]")
     .slice(0, 300);
 }
 

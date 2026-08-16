@@ -14,6 +14,7 @@ import {
   textFromContent,
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
+import { decodeJwtPayload } from "../../../packages/providers/src/provider-utils.mjs";
 
 const PROVIDER_ID = "antigravity";
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
@@ -49,6 +50,27 @@ function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
 
+function emailFromObject(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 5) return null;
+  const direct = firstString(value.email, value.userEmail, value.email_address, value.account?.email);
+  if (direct) return direct;
+  const idToken = firstString(value.id_token, value.idToken);
+  if (idToken) {
+    try {
+      const payload = decodeJwtPayload(idToken);
+      const fromClaims = firstString(payload?.email);
+      if (fromClaims) return fromClaims;
+    } catch {
+      // A malformed id_token must not fail the whole token read.
+    }
+  }
+  for (const child of Object.values(value)) {
+    const email = emailFromObject(child, depth + 1);
+    if (email) return email;
+  }
+  return null;
+}
+
 function tokenFromObject(value, depth = 0) {
   if (!value || typeof value !== "object" || depth > 5) return null;
   const direct = firstString(value.access_token, value.accessToken);
@@ -64,7 +86,7 @@ function readOfficialTokenFile(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
     const token = tokenFromObject(parsed);
-    return token ? { token, kind: "oauth" } : null;
+    return token ? { token, kind: "oauth", email: emailFromObject(parsed) } : null;
   } catch {
     return null;
   }
@@ -81,9 +103,13 @@ export function readAntigravityTokenFile({ env = process.env, home = homedir() }
 /** Resolve Antigravity's local OAuth token without spawning `agy -p`. */
 export function resolveAntigravityAccessToken({ credential, env = process.env, home = homedir() } = {}) {
   const stored = firstString(credential?.access, credential?.token);
-  if (stored) return { token: stored, kind: "oauth" };
+  if (stored) {
+    return { token: stored, kind: "oauth", email: emailFromObject(credential) };
+  }
   const fromCredentialObject = tokenFromObject(credential);
-  if (fromCredentialObject) return { token: fromCredentialObject, kind: "oauth" };
+  if (fromCredentialObject) {
+    return { token: fromCredentialObject, kind: "oauth", email: emailFromObject(credential) };
+  }
   const fromEnv = firstString(env.DOCKYARD_ANTIGRAVITY_ACCESS_TOKEN, env.GEMINI_ACCESS_TOKEN);
   if (fromEnv) return { token: fromEnv, kind: "oauth" };
   // Do not probe the macOS Keychain here. Integrated accounts are stored in
@@ -252,11 +278,13 @@ function responsePayload(value) {
 
 async function* streamAntigravityResponse(response) {
   let text = "";
-  let textClosed = false;
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
   let usage = null;
   let stop = "stop";
-  let toolIndex = 0;
-  yield { type: "block-start", index: 0, blockType: "text" };
+  let reasoning = null;
+  yield { type: "block-start", index: textIndex, blockType: "text" };
 
   for await (const event of readSseEvents(response)) {
     const payload = responsePayload(event.data);
@@ -273,21 +301,43 @@ async function* streamAntigravityResponse(response) {
     for (const part of candidate.content?.parts ?? candidate.parts ?? []) {
       if (part?.text) {
         if (part.thought === true || part.thoughtSignature) {
-          const index = 100;
-          yield { type: "reasoning-delta", index, text: part.text };
+          if (textOpen) {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+            textOpen = false;
+          }
+          if (!reasoning) {
+            reasoning = { index: nextIndex++, text: "" };
+            yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+          }
+          reasoning.text += part.text;
+          yield { type: "reasoning-delta", index: reasoning.index, text: part.text };
           continue;
         }
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
         text += part.text;
-        yield { type: "text-delta", index: 0, text: part.text };
+        yield { type: "text-delta", index: textIndex, text: part.text };
         continue;
       }
       const call = part?.functionCall ?? part?.function_call;
       if (!call) continue;
-      if (!textClosed) {
-        yield { type: "block-end", index: 0, block: { type: "text", text } };
-        textClosed = true;
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
       }
-      const index = ++toolIndex;
+      if (textOpen) {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+        textOpen = false;
+      }
+      const index = nextIndex++;
       const id = firstString(call.id, call.name, `tool-${index}`);
       const name = firstString(call.name, "tool");
       const argumentsValue = JSON.stringify(call.args ?? call.arguments ?? {});
@@ -297,7 +347,8 @@ async function* streamAntigravityResponse(response) {
       stop = "tool_calls";
     }
   }
-  if (!textClosed) yield { type: "block-end", index: 0, block: { type: "text", text } };
+  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text } };
   if (usage) yield { type: "usage", usage };
   yield { type: "finish", reason: finishReason(stop) };
 }

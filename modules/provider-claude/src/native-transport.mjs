@@ -177,12 +177,14 @@ function mergeUsage(previous, next) {
 
 async function* streamClaudeResponse(response) {
   let text = "";
-  let textClosed = false;
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
   let usage = null;
   let stop = "stop";
   const tools = new Map();
   const reasoning = new Map();
-  yield { type: "block-start", index: 0, blockType: "text" };
+  yield { type: "block-start", index: textIndex, blockType: "text" };
 
   for await (const event of readSseEvents(response)) {
     const payload = event.data;
@@ -193,40 +195,79 @@ async function* streamClaudeResponse(response) {
     }
     if (payload.type === "content_block_start") {
       const block = payload.content_block ?? {};
-      if (block.type === "tool_use") {
-        if (!textClosed) {
-          yield { type: "block-end", index: 0, block: { type: "text", text } };
-          textClosed = true;
+      if (block.type === "tool_use" || block.type === "thinking" || block.type === "redacted_thinking") {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+          textOpen = false;
         }
-        const index = Number(payload.index) + 1;
-        tools.set(payload.index, {
-          index,
-          id: firstString(block.id, `tool-${payload.index}`),
-          name: firstString(block.name, "tool"),
-          arguments: "",
-        });
-        yield { type: "block-start", index, blockType: "tool-call" };
+        const index = nextIndex++;
+        if (block.type === "tool_use") {
+          tools.set(payload.index, {
+            index,
+            id: firstString(block.id, `tool-${payload.index}`),
+            name: firstString(block.name, "tool"),
+            arguments: "",
+          });
+          yield { type: "block-start", index, blockType: "tool-call" };
+        } else {
+          reasoning.set(payload.index, { index, text: "" });
+          yield { type: "block-start", index, blockType: "reasoning" };
+        }
         continue;
       }
-      if (block.type === "thinking" || block.type === "redacted_thinking") {
-        const index = Number(payload.index) + 1;
-        reasoning.set(payload.index, index);
-        yield { type: "block-start", index, blockType: "reasoning" };
+      if (block.type === "text" && !textOpen) {
+        textIndex = nextIndex++;
+        text = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
       }
       continue;
     }
     if (payload.type === "content_block_delta") {
       const delta = payload.delta ?? {};
       if (delta.type === "text_delta" && delta.text) {
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
         text += delta.text;
-        yield { type: "text-delta", index: 0, text: delta.text };
+        yield { type: "text-delta", index: textIndex, text: delta.text };
       } else if (delta.type === "thinking_delta" && delta.thinking) {
-        const index = reasoning.get(payload.index) ?? Number(payload.index) + 1;
-        yield { type: "reasoning-delta", index, text: delta.thinking };
+        let state = reasoning.get(payload.index);
+        if (!state) {
+          if (textOpen) {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+            textOpen = false;
+          }
+          state = { index: nextIndex++, text: "" };
+          reasoning.set(payload.index, state);
+          yield { type: "block-start", index: state.index, blockType: "reasoning" };
+        }
+        state.text += delta.thinking;
+        yield { type: "reasoning-delta", index: state.index, text: delta.thinking };
       } else if (delta.type === "input_json_delta" && tools.has(payload.index)) {
         const tool = tools.get(payload.index);
         tool.arguments += delta.partial_json ?? "";
         yield { type: "tool-call-delta", index: tool.index, id: tool.id, name: tool.name, argumentsDelta: delta.partial_json ?? "" };
+      }
+      continue;
+    }
+    if (payload.type === "content_block_stop") {
+      const thought = reasoning.get(payload.index);
+      if (thought) {
+        yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
+        reasoning.delete(payload.index);
+      }
+      const tool = tools.get(payload.index);
+      if (tool) {
+        yield {
+          type: "block-end",
+          index: tool.index,
+          block: { type: "tool-call", id: tool.id, name: tool.name, arguments: tool.arguments || "{}" },
+        };
+        tools.delete(payload.index);
       }
       continue;
     }
@@ -243,7 +284,10 @@ async function* streamClaudeResponse(response) {
     }
   }
 
-  if (!textClosed) yield { type: "block-end", index: 0, block: { type: "text", text } };
+  for (const thought of reasoning.values()) {
+    yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
+  }
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text } };
   for (const tool of tools.values()) {
     yield {
       type: "block-end",

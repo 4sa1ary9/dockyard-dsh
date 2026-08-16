@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
+import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
 import { createCliOAuthAuthorizer } from "../../../packages/oauth/src/cli-oauth-authorizer.mjs";
 import {
   addSecondsIso,
@@ -15,10 +16,13 @@ import {
   selectPrimaryQuotaWindow,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
+import { OFFICIAL_SESSION_SOURCE_KINDS } from "../../../packages/providers/src/session-source.mjs";
 
 const PROVIDER_ID = "openai-codex";
 const AUTH_BASE_URL = "https://auth.openai.com";
+const DEFAULT_AUTHORIZATION_URL = `${AUTH_BASE_URL}/oauth/authorize`;
 const DEFAULT_TOKEN_URL = `${AUTH_BASE_URL}/oauth/token`;
+const DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback";
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const DEFAULT_USAGE_URLS = Object.freeze([
   "https://chatgpt.com/backend-api/wham/usage",
@@ -84,7 +88,7 @@ function normalizeTokens(raw) {
   };
 }
 
-function accountInput(tokens, credentialRef, now = new Date()) {
+function accountInput(tokens, credentialRef, now = new Date(), { source = "official_codex_oauth" } = {}) {
   return {
     providerId: PROVIDER_ID,
     accountId: tokens.accountId,
@@ -93,6 +97,7 @@ function accountInput(tokens, credentialRef, now = new Date()) {
     email: tokens.email,
     auth: {
       kind: "oauth",
+      credentialRef,
       scopes: tokens.scopes,
     },
     subscription: {
@@ -105,6 +110,12 @@ function accountInput(tokens, credentialRef, now = new Date()) {
       nextRefreshAt: null,
       lastRefreshedAt: tokens.authFileLastRefresh ?? now.toISOString(),
       refreshable: Boolean(tokens.refresh),
+    },
+    resources: {
+      sessionSource: source.includes("browser")
+        ? OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+        : OFFICIAL_SESSION_SOURCE_KINDS.OAUTH_FILE,
+      authSource: source,
     },
   };
 }
@@ -176,6 +187,11 @@ export class CodexOAuthDriver {
     catalogLoader = null,
     refreshLeewaySeconds = 60,
     oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_CODEX_BROWSER_OAUTH !== "0",
+    authorizationUrl = env.DOCKYARD_CODEX_AUTHORIZATION_URL || DEFAULT_AUTHORIZATION_URL,
+    redirectUri = env.DOCKYARD_CODEX_REDIRECT_URI || DEFAULT_REDIRECT_URI,
+    browserCallbackPort = Number(env.DOCKYARD_CODEX_CALLBACK_PORT || 1455),
     cliPath = env.DOCKYARD_CODEX_CLI || "codex",
   } = {}) {
     this.authFilePath = codexAuthPath({ env, home, authFilePath });
@@ -186,14 +202,57 @@ export class CodexOAuthDriver {
     this.requestExecutor = requestExecutor;
     this.catalogLoader = catalogLoader;
     this.refreshLeewaySeconds = refreshLeewaySeconds;
-    this.oauthAuthorizer = oauthAuthorizer ?? createCliOAuthAuthorizer({
+    this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,
       cliPath,
       loginArgs: ["login", "--device-auth"],
       environmentKey: "CODEX_HOME",
-      instructions: "已启动官方 Codex OAuth 登录。请在官方网页完成登录，完成后回到 Dockyard DSH。",
+      instructions: "已启动官方 Codex CLI OAuth 登录。请在官方网页完成登录，完成后回到 Dockyard DSH。",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context),
     });
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth
+      ? createBrowserOAuthAuthorizer({
+        providerId: PROVIDER_ID,
+        redirectUri,
+        callbackPath: new URL(redirectUri).pathname,
+        callbackHost: "localhost",
+        callbackPort: browserCallbackPort,
+        instructions: "请在官方 Codex 授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri: callback }) => {
+          const url = new URL(authorizationUrl);
+          url.search = new URLSearchParams({
+            client_id: clientId,
+            response_type: "code",
+            redirect_uri: callback,
+            scope: "openid email profile offline_access",
+            state,
+            code_challenge: codeChallenge,
+            code_challenge_method: "S256",
+            prompt: "login",
+            id_token_add_organizations: "true",
+            codex_cli_simplified_flow: "true",
+          });
+          return url.toString();
+        },
+        exchangeCode: async ({ code, codeVerifier, redirectUri: callback, context }) => {
+          const response = await fetchJson(this.tokenUrl, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+            body: new URLSearchParams({
+              grant_type: "authorization_code",
+              client_id: clientId,
+              code,
+              redirect_uri: callback,
+              code_verifier: codeVerifier,
+            }),
+            ...(context.signal ? { signal: context.signal } : {}),
+          }, { fetchImpl: this.fetchImpl });
+          return response.body ?? {};
+        },
+        importCredentials: (raw, context) => this.#importOAuthState(raw, context, "official_codex_browser_oauth"),
+      })
+      : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliAuthorizer;
   }
 
   async discover(context = {}) {
@@ -237,7 +296,9 @@ export class CodexOAuthDriver {
       expiresAt: tokens.expiresAt,
       scopes: tokens.scopes,
     });
-    return accountInput(tokens, credentialRef, context.now instanceof Date ? context.now : new Date());
+    return accountInput(tokens, credentialRef, context.now instanceof Date ? context.now : new Date(), {
+      source: candidate.source,
+    });
   }
 
   async importSource(source, context = {}) {
@@ -260,16 +321,63 @@ export class CodexOAuthDriver {
     return [await this.importAccount(candidate, context)];
   }
 
+  async getActiveSession(context = {}) {
+    try {
+      const discovered = await this.discover(context);
+      if (!discovered.candidates?.length) return null;
+      const accounts = [];
+      for (const candidate of discovered.candidates) {
+        accounts.push(await this.importAccount(candidate, context));
+      }
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID,
+        instructions: "已检测到 Codex 官方 OAuth 会话，当前账号已接入 Dockyard DSH。",
+        accounts,
+        diagnostic: null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async startAuthorization(context = {}) {
-    return this.oauthAuthorizer.begin(context);
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliAuthorizer.begin(context);
+    return started;
   }
 
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
+    return authorizer.poll(sessionId, context);
+  }
+
+  async submitAuthorizationCode(sessionId, code, context = {}) {
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
+    if (typeof authorizer?.submitAuthorizationCode !== "function") {
+      throw new Error("当前 Codex 授权流程不接收手动授权码");
+    }
+    return authorizer.submitAuthorizationCode(sessionId, code, context);
   }
 
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
+    return authorizer.cancel(sessionId, context);
   }
 
   async #readCredential(account, context) {
@@ -330,7 +438,8 @@ export class CodexOAuthDriver {
         // A forbidden response means the provider rejected this operation;
         // it is not proof that the OAuth credential itself has expired.
         wrapped.authForbidden = error?.status === 403;
-        wrapped.authExpired = error?.status === 400 || error?.status === 401;
+        wrapped.authExpired = error?.status === 401
+          || (error?.status === 400 && ["invalid_grant", "invalid_token"].includes(String(error?.upstreamCode ?? "").toLowerCase()));
         throw wrapped;
       }
     }

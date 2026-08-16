@@ -151,15 +151,32 @@ export function nativeProviderError(providerId, message, { status, body, code } 
   return error;
 }
 
+const nativeResponseControls = new WeakMap();
+
 export async function fetchNativeResponse(url, init = {}, {
   providerId,
   timeoutMs = 300_000,
   fetchImpl = fetch,
 } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let cleaned = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   const upstreamSignal = init.signal;
   const abort = () => controller.abort(upstreamSignal?.reason);
+  const timeoutError = nativeProviderError(providerId, "request timed out");
+  timeoutError.code = "ETIMEDOUT";
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    clearTimeout(timer);
+    upstreamSignal?.removeEventListener?.("abort", abort);
+  };
+  const control = { cleanup, get timedOut() { return timedOut; }, timeoutError };
+  let handedOff = false;
   if (upstreamSignal) {
     if (upstreamSignal.aborted) abort();
     else upstreamSignal.addEventListener("abort", abort, { once: true });
@@ -181,17 +198,16 @@ export async function fetchNativeResponse(url, init = {}, {
         code: details.code,
       });
     }
+    nativeResponseControls.set(response, control);
+    handedOff = true;
     return response;
   } catch (error) {
-    if (error?.name === "AbortError" && !error.providerId) {
-      const timeout = nativeProviderError(providerId, "request timed out");
-      timeout.code = "ETIMEDOUT";
-      throw timeout;
+    if (error?.name === "AbortError" && timedOut && !error.providerId) {
+      throw timeoutError;
     }
     throw error;
   } finally {
-    clearTimeout(timer);
-    upstreamSignal?.removeEventListener?.("abort", abort);
+    if (!handedOff) cleanup();
   }
 }
 
@@ -237,38 +253,57 @@ function parseSseEvent(lines) {
 
 /** Yield parsed Server-Sent Events from a fetch Response. */
 export async function* readSseEvents(response) {
+  const control = nativeResponseControls.get(response);
   const decoder = new TextDecoder();
   let buffer = "";
   let lines = [];
-  for await (const chunk of responseChunks(response)) {
-    buffer += decoder.decode(chunk, { stream: true });
-    const parts = buffer.split(/\r?\n/);
-    buffer = parts.pop() ?? "";
-    for (const line of parts) {
-      if (line !== "") {
-        lines.push(line);
-        continue;
-      }
-      const parsed = parseSseEvent(lines);
-      lines = [];
-      if (parsed) {
-        yield parsed;
-        if (parsed.done) return;
+  try {
+    for await (const chunk of responseChunks(response)) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() ?? "";
+      for (const line of parts) {
+        if (line !== "") {
+          lines.push(line);
+          continue;
+        }
+        const parsed = parseSseEvent(lines);
+        lines = [];
+        if (parsed) {
+          yield parsed;
+          if (parsed.done) return;
+        }
       }
     }
+    buffer += decoder.decode();
+    if (buffer) lines.push(buffer);
+    const parsed = parseSseEvent(lines);
+    if (parsed) yield parsed;
+  } catch (error) {
+    if (control?.timedOut && !error?.providerId) throw control.timeoutError;
+    throw error;
+  } finally {
+    control?.cleanup();
+    nativeResponseControls.delete(response);
   }
-  buffer += decoder.decode();
-  if (buffer) lines.push(buffer);
-  const parsed = parseSseEvent(lines);
-  if (parsed) yield parsed;
 }
 
 export function normalizeUsage(value) {
   if (!value || typeof value !== "object") return null;
-  const inputTokens = Number(value.input_tokens ?? value.inputTokens ?? value.prompt_tokens ?? value.promptTokens);
-  const outputTokens = Number(value.output_tokens ?? value.outputTokens ?? value.completion_tokens ?? value.completionTokens);
-  const totalTokens = Number(value.total_tokens ?? value.totalTokens);
-  const cacheReadTokens = Number(value.cache_read_input_tokens ?? value.cacheReadInputTokens);
+  const inputTokens = Number(value.input_tokens
+    ?? value.inputTokens
+    ?? value.prompt_tokens
+    ?? value.promptTokens
+    ?? value.promptTokenCount);
+  const outputTokens = Number(value.output_tokens
+    ?? value.outputTokens
+    ?? value.completion_tokens
+    ?? value.completionTokens
+    ?? value.candidatesTokenCount);
+  const totalTokens = Number(value.total_tokens ?? value.totalTokens ?? value.totalTokenCount);
+  const cacheReadTokens = Number(value.cache_read_input_tokens
+    ?? value.cacheReadInputTokens
+    ?? value.cachedContentTokenCount);
   const cacheWriteTokens = Number(value.cache_creation_input_tokens ?? value.cacheCreationInputTokens);
   const result = {};
   if (Number.isFinite(inputTokens)) result.inputTokens = inputTokens;
@@ -313,7 +348,15 @@ export function dataUrlParts(value) {
   const mediaType = match[1] || "application/octet-stream";
   const encoded = match[0].includes(";base64,")
     ? match[2]
-    : Buffer.from(decodeURIComponent(match[2]), "utf8").toString("base64");
+    : (() => {
+      try {
+        return Buffer.from(decodeURIComponent(match[2]), "utf8").toString("base64");
+      } catch {
+        // A malformed percent-encoding in a data URL must not abort the whole
+        // request; treat the payload as opaque utf8 text instead.
+        return Buffer.from(match[2], "utf8").toString("base64");
+      }
+    })();
   return { mediaType, data: encoded };
 }
 

@@ -85,18 +85,20 @@ export function apply(ctx, config = {}) {
 
   // Initialize the account pools before warming only providers that are
   // actually connected. This keeps optional vendors out of the model menu and
-  // prevents their CLIs from competing for startup/network time.
+  // prevents their official session sources from competing for startup/network time.
   if (catalogWarmers.length > 0 && typeof runtime.init === "function") {
     void (async () => {
       await runtime.init();
+      const providers = runtime.snapshot?.().providers ?? [];
       const connected = new Set(
-        (runtime.snapshot?.().providers ?? [])
+        providers
           .filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0)
           .map((provider) => provider.providerId),
       );
+      const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers
         .filter(([providerId]) => providerId === "openai-codex" || connected.has(providerId))
-        .map(([, loader]) => loader().catch(() => null)));
+        .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -123,9 +125,8 @@ export function apply(ctx, config = {}) {
     registerAdapter();
   }
 
-  // The runtime is the source of truth for DSH itself. The old 8787 page can
-  // consume the same runtime for visual debugging, but it is not required for
-  // OAuth, account selection, quota refresh, or model discovery.
+  // The runtime is the source of truth for DSH itself. Commands, the native
+  // control surface, and generation all consume this same in-process runtime.
   if (typeof runtime.init === "function") {
     const service = config.service ?? new DockyardDshService({
       runtime,
@@ -175,11 +176,14 @@ export function apply(ctx, config = {}) {
           });
       }
       return async () => {
-        await remoteFiberPromise?.catch?.(() => null);
-        await nativeKeyPoolReady.catch?.(() => null);
-        nativeKeyPool?.dispose?.();
-        unregister?.();
-        await service.dispose();
+        // Isolate every cleanup step: one failing dispose must not prevent
+        // the remaining teardown (command unregister, service dispose), which
+        // would leave a stale `dockyard` command registered on hot reload.
+        try { await remoteFiberPromise?.catch?.(() => null); } catch { /* ignore */ }
+        try { await nativeKeyPoolReady.catch?.(() => null); } catch { /* ignore */ }
+        try { nativeKeyPool?.dispose?.(); } catch { /* ignore */ }
+        try { unregister?.(); } catch { /* ignore */ }
+        try { await service.dispose(); } catch { /* ignore */ }
       };
     };
     if (typeof ctx.effect === "function") {

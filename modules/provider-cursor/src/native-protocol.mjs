@@ -167,12 +167,11 @@ function encodeAssistantStep(text) {
 }
 
 function encodeConversationTurn(userMessageId, stepIds, requestId) {
-  const agentTurn = concatBytes([
+  return concatBytes([
     bytesField(1, userMessageId),
     ...stepIds.map((id) => bytesField(2, id)),
     ...(requestId ? [stringField(3, requestId)] : []),
   ]);
-  return bytesField(1, agentTurn);
 }
 
 function encodeConversationState(messages, blobStore, requestId) {
@@ -298,6 +297,53 @@ export function decodeConnectFrames(buffer) {
     offset += 5 + length;
   }
   return { frames, rest: buffer.slice(offset) };
+}
+
+/**
+ * Return redacted wire metadata for diagnostics. This deliberately records
+ * only Connect flags, byte lengths, wire types, and protobuf field paths.
+ */
+export function cursorFrameMetadata(message, flags = null) {
+  const bytes = message instanceof Uint8Array ? message : Uint8Array.from(message ?? []);
+  const fieldPaths = [];
+  const visit = (value, prefix = [], depth = 0) => {
+    if (depth > 4 || fieldPaths.length >= 64) return;
+    for (const field of decodeProtoFields(value).slice(0, 32)) {
+      const path = [...prefix, field.field].join(".");
+      fieldPaths.push({ path, wireType: field.wireType, byteLength: field.value instanceof Uint8Array ? field.value.byteLength : null });
+      if (field.wireType === 2) visit(field.value, [...prefix, field.field], depth + 1);
+      if (fieldPaths.length >= 64) return;
+    }
+  };
+  visit(bytes);
+  return {
+    ...(Number.isInteger(flags) ? { flags } : {}),
+    payloadLength: bytes.byteLength,
+    fieldPaths,
+  };
+}
+
+/**
+ * Connect's end-stream frame is a JSON envelope for this Cursor endpoint.
+ * Older code treated every trailer as a successful turn, which made upstream
+ * quota errors appear in the UI as an empty assistant message.
+ */
+export function decodeCursorConnectTrailer(payload) {
+  const text = textDecoder.decode(payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? [])).trim();
+  if (!text) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { code: "CURSOR_CONNECT_ERROR", message: text.slice(0, 500) };
+  }
+  const error = parsed?.error && typeof parsed.error === "object" ? parsed.error : null;
+  if (!error) return null;
+  const code = typeof error.code === "string" && error.code.trim() ? error.code.trim() : "CURSOR_CONNECT_ERROR";
+  const message = typeof error.message === "string" && error.message.trim()
+    ? error.message.trim().slice(0, 500)
+    : code;
+  return { code, message };
 }
 
 export function decodeCursorText(message) {

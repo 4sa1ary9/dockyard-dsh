@@ -1,6 +1,6 @@
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
-function publicAuthResult(result) {
+export function publicAuthResult(result) {
   if (!result || typeof result !== "object") return result;
   return {
     status: result.status,
@@ -10,6 +10,7 @@ function publicAuthResult(result) {
     ...(result.instructions ? { instructions: result.instructions } : {}),
     ...(result.browserOpened ? { browserOpened: true } : {}),
     ...(result.inputRequired ? { inputRequired: true } : {}),
+    ...(result.authorizationCodeRequired ? { authorizationCodeRequired: true } : {}),
     ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
     ...(Array.isArray(result.accounts) ? { accounts: result.accounts } : {}),
   };
@@ -57,7 +58,9 @@ export class DockyardRemoteService extends TypertRemoteService {
   }
 
   async login(request) {
-    const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId));
+    // The browser client opens a synchronous popup before this RPC call;
+    // suppress the host-level `open` fallback to avoid a duplicate tab.
+    const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId, { openBrowser: false }));
     return envelope(result, await this.dockyard.snapshot());
   }
 

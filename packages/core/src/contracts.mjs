@@ -92,7 +92,8 @@ export function createAccountRecord(input, now = new Date()) {
   if (!input || typeof input !== "object") throw new ValidationError("Account input is required");
   if (!input.providerId) throw new ValidationError("Account providerId is required");
   if (!input.accountId) throw new ValidationError("Account accountId is required");
-  if (!input.credentialRef) throw new ValidationError("Account credentialRef is required");
+  const credentialRef = input.credentialRef ?? input.auth?.credentialRef;
+  if (!credentialRef) throw new ValidationError("Account credentialRef is required");
 
   const health = input.health ?? {};
   const createdAt = isoOrNull(input.createdAt, "createdAt") ?? now.toISOString();
@@ -105,7 +106,7 @@ export function createAccountRecord(input, now = new Date()) {
     email: stringOrNull(input.email),
     auth: {
       kind: stringOrNull(input.auth?.kind) ?? "oauth",
-      credentialRef: String(input.credentialRef),
+      credentialRef: String(credentialRef),
       scopes: Array.isArray(input.auth?.scopes) ? [...input.auth.scopes] : [],
     },
     subscription: {

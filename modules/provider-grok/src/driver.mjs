@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
+import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
 import { createCliOAuthAuthorizer } from "../../../packages/oauth/src/cli-oauth-authorizer.mjs";
 import {
   contentHasImage,
@@ -13,6 +14,7 @@ import {
   runCliCommand,
   unsupportedContentError,
 } from "../../../packages/providers/src/cli-agent-transport.mjs";
+import { validateNativeEndpoint } from "../../../packages/providers/src/native-transport.mjs";
 import {
   decodeJwtPayload,
   finiteNumber,
@@ -20,10 +22,19 @@ import {
   readJsonFile,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
+import { OFFICIAL_SESSION_SOURCE_KINDS } from "../../../packages/providers/src/session-source.mjs";
 
 const PROVIDER_ID = "grok";
+const DEFAULT_AUTHORIZATION_URL = "https://auth.x.ai/oauth2/authorize";
+const DEFAULT_TOKEN_URL = "https://auth.x.ai/oauth2/token";
+const DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
+const DEFAULT_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
 const DEFAULT_GROK_HOME = join(homedir(), ".grok");
 const DEFAULT_CATALOG_TTL_MS = 60_000;
+const DEFAULT_GROK_USAGE_URL = "https://grok.com/?_s=usage";
+const DEFAULT_GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+const DEFAULT_GROK_TOKEN_HEADER = "xai-grok-cli";
+const DEFAULT_GROK_CLIENT_VERSION = "0.2.112";
 const CREDENTIAL_SLOT = Symbol("dockyard-grok-credential");
 
 function hash(value) {
@@ -70,14 +81,17 @@ export function parseGrokAuth(raw) {
       value.principalId,
       value.team_id,
       value.teamId,
+      accessPayload.sub,
+      accessPayload.user_id,
+      accessPayload.userId,
     ) ?? `${scopeKey}:${hash(access).slice(0, 20)}`;
-    const email = firstString(value.email, value.user_email, value.userEmail);
+    const email = firstString(value.email, value.user_email, value.userEmail, accessPayload.email);
     return {
       access,
       refresh: firstString(value.refresh_token, value.refreshToken),
       accountId,
       email,
-      displayName: firstString(value.first_name, value.firstName, value.name, email, accountId),
+      displayName: firstString(value.first_name, value.firstName, value.name, accessPayload.name, email, accountId),
       plan: firstString(value.subscription_level, value.subscriptionLevel),
       expiresAt,
       createdAt: firstString(value.create_time, value.createdAt),
@@ -92,7 +106,7 @@ export function parseGrokAuth(raw) {
   }).filter(Boolean);
 }
 
-function accountInput(tokens, credentialRef, now = new Date()) {
+function accountInput(tokens, credentialRef, now = new Date(), { source = "official_grok_oauth" } = {}) {
   return {
     providerId: PROVIDER_ID,
     accountId: tokens.accountId,
@@ -110,7 +124,12 @@ function accountInput(tokens, credentialRef, now = new Date()) {
     resources: {
       transport: "xai_chat_completions_sse",
       accountScope: "oauth_account",
-      quotaSource: "official_grok_cli",
+      sessionSource: source.includes("browser")
+        ? OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+        : OFFICIAL_SESSION_SOURCE_KINDS.OAUTH_FILE,
+      authSource: source,
+      quotaSource: source.includes("browser") ? "official_browser_session" : "official_grok_session",
+      quotaUrl: DEFAULT_GROK_USAGE_URL,
     },
   };
 }
@@ -209,6 +228,94 @@ export function parseGrokModelCatalog(output = "", cache = null) {
     if (Array.isArray(info.input) && info.input.length > 0) model.inputModalities = [...info.input];
     return model;
   });
+}
+
+function finiteValue(value) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function centValue(value) {
+  return finiteValue(value?.val ?? value);
+}
+
+function periodLabel(periodType) {
+  const value = String(periodType ?? "").toUpperCase();
+  if (value.includes("WEEK")) return "官方周额度周期";
+  if (value.includes("MONTH")) return "官方月额度周期";
+  return "官方额度周期";
+}
+
+/**
+ * Normalize the official Grok Build credits config. The CLI's `/billing`
+ * proxy forwards `grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig`; it is
+ * the supported authenticated surface for the consumer weekly cycle.
+ */
+export function parseGrokCreditsConfig(body, { now = new Date() } = {}) {
+  const config = body?.config && typeof body.config === "object" ? body.config : {};
+  const updatedAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+  const usagePercent = finiteValue(config.creditUsagePercent);
+  const monthlyLimit = centValue(config.monthlyLimit);
+  const used = centValue(config.used);
+  const currentPeriod = config.currentPeriod && typeof config.currentPeriod === "object"
+    ? config.currentPeriod
+    : {};
+  const periodType = currentPeriod.type ?? config.periodType;
+  const periodStart = currentPeriod.start ?? config.billingPeriodStart ?? null;
+  const periodEnd = currentPeriod.end ?? config.billingPeriodEnd ?? null;
+
+  let remaining = null;
+  let limit = null;
+  let unit = null;
+  if (usagePercent !== null && usagePercent >= 0 && usagePercent <= 100) {
+    remaining = Math.max(0, 100 - usagePercent);
+    limit = 100;
+    unit = "percent";
+  } else if (monthlyLimit !== null && used !== null && monthlyLimit >= 0) {
+    remaining = Math.max(0, monthlyLimit - used);
+    limit = monthlyLimit;
+    unit = "USD cents";
+  }
+
+  const windows = periodEnd || remaining !== null || limit !== null
+    ? [{
+      id: "grok.current_period",
+      name: periodLabel(periodType),
+      remaining,
+      limit,
+      unit,
+      resetAt: periodEnd,
+      updatedAt,
+      source: "official_grok_build_billing",
+    }]
+    : [];
+  return {
+    quota: {
+      remaining,
+      limit,
+      unit,
+      resetAt: periodEnd,
+      windows,
+      updatedAt,
+      source: "official_grok_build_billing",
+    },
+    subscription: {
+      plan: typeof body?.subscriptionTier === "string" ? body.subscriptionTier : null,
+      status: null,
+      expiresAt: null,
+    },
+    resources: {
+      quotaSource: "official_grok_build_billing",
+      quotaDiagnostic: windows.length === 0
+        ? "Grok 官方 credits config 未返回当前额度周期或剩余值"
+        : remaining === null
+          ? "Grok 官方已返回当前额度周期，但未返回剩余百分比"
+          : null,
+      quotaPeriodType: periodType ?? null,
+      quotaPeriodStart: periodStart,
+      quotaUrl: DEFAULT_GROK_USAGE_URL,
+    },
+  };
 }
 
 export function createGrokCatalogLoader({
@@ -388,9 +495,19 @@ export class GrokOAuthDriver {
     grokHome,
     catalogLoader = null,
     oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_GROK_BROWSER_OAUTH !== "0",
+    authorizationUrl = env.DOCKYARD_GROK_AUTHORIZATION_URL || DEFAULT_AUTHORIZATION_URL,
+    tokenUrl = env.DOCKYARD_GROK_TOKEN_URL || DEFAULT_TOKEN_URL,
+    clientId = env.DOCKYARD_GROK_CLIENT_ID || DEFAULT_CLIENT_ID,
+    oauthScope = env.DOCKYARD_GROK_OAUTH_SCOPE || DEFAULT_OAUTH_SCOPE,
     cliPath = env.DOCKYARD_GROK_CLI || "grok",
     commandRunner = runCliCommand,
     requestExecutor = null,
+    fetchImpl = fetch,
+    creditsUrl = env.DOCKYARD_GROK_CREDITS_URL || DEFAULT_GROK_CREDITS_URL,
+    tokenHeader = env.DOCKYARD_GROK_TOKEN_HEADER || DEFAULT_GROK_TOKEN_HEADER,
+    clientVersion = env.DOCKYARD_GROK_CLIENT_VERSION || DEFAULT_GROK_CLIENT_VERSION,
     timeoutMs = 30_000,
   } = {}) {
     this.env = env;
@@ -399,7 +516,14 @@ export class GrokOAuthDriver {
     this.cliPath = cliPath;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
+    this.fetchImpl = fetchImpl;
+    this.creditsUrl = validateNativeEndpoint(creditsUrl, { providerId: PROVIDER_ID });
+    this.tokenHeader = String(tokenHeader || DEFAULT_GROK_TOKEN_HEADER);
+    this.clientVersion = String(clientVersion || DEFAULT_GROK_CLIENT_VERSION);
     this.timeoutMs = timeoutMs;
+    this.tokenUrl = tokenUrl;
+    this.clientId = clientId;
+    this.oauthScope = oauthScope;
     this.catalogLoader = catalogLoader ?? createGrokCatalogLoader({
       env,
       home,
@@ -408,7 +532,7 @@ export class GrokOAuthDriver {
       commandRunner,
       timeoutMs,
     });
-    this.oauthAuthorizer = oauthAuthorizer ?? createCliOAuthAuthorizer({
+    this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,
       cliPath,
       loginArgs: ["login", "--oauth"],
@@ -416,9 +540,62 @@ export class GrokOAuthDriver {
       environment: env,
       profileDirectory: this.grokHome,
       browserOpened: true,
-      instructions: "已启动官方 Grok OAuth 登录。请在 auth.x.ai 官方网页完成登录，完成后回到 Dockyard DSH。",
+      instructions: "已启动官方 Grok CLI OAuth 登录。请在 auth.x.ai 官方网页完成登录，完成后回到 Dockyard DSH。",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context),
     });
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth
+      ? createBrowserOAuthAuthorizer({
+        providerId: PROVIDER_ID,
+        callbackPath: "/callback",
+        callbackHost: "127.0.0.1",
+        callbackPort: 0,
+        instructions: "请在官方 Grok 授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri, nonce }) => {
+          const url = new URL(authorizationUrl);
+          url.search = new URLSearchParams({
+            response_type: "code",
+            client_id: clientId,
+            redirect_uri: redirectUri,
+            scope: oauthScope,
+            code_challenge: codeChallenge,
+            code_challenge_method: "S256",
+            state,
+            nonce,
+            referrer: "grok-build",
+          });
+          return url.toString();
+        },
+        exchangeCode: async ({ code, codeVerifier, redirectUri, context }) => {
+          const response = await this.fetchImpl(`${tokenUrl}`, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+            body: new URLSearchParams({
+              grant_type: "authorization_code",
+              client_id: clientId,
+              code,
+              redirect_uri: redirectUri,
+              code_verifier: codeVerifier,
+            }),
+            ...(context.signal ? { signal: context.signal } : {}),
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            const error = new Error(`Grok OAuth token exchange failed (${response.status})`);
+            error.status = response.status;
+            error.upstreamCode = body.error ?? body.error_code;
+            throw error;
+          }
+          return {
+            ...body,
+            oidc_client_id: body.oidc_client_id ?? body.client_id ?? clientId,
+            auth_mode: "oauth",
+            scope: body.scope ?? oauthScope,
+          };
+        },
+        importCredentials: (raw, context) => this.#importOAuthState(raw, context, "official_grok_browser_oauth"),
+      })
+      : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliAuthorizer;
   }
 
   async discover(context = {}) {
@@ -452,7 +629,9 @@ export class GrokOAuthDriver {
       scopes: tokens.scopes,
       scopeKey: tokens.scopeKey,
     });
-    return accountInput(tokens, credentialRef, context.now instanceof Date ? context.now : new Date());
+    return accountInput(tokens, credentialRef, context.now instanceof Date ? context.now : new Date(), {
+      source: candidate.source,
+    });
   }
 
   async importSource(source, context = {}) {
@@ -478,16 +657,63 @@ export class GrokOAuthDriver {
     return accounts;
   }
 
+  async getActiveSession(context = {}) {
+    try {
+      const discovered = await this.discover(context);
+      if (!discovered.candidates?.length) return null;
+      const accounts = [];
+      for (const candidate of discovered.candidates) {
+        accounts.push(await this.importAccount(candidate, context));
+      }
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID,
+        instructions: "已检测到 Grok 官方 OAuth 会话，当前账号已接入 Dockyard DSH。",
+        accounts,
+        diagnostic: null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async startAuthorization(context = {}) {
-    return this.oauthAuthorizer.begin(context);
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliAuthorizer.begin(context);
+    return started;
   }
 
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
+    return authorizer.poll(sessionId, context);
+  }
+
+  async submitAuthorizationCode(sessionId, code, context = {}) {
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
+    if (typeof authorizer?.submitAuthorizationCode !== "function") {
+      throw new Error("当前 Grok 授权流程不接收手动授权码");
+    }
+    return authorizer.submitAuthorizationCode(sessionId, code, context);
   }
 
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
+    return authorizer.cancel(sessionId, context);
   }
 
   async #readCredential(account, context = {}) {
@@ -538,8 +764,6 @@ export class GrokOAuthDriver {
         });
       }
       return updated;
-    } catch {
-      return null;
     } finally {
       await rm(prepared.profileDir, { recursive: true, force: true }).catch(() => {});
     }
@@ -548,6 +772,7 @@ export class GrokOAuthDriver {
   async refreshAccount(account, context = {}) {
     const prepared = await this.#prepareCredentialEnvironment(account, context);
     let updated = null;
+    let commandError = null;
     try {
       await this.commandRunner(this.cliPath, ["models"], {
         env: prepared.env,
@@ -556,10 +781,19 @@ export class GrokOAuthDriver {
       });
     } catch (error) {
       error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
-      throw error;
-    } finally {
-      updated = await this.#finishCredentialEnvironment(prepared, account, context);
+      commandError = error;
     }
+    let finishError = null;
+    try {
+      updated = await this.#finishCredentialEnvironment(prepared, account, context);
+    } catch (error) {
+      finishError = error;
+    }
+    if (commandError) {
+      if (finishError && !commandError.cause) commandError.cause = finishError;
+      throw commandError;
+    }
+    if (finishError) throw finishError;
     const now = context.now instanceof Date ? context.now : new Date();
     return {
       refresh: {
@@ -573,19 +807,32 @@ export class GrokOAuthDriver {
 
   async getQuota(account, context = {}) {
     const now = context.now instanceof Date ? context.now : new Date();
-    return {
-      quota: {
-        remaining: null,
-        limit: null,
-        unit: null,
-        resetAt: null,
-        windows: [],
-        updatedAt: now.toISOString(),
-        source: "official_grok_cli",
+    const credential = await this.#readCredential(account, context);
+    const accountId = credential.accountId ?? account.accountId;
+    const response = await this.fetchImpl(this.creditsUrl, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${credential.access}`,
+        "x-xai-token-auth": this.tokenHeader,
+        "x-userid": accountId,
+        "x-grok-client-version": this.clientVersion,
       },
-      subscription: { ...account.subscription },
-      resources: {
-        quotaDiagnostic: "Grok 官方 CLI/公开文档没有提供可依赖的订阅额度 JSON；Dockyard 不显示估算百分比",
+      ...(context.signal ? { signal: context.signal } : {}),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(`Grok credits request failed (${response.status})`);
+      error.status = response.status;
+      error.authExpired = response.status === 401 || response.status === 403;
+      throw error;
+    }
+    const parsed = parseGrokCreditsConfig(body, { now });
+    return {
+      ...parsed,
+      subscription: {
+        ...account.subscription,
+        ...(parsed.subscription.plan ? { plan: parsed.subscription.plan } : {}),
       },
     };
   }
@@ -616,15 +863,31 @@ export class GrokOAuthDriver {
         context: { ...context, env: prepared.env },
       });
     } catch (error) {
-      await this.#finishCredentialEnvironment(prepared, account, context);
+      try {
+        await this.#finishCredentialEnvironment(prepared, account, context);
+      } catch (finishError) {
+        if (!error.cause) error.cause = finishError;
+      }
       throw error;
     }
     return (async function* streamWithCleanup() {
       const driver = this;
+      let streamError = null;
       try {
         for await (const chunk of output) yield chunk;
+      } catch (error) {
+        streamError = error;
+        throw error;
       } finally {
-        await driver.#finishCredentialEnvironment(prepared, account, context);
+        try {
+          await driver.#finishCredentialEnvironment(prepared, account, context);
+        } catch (finishError) {
+          if (streamError) {
+            if (!streamError.cause) streamError.cause = finishError;
+          } else {
+            throw finishError;
+          }
+        }
       }
     }).call(this);
   }

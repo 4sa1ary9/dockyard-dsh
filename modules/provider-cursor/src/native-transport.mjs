@@ -11,7 +11,9 @@ import {
 import {
   cursorNativeProtocolConstants,
   cursorTurnComplete,
+  cursorFrameMetadata,
   decodeConnectFrames,
+  decodeCursorConnectTrailer,
   decodeCursorKvRequest,
   decodeCursorText,
   encodeAgentRunRequest,
@@ -79,6 +81,7 @@ export function readCursorDesktopSession({
     return {
       token: stored,
       refreshToken: firstString(credential?.refresh, credential?.refreshToken),
+      expiresAt: firstString(credential?.expiresAt, credential?.expires_at),
       email: firstString(credential?.email),
       plan: firstString(credential?.plan),
       kind: "oauth",
@@ -115,7 +118,9 @@ export function readCursorDesktopSession({
 /** Resolve Cursor's access token without starting cursor-agent. */
 export function resolveCursorAccessToken(options = {}) {
   const session = readCursorDesktopSession(options);
-  return session ? { token: session.token, kind: session.kind } : null;
+  return session
+    ? { token: session.token, kind: session.kind, ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}) }
+    : null;
 }
 
 function cursorHeaders(endpoint, token, requestId, env) {
@@ -169,6 +174,12 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
     let stream = null;
     let responseStatus = 0;
     let responseBuffer = new Uint8Array();
+    const responseDiagnostics = [];
+    const protocolError = (message, code) => {
+      const error = nativeProviderError(PROVIDER_ID, message, { code });
+      if (responseDiagnostics.length > 0) error.cursorDiagnostics = responseDiagnostics.slice(0, 32);
+      return error;
+    };
     let completed = false;
     let cleaned = false;
     let heartbeat;
@@ -203,12 +214,21 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
         responseBuffer = decoded.rest;
         for (const frame of decoded.frames) {
           if ((frame.flags & 0x02) !== 0) {
-            completed = true;
-            queue.push({ type: "complete" });
+            const trailer = decodeCursorConnectTrailer(frame.payload);
+            if (trailer) {
+              queue.fail(nativeProviderError(PROVIDER_ID, trailer.message, {
+                code: trailer.code,
+                body: { code: trailer.code, message: trailer.message },
+              }));
+            } else {
+              completed = true;
+              queue.push({ type: "complete" });
+            }
             continue;
           }
           if ((frame.flags & 0x01) !== 0) {
-            queue.fail(nativeProviderError(PROVIDER_ID, "Cursor returned a compressed protobuf frame"));
+            responseDiagnostics.push(cursorFrameMetadata(frame.payload, frame.flags));
+            queue.fail(protocolError("Cursor returned a compressed protobuf frame", "CURSOR_COMPRESSED_RESPONSE"));
             continue;
           }
           const kv = decodeCursorKvRequest(frame.payload);
@@ -221,14 +241,26 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
             continue;
           }
           const text = decodeCursorText(frame.payload);
+          const turnComplete = cursorTurnComplete(frame.payload);
           if (text) queue.push({ type: "text", text });
-          if (cursorTurnComplete(frame.payload)) {
+          if (!text) responseDiagnostics.push(cursorFrameMetadata(frame.payload, frame.flags));
+          if (turnComplete) {
             completed = true;
             queue.push({ type: "complete" });
           }
         }
       });
-      stream.once("end", () => queue.close());
+      stream.once("end", () => {
+        if (responseBuffer.byteLength > 0) {
+          responseDiagnostics.push({
+            payloadLength: responseBuffer.byteLength,
+            incomplete: true,
+          });
+          queue.fail(protocolError("Cursor AgentService returned an incomplete Connect frame", "CURSOR_INCOMPLETE_RESPONSE"));
+        } else {
+          queue.close();
+        }
+      });
       stream.once("error", (error) => queue.fail(error));
       stream.write(Buffer.from(encoded.frame));
       heartbeat = setInterval(() => {
@@ -258,8 +290,14 @@ function streamCursor({ endpoint, token, request, context, http2Module = http2 }
         cleanup();
       }
       if (!failed) {
+        if (!completed) {
+          throw protocolError("Cursor AgentService ended before completing the turn", "CURSOR_INCOMPLETE_RESPONSE");
+        }
+        if (text.trim().length === 0) {
+          throw protocolError("Cursor AgentService completed without assistant text", "CURSOR_EMPTY_RESPONSE");
+        }
         yield { type: "block-end", index: 0, block: { type: "text", text } };
-        yield { type: "finish", reason: { kind: completed ? "stop" : "stop" } };
+        yield { type: "finish", reason: { kind: "stop" } };
       }
     } catch (error) {
       cleanup();
@@ -287,6 +325,16 @@ export function createCursorNativeExecutor({
       const error = nativeProviderError(PROVIDER_ID, "Cursor OAuth token is unavailable; authorize Cursor first");
       error.authExpired = true;
       throw error;
+    }
+    if (auth.expiresAt) {
+      const expiry = Date.parse(auth.expiresAt);
+      if (Number.isFinite(expiry) && expiry <= Date.now()) {
+        const error = nativeProviderError(PROVIDER_ID, "Cursor OAuth access token expired; authorize Cursor again", {
+          code: "CURSOR_TOKEN_EXPIRED",
+        });
+        error.authExpired = true;
+        throw error;
+      }
     }
     return streamCursor({ endpoint: safeEndpoint, token: auth.token, request, context, http2Module });
   };

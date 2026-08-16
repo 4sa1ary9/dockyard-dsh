@@ -1,4 +1,4 @@
-import { ACCOUNT_SELECTION_POLICY, ModuleRuntime } from "../../core/src/index.mjs";
+import { ACCOUNT_HEALTH, ACCOUNT_SELECTION_POLICY, ModuleRuntime } from "../../core/src/index.mjs";
 import { AccountPool } from "../../account-pool/src/index.mjs";
 import { DshInjectionBridge } from "../../dsh-bridge/src/index.mjs";
 import { createDefaultSecretStore } from "../../vault/src/index.mjs";
@@ -35,6 +35,25 @@ function refreshTimeoutError(providerId, accountId, timeoutMs) {
   error.refreshTimeout = true;
   error.timeoutMs = timeoutMs;
   return error;
+}
+
+/**
+ * A successful quota refresh proves the credential works but must not erase a
+ * confirmed exhausted/cooldown state: an account whose live quota reports
+ * zero remaining would otherwise be re-selected and fail again immediately.
+ */
+function reportPostRefreshHealth(pool, accountId) {
+  const account = pool.get(accountId);
+  if (!account || account.health?.status === ACCOUNT_HEALTH.EXPIRED) return;
+  const remaining = account.quota?.remaining;
+  if (typeof remaining === "number" && remaining <= 0) {
+    pool.report(accountId, {
+      status: "quota_exhausted",
+      message: "刷新后官方额度仍为 0，请切换账号或稍后重试",
+    });
+    return;
+  }
+  pool.report(accountId, { status: "success" });
 }
 
 function withRefreshTimeout(task, { providerId, accountId, timeoutMs }) {
@@ -135,7 +154,7 @@ function providerAccount(pool, accountId) {
 }
 
 function providerErrorStatus(error) {
-  if (error?.authExpired) return "auth_expired";
+  if (error?.authExpired || error?.accountMismatch) return "auth_expired";
   // A provider-side 403 is an operation/permission failure. Keep the account
   // usable and surface it as degraded instead of claiming its OAuth expired.
   if (error?.authForbidden) return "error";
@@ -148,6 +167,8 @@ export class DockyardRuntime {
   #entries = new Map();
   #candidates = new Map();
   #refreshPromises = new Map();
+  #accountRefreshPromises = new Map();
+  #saveQueue = Promise.resolve();
   #initialized = false;
   #initPromise = null;
 
@@ -277,7 +298,7 @@ export class DockyardRuntime {
         if (fingerprintChanged && typeof entry.module.importAccount === "function") {
           try {
             const captured = await entry.module.importAccount(candidate, providerContext(this));
-            entry.pool.upsert(captured);
+            entry.pool.upsert(captured, { resetHealth: true });
             changedProviderIds.add(currentProviderId);
           } catch {
             // Keep the existing account usable through its current provider
@@ -314,7 +335,7 @@ export class DockyardRuntime {
     const candidate = this.#candidates.get(providerId)?.get(candidateId);
     if (!candidate) throw new Error("Candidate is missing; scan local OAuth states again");
     const rawAccount = await entry.module.importAccount(candidate, providerContext(this));
-    entry.pool.upsert(rawAccount);
+    entry.pool.upsert(rawAccount, { resetHealth: true });
     await this.#saveState([providerId]);
     return {
       account: entry.pool.get(rawAccount.accountId),
@@ -334,7 +355,7 @@ export class DockyardRuntime {
       ? imported
       : Array.isArray(imported?.accounts) ? imported.accounts : [imported];
     const accounts = rawAccounts.filter((account) => account?.accountId).map((account) => {
-      entry.pool.upsert(account);
+      entry.pool.upsert(account, { resetHealth: true });
       return entry.pool.get(account.accountId);
     });
     if (accounts.length === 0) throw new Error("OAuth source did not contain an importable account");
@@ -345,9 +366,15 @@ export class DockyardRuntime {
   async startAuthorization(providerId) {
     await this.init();
     const entry = this.#entry(providerId);
-    const result = await entry.module.startAuthorization(providerContext(this, {
+    const context = providerContext(this, {
       accounts: entry.pool.list(),
-    }));
+    });
+    // Login/Add is always a new account operation. Existing desktop/CLI
+    // sessions are discovered by scan(), while this path must open the
+    // provider-owned browser OAuth flow so the user can choose another account.
+    // Providers may still fall back to their official CLI when browser OAuth
+    // is unavailable or explicitly disabled.
+    const result = await entry.module.startAuthorization(context);
     return this.#persistAuthorizationResult(entry, providerId, result);
   }
 
@@ -374,20 +401,32 @@ export class DockyardRuntime {
   }
 
   async refreshAccount(providerId, accountId, { force = false, tolerateFailure = false } = {}) {
-    try {
-      return await withRefreshTimeout(
-        (signal) => this.#refreshAccountNow(providerId, accountId, { force, tolerateFailure, signal }),
-        { providerId, accountId, timeoutMs: this.refreshTimeoutMs },
-      );
-    } catch (error) {
-      if (!error?.refreshTimeout || !tolerateFailure) throw error;
-      await this.init();
-      const entry = this.#entry(providerId);
-      if (entry.pool.get(accountId)) {
-        entry.pool.report(accountId, { status: "error", message: error.message });
-        await this.#saveState([providerId]);
+    const key = `${providerId}\u0000${accountId}`;
+    const existing = this.#accountRefreshPromises.get(key);
+    if (existing) return existing;
+
+    const promise = (async () => {
+      try {
+        return await withRefreshTimeout(
+          (signal) => this.#refreshAccountNow(providerId, accountId, { force, tolerateFailure, signal }),
+          { providerId, accountId, timeoutMs: this.refreshTimeoutMs },
+        );
+      } catch (error) {
+        if (!error?.refreshTimeout || !tolerateFailure) throw error;
+        await this.init();
+        const entry = this.#entry(providerId);
+        if (entry.pool.get(accountId)) {
+          entry.pool.report(accountId, { status: "error", message: error.message });
+          await this.#saveState([providerId]);
+        }
+        return { account: entry.pool.get(accountId), diagnostics: [error.message] };
       }
-      return { account: entry.pool.get(accountId), diagnostics: [error.message] };
+    })();
+    this.#accountRefreshPromises.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.#accountRefreshPromises.get(key) === promise) this.#accountRefreshPromises.delete(key);
     }
   }
 
@@ -427,10 +466,7 @@ export class DockyardRuntime {
       // authentication/status refresh. Reuse that result instead of issuing
       // the same provider request a second time.
       if (refresh && Object.hasOwn(refresh, "quota")) {
-        const health = entry.pool.get(accountId)?.health;
-        if (health?.status !== "expired") {
-          entry.pool.report(accountId, { status: "success" });
-        }
+        reportPostRefreshHealth(entry.pool, accountId);
         await this.#saveState([providerId]);
         return { account: entry.pool.get(accountId), diagnostics };
       }
@@ -443,10 +479,7 @@ export class DockyardRuntime {
       // readable. Do not erase a native-request auth failure merely because a
       // later CLI status check succeeds; reauthorization/import is the action
       // that explicitly clears an expired transport credential.
-      const health = entry.pool.get(accountId)?.health;
-      if (health?.status !== "expired") {
-        entry.pool.report(accountId, { status: "success" });
-      }
+      reportPostRefreshHealth(entry.pool, accountId);
     } catch (error) {
       if (signal?.aborted) throw error;
       diagnostics.push(`刷新实时额度失败：${redactError(error)}`);
@@ -534,13 +567,22 @@ export class DockyardRuntime {
 
   async getCatalog(providerId) {
     await this.init();
-    return this.#entry(providerId).module.getCatalog(providerContext(this));
+    const entry = this.#entry(providerId);
+    const accounts = entry.pool.list().map((account) => providerAccount(entry.pool, account.accountId));
+    return entry.module.getCatalog(providerContext(this, { accounts }));
   }
 
   async invoke(providerId, request, context = {}) {
     await this.init();
     const route = this.bridge.getRoute(providerId);
-    return route.invoke(request, providerContext(this, context));
+    try {
+      return await route.invoke(request, providerContext(this, context));
+    } finally {
+      // The route reports rate-limit/quota/auth results into the in-memory
+      // pool while invoking. Persist them so a restart sees the same health
+      // instead of re-selecting a failed account.
+      await this.#saveState([providerId]).catch(() => {});
+    }
   }
 
   async stream(providerId, request, context = {}) {
@@ -618,31 +660,42 @@ export class DockyardRuntime {
       const imported = alreadyImported || typeof entry.module.importAccount !== "function"
         ? account
         : await entry.module.importAccount(account, providerContext(this));
-      entry.pool.upsert(imported);
+      entry.pool.upsert(imported, { resetHealth: true });
       accounts.push(entry.pool.get(imported.accountId));
     }
     return accounts;
   }
 
   async #saveState(changedProviderIds = null) {
-    // Multiple DSH entry points can share ~/.dockyard-dsh/state.json. Merge
-    // the latest file before persisting so an older runtime that only changed
-    // one provider cannot erase accounts added by another runtime/provider.
-    const changed = changedProviderIds === null
-      ? new Set(this.#entries.keys())
-      : new Set(changedProviderIds);
-    const latest = await this.stateStore.load().catch(() => ({ pools: {} }));
-    const pools = {
-      ...(latest?.pools && typeof latest.pools === "object" ? latest.pools : {}),
-    };
-    for (const [providerId, entry] of this.#entries) {
-      if (!changed.has(providerId) && Object.hasOwn(pools, providerId)) continue;
-      pools[providerId] = {
-        policy: entry.pool.policy,
-        defaultAccountId: entry.pool.getDefaultAccountId(),
-        accounts: entry.pool.listForStorage(),
+    // Serialize writes within one runtime. JsonStateStore.update() also holds
+    // a cross-process lock while loading and saving the merged snapshot.
+    const write = async () => {
+      const changed = changedProviderIds === null
+        ? new Set(this.#entries.keys())
+        : new Set(changedProviderIds);
+      const merge = (latest) => {
+        const pools = {
+          ...(latest?.pools && typeof latest.pools === "object" ? latest.pools : {}),
+        };
+        for (const [providerId, entry] of this.#entries) {
+          if (!changed.has(providerId) && Object.hasOwn(pools, providerId)) continue;
+          pools[providerId] = {
+            policy: entry.pool.policy,
+            defaultAccountId: entry.pool.getDefaultAccountId(),
+            accounts: entry.pool.listForStorage(),
+          };
+        }
+        return { ...latest, pools };
       };
-    }
-    await this.stateStore.save({ ...latest, pools });
+      if (typeof this.stateStore.update === "function") {
+        await this.stateStore.update(merge);
+        return;
+      }
+      const latest = await this.stateStore.load();
+      await this.stateStore.save(merge(latest));
+    };
+    const queued = this.#saveQueue.then(write, write);
+    this.#saveQueue = queued.catch(() => {});
+    await queued;
   }
 }

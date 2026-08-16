@@ -1,9 +1,10 @@
-import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
+import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
 import { createCliStatusAuthorizer } from "../../../packages/oauth/src/cli-status-authorizer.mjs";
+import { createOfficialSessionAuthorizer } from "../../../packages/oauth/src/official-session-authorizer.mjs";
 import {
   cliRequestPrompt,
   createCliAgentExecutor,
@@ -11,11 +12,18 @@ import {
   runCliCommand,
 } from "../../../packages/providers/src/cli-agent-transport.mjs";
 import {
+  decodeJwtPayload,
   recursiveQuotaWindows,
   selectPrimaryQuotaWindow,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
 import { readCursorDesktopSession } from "./native-transport.mjs";
+import {
+  OFFICIAL_SESSION_AUTH_KIND,
+  OFFICIAL_SESSION_SOURCE_KINDS,
+  normalizeOfficialSessionResult,
+  officialSessionResources,
+} from "../../../packages/providers/src/session-source.mjs";
 
 const PROVIDER_ID = "cursor";
 const CREDENTIAL_SLOT = Symbol("dockyard-cursor-session");
@@ -26,6 +34,37 @@ function hash(value) {
 
 function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+
+function normalizeTokenExpiry(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const millis = value > 1e12 ? value : value * 1000;
+    const date = new Date(millis);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function cursorTokenExpiresAt(raw = {}, payload = {}) {
+  const direct = normalizeTokenExpiry(raw.expiresAt ?? raw.expires_at);
+  if (direct) return direct;
+  const expiresIn = raw.expiresIn ?? raw.expires_in;
+  if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
+    return new Date(Date.now() + expiresIn * 1000).toISOString();
+  }
+  return normalizeTokenExpiry(payload.exp);
+}
+
+function tokenIsExpired(value, now = Date.now()) {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) && timestamp <= now;
+}
+
+function tokenNeedsRefresh(value, now = Date.now(), leewayMs = 60_000) {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) && timestamp <= now + leewayMs;
 }
 
 function statusObject(output) {
@@ -47,15 +86,6 @@ function statusValue(value, ...keys) {
 
 function parseTextEmail(output) {
   return String(output).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? null;
-}
-
-function commandAvailable(command) {
-  try {
-    execFileSync("which", [command], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** Parse only Cursor's public status output; credentials are never scraped. */
@@ -96,7 +126,19 @@ export function parseCursorAuthStatus(output) {
   };
 }
 
-function candidateFromStatus(status, { source = "official_cursor_cli", imported = false } = {}) {
+function activeSessionError(message, { mismatch = false } = {}) {
+  const error = new Error(message);
+  error.authExpired = true;
+  if (mismatch) error.accountMismatch = true;
+  return error;
+}
+
+function candidateFromStatus(status, {
+  source = "official_cursor_cli",
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+  imported = false,
+  credential = null,
+} = {}) {
   const credentialRef = createCredentialRef(PROVIDER_ID, status.accountId);
   const candidate = {
     candidateId: `cursor:${hash(status.accountId).slice(0, 20)}`,
@@ -113,18 +155,105 @@ function candidateFromStatus(status, { source = "official_cursor_cli", imported 
       refreshable: false,
     },
     credentialRef,
+    resources: officialSessionResources({ sourceKind, authSource: source }),
     imported,
     status: status.loggedIn ? "available" : "degraded",
-    diagnostic: status.loggedIn ? null : "Cursor CLI 当前未返回已登录状态",
+    diagnostic: status.loggedIn ? null : "Cursor 官方会话当前未返回已登录状态",
   };
   Object.defineProperty(candidate, CREDENTIAL_SLOT, {
-    value: {
-      type: "official_cli_session",
+    value: credential ?? {
+      type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID,
       accountId: status.accountId,
+      sourceKind,
     },
     enumerable: false,
   });
+  return candidate;
+}
+
+async function resolveCursorBrowserEmail(raw, access, {
+  fetchImpl = null,
+  apiBaseUrl = "https://api2.cursor.sh",
+  home = homedir(),
+  signal,
+} = {}) {
+  const payload = decodeJwtPayload(access) ?? {};
+  const direct = firstString(
+    raw?.email,
+    raw?.user?.email,
+    raw?.profile?.email,
+    payload.email,
+    payload.user_email,
+    payload.email_address,
+    payload["https://cursor.com/email"],
+  );
+  if (direct) return direct;
+
+  // Cursor Desktop keeps the same account's cached email locally. This is a
+  // compatibility fallback for browser responses whose JWT only contains the
+  // Auth0 subject (for example google-oauth2|user_...).
+  try {
+    const desktop = readCursorDesktopSession({ home });
+    if (desktop?.email) return desktop.email;
+  } catch {
+    // Continue to Cursor's first-party identity RPC below.
+  }
+
+  if (typeof fetchImpl !== "function") return null;
+  try {
+    const response = await fetchImpl(`${apiBaseUrl.replace(/\/+$/, "")}/aiserver.v1.AuthService/GetEmail`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${access}`,
+      },
+      body: "{}",
+      ...(signal ? { signal } : {}),
+    });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => ({}));
+    return firstString(body?.email, body?.user?.email, body?.profile?.email);
+  } catch {
+    return null;
+  }
+}
+
+async function candidateFromBrowserTokens(raw, options = {}) {
+  const access = firstString(raw?.accessToken, raw?.access_token);
+  const refresh = firstString(raw?.refreshToken, raw?.refresh_token);
+  if (!access || !refresh) throw new Error("Cursor browser login did not return access and refresh tokens");
+  const payload = decodeJwtPayload(access) ?? {};
+  const expiresAt = cursorTokenExpiresAt(raw, payload);
+  const email = await resolveCursorBrowserEmail(raw, access, options);
+  const accountId = firstString(raw.accountId, raw.account_id, raw.userId, raw.user_id, payload.sub, payload.user_id, email)
+    ?? `cursor:${hash(access).slice(0, 20)}`;
+  const candidate = candidateFromStatus({
+    loggedIn: true,
+    accountId,
+    email,
+    plan: firstString(raw.plan, raw.subscription?.plan, raw.membershipType, payload.plan),
+    displayName: firstString(raw.name, raw.user?.name, email, accountId),
+  }, {
+    source: "official_cursor_browser_oauth",
+    sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+    credential: {
+      type: "oauth",
+      providerId: PROVIDER_ID,
+      accountId,
+      access,
+      refresh,
+      ...(expiresAt ? { expiresAt } : {}),
+      email,
+      sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+    },
+  });
+  candidate.refresh = {
+    ...candidate.refresh,
+    accessTokenExpiresAt: expiresAt,
+    refreshable: true,
+  };
   return candidate;
 }
 
@@ -135,6 +264,7 @@ function desktopSessionAccountId(session) {
 function statusFromDesktopSession(session) {
   return {
     source: "cursor_desktop_app",
+    sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
     loggedIn: true,
     accountId: session.accountId,
     email: session.email,
@@ -171,6 +301,10 @@ function candidateFromDesktopSession(session) {
     status: "available",
     diagnostic: null,
     resources: {
+      ...officialSessionResources({
+        sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
+        authSource: "cursor_desktop_app",
+      }),
       transport: "cursor_connect_agent_service",
       identitySource: "cursor_desktop_app",
       sessionPersistence: "captured",
@@ -179,7 +313,7 @@ function candidateFromDesktopSession(session) {
   };
   Object.defineProperty(candidate, CREDENTIAL_SLOT, {
     value: {
-      type: "oauth",
+      type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID,
       accountId,
       access: session.token,
@@ -211,19 +345,34 @@ function normalizeModel(value) {
   if (!value || typeof value !== "object") return null;
   const id = firstString(value.id, value.model, value.modelId, value.name);
   if (!id) return null;
+  const contextWindow = value.contextWindow
+    ?? value.context_window
+    ?? value.contextTokenLimit
+    ?? value.context_token_limit;
+  const maxTokens = value.maxTokens
+    ?? value.max_tokens
+    ?? value.maxOutputTokens
+    ?? value.max_output_tokens;
+  const inputModalities = value.input
+    ?? value.inputModalities
+    ?? value.input_modalities
+    ?? (value.supportsImages || value.supports_images ? ["text", "image"] : null);
   return {
     id,
-    name: firstString(value.name, value.label, id),
-    ...(Number.isInteger(value.contextWindow ?? value.context_window)
-      ? { contextWindow: value.contextWindow ?? value.context_window }
-      : {}),
-    ...(Number.isInteger(value.maxTokens ?? value.max_tokens ?? value.maxOutputTokens)
-      ? { maxTokens: value.maxTokens ?? value.max_tokens ?? value.maxOutputTokens }
-      : {}),
-    ...(Array.isArray(value.input ?? value.inputModalities)
-      ? { inputModalities: [...(value.input ?? value.inputModalities)] }
-      : {}),
+    name: firstString(
+      value.clientDisplayName,
+      value.client_display_name,
+      value.displayName,
+      value.display_name,
+      value.name,
+      value.label,
+      id,
+    ),
+    ...(Number.isInteger(contextWindow) ? { contextWindow } : {}),
+    ...(Number.isInteger(maxTokens) ? { maxTokens } : {}),
+    ...(Array.isArray(inputModalities) ? { inputModalities: [...inputModalities] } : {}),
     ...(value.reasoning ? { reasoning: value.reasoning } : {}),
+    ...(value.supportsThinking || value.supports_thinking ? { reasoning: { supported: true } } : {}),
   };
 }
 
@@ -231,39 +380,102 @@ export function createCursorCatalogLoader({
   cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
   env = process.env,
   commandRunner = runCliCommand,
+  apiBaseUrl = process.env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
+  fetchImpl = fetch,
 } = {}) {
   let cached = null;
   let pending = null;
-  return async function loadCatalog({ force = false } = {}) {
-    if (!force && cached) return cached;
+  const normalizedApiBaseUrl = apiBaseUrl.replace(/\/+$/, "");
+
+  async function loadBrowserCatalog({ accounts, secretStore, signal }) {
+    const account = (Array.isArray(accounts) ? accounts : []).find((entry) => (
+      entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+      || entry?.resources?.authSource === "official_cursor_browser_oauth"
+    ));
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    if (!account || !credentialRef || typeof secretStore?.read !== "function") return null;
+    const credential = await secretStore.read(credentialRef);
+    if (!credential?.access) return null;
+    const response = await fetchImpl(`${normalizedApiBaseUrl}/aiserver.v1.AiService/AvailableModels`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${credential.access}`,
+      },
+      body: JSON.stringify({
+        isNightly: false,
+        excludeMaxNamedModels: true,
+        additionalModelNames: [],
+        useModelParameters: true,
+        useReactModelPicker: true,
+      }),
+      ...(signal ? { signal } : {}),
+    });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => ({}));
+    const values = Array.isArray(body?.models)
+      ? body.models
+      : body?.modelNames ?? body?.model_names;
+    const models = (Array.isArray(values) ? values : []).map(normalizeModel).filter(Boolean);
+    if (models.length === 0) return null;
+    return {
+      models,
+      source: "official_cursor_browser_oauth_api",
+    };
+  }
+
+  return async function loadCatalog({ force = false, accounts = [], secretStore, signal } = {}) {
+    const hasBrowserAccount = (Array.isArray(accounts) ? accounts : []).some((entry) => (
+      entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+      || entry?.resources?.authSource === "official_cursor_browser_oauth"
+    ));
+    if (!force && cached && (
+      hasBrowserAccount
+        ? cached.source === "official_cursor_browser_oauth_api"
+        : cached.source !== "official_cursor_browser_oauth_api"
+    )) return cached;
     if (pending) return pending;
     pending = (async () => {
+      try {
+        const browser = await loadBrowserCatalog({ accounts, secretStore, signal });
+        if (browser) {
+          cached = browser;
+          return cached;
+        }
+      } catch {
+        // Fall through to the official CLI status compatibility path.
+      }
       try {
         const result = await commandRunner(cliPath, ["status"], {
           env,
           providerId: PROVIDER_ID,
           timeoutMs: 30_000,
+          ...(signal ? { signal } : {}),
         });
         const status = parseCursorAuthStatus(result.output);
         const models = status.models.map(normalizeModel).filter(Boolean);
-        cached = {
+        const catalog = {
           models,
           source: "official_cursor_cli_status",
-          ...(models.length ? {} : { diagnostics: ["Cursor 官方 CLI status 没有返回模型目录；不在 Dockyard 中硬编码模型版本"] }),
+          ...(models.length ? {} : { diagnostics: ["Cursor 官方 status 没有返回模型目录"] }),
         };
+        cached = models.length ? catalog : null;
+        return catalog;
       } catch (error) {
         const desktop = readCursorDesktopSession({ env });
-        cached = {
+        const catalog = {
           models: [],
           source: error?.code === "ENOENT"
             ? (desktop ? "cursor_desktop_app" : "cursor_cli_not_found")
             : "official_cursor_cli_status",
           diagnostics: [desktop
-            ? "已检测到 Cursor 桌面端 OAuth；官方模型目录仍需 cursor-agent status 返回，未硬编码模型"
+            ? "已检测到 Cursor 官方 OAuth；官方模型目录请求未返回结果"
             : `无法读取 Cursor 官方模型目录：${error.message}`],
         };
+        cached = null;
+        return catalog;
       }
-      return cached;
     })().finally(() => { pending = null; });
     return pending;
   };
@@ -297,26 +509,116 @@ export class CursorSubscriptionDriver {
     commandRunner = runCliCommand,
     requestExecutor = null,
     catalogLoader = null,
+    sessionReader = null,
+    sessionSource = "official_cursor_client",
+    sessionSourceKind = OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
+    oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_CURSOR_BROWSER_OAUTH !== "0",
+    websiteUrl = env.CURSOR_WEBSITE_URL || "https://cursor.com",
+    apiBaseUrl = env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
+    refreshUrl = env.CURSOR_REFRESH_URL || `${apiBaseUrl}/auth/exchange_user_api_key`,
+    fetchImpl = fetch,
   } = {}) {
     this.cliPath = cliPath;
     this.env = env;
     this.home = home;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
-    this.catalogLoader = catalogLoader ?? createCursorCatalogLoader({ cliPath, env, commandRunner });
-    this.oauthAuthorizer = createCliStatusAuthorizer({
+    this.fetchImpl = fetchImpl;
+    this.websiteUrl = websiteUrl.replace(/\/+$/, "");
+    this.apiBaseUrl = apiBaseUrl.replace(/\/+$/, "");
+    const refreshEndpoint = new URL(refreshUrl);
+    if (refreshEndpoint.protocol !== "https:") {
+      throw new Error("Cursor OAuth refresh endpoint must use HTTPS");
+    }
+    this.refreshUrl = refreshEndpoint.toString().replace(/\/$/, "");
+    this.sessionReader = sessionReader;
+    this.sessionSource = sessionSource;
+    this.sessionSourceKind = sessionSourceKind;
+    this.catalogLoader = catalogLoader ?? createCursorCatalogLoader({
+      cliPath,
+      env,
+      commandRunner,
+      apiBaseUrl: this.apiBaseUrl,
+      fetchImpl: this.fetchImpl,
+    });
+    this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
+      providerId: PROVIDER_ID,
+      source: sessionSource,
+      instructions: "请在 Cursor 官方客户端完成登录，完成后回到 Dockyard DSH。",
+      readSession: async (context = {}) => {
+        const status = this.sessionReader
+          ? await this.#readStatus(context.signal)
+          : (() => {
+            const desktop = this.#readDesktopSession();
+            return desktop ? statusFromDesktopSession(desktop) : null;
+          })();
+        if (!status?.loggedIn) return { accounts: [] };
+        const desktop = status.source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
+        const candidate = desktop
+          ? candidateFromDesktopSession(desktop)
+          : candidateFromStatus(status, { source: status.source, sourceKind: status.sourceKind });
+        return { accounts: [await this.importAccount(candidate, context)] };
+      },
+    });
+    this.cliAuthorizer = createCliStatusAuthorizer({
       providerId: PROVIDER_ID,
       cliPath,
       loginArgs: ["login"],
       environment: env,
       browserOpened: true,
-      instructions: "已启动官方 Cursor OAuth 登录。请在 Cursor 官方网页完成登录，完成后回到 Dockyard DSH。",
+      instructions: "已启动官方 Cursor CLI OAuth 登录。请在 Cursor 官方网页完成登录，完成后回到 Dockyard DSH。",
       importStatus: async (context) => {
         const status = await this.#readStatus();
         if (!status.loggedIn) return [];
-        return [await this.importAccount(candidateFromStatus(status), context)];
+        return [await this.importAccount(candidateFromStatus(status, {
+          source: status.source,
+          sourceKind: status.sourceKind,
+        }), context)];
       },
     });
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth
+      ? createBrowserOAuthAuthorizer({
+        providerId: PROVIDER_ID,
+        instructions: "请在官方 Cursor 授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        authorizationUrlBuilder: async () => {
+          const verifier = randomBytes(32).toString("base64url");
+          const challenge = createHash("sha256").update(verifier).digest("base64url");
+          const uuid = randomUUID();
+          return {
+            url: `${this.websiteUrl}/loginDeepControl?${new URLSearchParams({
+              challenge,
+              uuid,
+              mode: "login",
+              redirectTarget: "cli",
+            })}`,
+            metadata: { uuid, verifier },
+          };
+        },
+        pollSession: async ({ metadata, context }) => {
+          if (!metadata?.uuid || !metadata.verifier) return null;
+          const response = await this.fetchImpl(`${this.apiBaseUrl}/auth/poll?${new URLSearchParams({
+            uuid: metadata.uuid,
+            verifier: metadata.verifier,
+          })}`, {
+            headers: { "content-type": "application/json" },
+            ...(context.signal ? { signal: context.signal } : {}),
+          });
+          if (response.status === 404) return null;
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(`Cursor browser OAuth polling failed (${response.status})`);
+          return body?.accessToken && body?.refreshToken ? body : null;
+        },
+        importCredentials: async (raw, context) => [await this.importAccount(await candidateFromBrowserTokens(raw, {
+           fetchImpl: this.fetchImpl,
+           apiBaseUrl: this.apiBaseUrl,
+           home: this.home,
+           signal: context.signal,
+         }), context)],
+      })
+      : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliAuthorizer;
   }
 
   #readDesktopSession() {
@@ -328,7 +630,35 @@ export class CursorSubscriptionDriver {
     };
   }
 
+  #statusFromResult(result, defaults = {}) {
+    const normalized = normalizeOfficialSessionResult(result, {
+      source: defaults.source ?? "official_cursor_cli",
+      sourceKind: defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+    });
+    const status = parseCursorAuthStatus(normalized?.output ?? "");
+    return {
+      ...status,
+      source: normalized?.source ?? defaults.source ?? "official_cursor_cli",
+      sourceKind: normalized?.sourceKind ?? defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+    };
+  }
+
   async #readStatus(signal) {
+    if (typeof this.sessionReader === "function") {
+      try {
+        const value = await this.sessionReader({ env: this.env, home: this.home, signal });
+        const normalized = normalizeOfficialSessionResult(value, {
+          source: this.sessionSource,
+          sourceKind: this.sessionSourceKind,
+        });
+        if (normalized) return this.#statusFromResult(normalized, {
+          source: this.sessionSource,
+          sourceKind: this.sessionSourceKind,
+        });
+      } catch {
+        // Fall through to the official CLI or desktop database reader.
+      }
+    }
     try {
       const result = await this.commandRunner(this.cliPath, ["status"], {
         env: this.env,
@@ -336,7 +666,10 @@ export class CursorSubscriptionDriver {
         timeoutMs: 30_000,
         ...(signal ? { signal } : {}),
       });
-      const status = parseCursorAuthStatus(result.output);
+      const status = this.#statusFromResult(result, {
+        source: "official_cursor_cli",
+        sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+      });
       if (status.loggedIn) return status;
       const desktop = this.#readDesktopSession();
       return desktop ? statusFromDesktopSession(desktop) : status;
@@ -347,6 +680,97 @@ export class CursorSubscriptionDriver {
     }
   }
 
+  #isBrowserAccount(account) {
+    return account?.resources?.authSource === "official_cursor_browser_oauth";
+  }
+
+  async #refreshBrowserCredential(account, context = {}) {
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    const credential = context.secretStore && credentialRef
+      ? await context.secretStore.read(credentialRef)
+      : null;
+    if (!credential?.access) throw activeSessionError("Cursor browser OAuth credential is missing; authorize again");
+    const expiresAt = cursorTokenExpiresAt(credential, decodeJwtPayload(credential.access) ?? {});
+    const now = context.now instanceof Date ? context.now.getTime() : Date.now();
+    if (!tokenNeedsRefresh(expiresAt, now)) return credential;
+    if (!credential.refresh) throw activeSessionError("Cursor browser OAuth token expired; authorize again");
+
+    let response;
+    try {
+      response = await this.fetchImpl(this.refreshUrl, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${credential.refresh}`,
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: "{}",
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+    } catch (error) {
+      const wrapped = activeSessionError("Cursor browser OAuth access token expired and refresh failed; authorize again");
+      wrapped.cause = error;
+      throw wrapped;
+    }
+    const body = await response.json().catch(() => ({}));
+    const access = firstString(body?.accessToken, body?.access_token);
+    if (!response.ok || !access) {
+      const error = activeSessionError("Cursor browser OAuth access token expired and refresh failed; authorize again");
+      error.status = response.status;
+      throw error;
+    }
+    const refresh = firstString(body?.refreshToken, body?.refresh_token, credential.refresh);
+    const refreshedExpiresAt = cursorTokenExpiresAt({
+      expiresAt: body?.expiresAt ?? body?.expires_at,
+      expiresIn: body?.expiresIn ?? body?.expires_in,
+    }, decodeJwtPayload(access) ?? {});
+    const updated = {
+      ...credential,
+      access,
+      refresh,
+      ...(refreshedExpiresAt ? { expiresAt: refreshedExpiresAt } : {}),
+      lastRefreshedAt: new Date(now).toISOString(),
+    };
+    await context.secretStore.write(credentialRef, updated);
+    return updated;
+  }
+
+  async #browserStatus(account, context = {}) {
+    const credential = await this.#refreshBrowserCredential(account, context);
+    const expiresAt = cursorTokenExpiresAt(credential, decodeJwtPayload(credential.access) ?? {});
+    if (tokenIsExpired(expiresAt)) {
+      throw activeSessionError("Cursor browser OAuth access token expired; authorize again");
+    }
+    const email = account.email ?? await resolveCursorBrowserEmail({}, credential.access, {
+      fetchImpl: this.fetchImpl,
+      apiBaseUrl: this.apiBaseUrl,
+      home: this.home,
+      signal: context.signal,
+    });
+    return {
+      loggedIn: true,
+      accountId: account.accountId,
+      email,
+      displayName: email ?? account.displayName,
+      plan: account.subscription?.plan ?? null,
+      credential,
+      raw: {},
+    };
+  }
+
+  async #assertActiveSession(account, signal, context = {}) {
+    if (this.#isBrowserAccount(account)) return this.#browserStatus(account, context);
+    const status = await this.#readStatus(signal);
+    if (!status.loggedIn) throw activeSessionError("Cursor OAuth session is not active; authorize again");
+    if (account?.accountId !== status.accountId && account?.accountId !== "cursor:active") {
+      throw activeSessionError(
+        "Cursor only exposes its active official session; authorize the selected account again",
+        { mismatch: true },
+      );
+    }
+    return status;
+  }
+
   async discover() {
     try {
       const status = await this.#readStatus();
@@ -355,7 +779,7 @@ export class CursorSubscriptionDriver {
       const desktop = source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
       const candidate = desktop
         ? candidateFromDesktopSession(desktop)
-        : candidateFromStatus(status, { source });
+        : candidateFromStatus(status, { source, sourceKind: status.sourceKind });
       return { candidates: candidate ? [candidate] : [], source, diagnostics: [] };
     } catch (error) {
       return { candidates: [], source: "official_cursor_cli", diagnostics: [`无法读取 Cursor 官方登录态：${error.message}`] };
@@ -374,70 +798,103 @@ export class CursorSubscriptionDriver {
       displayName: candidate.displayName,
       email: candidate.email,
       auth: {
-        kind: candidate.source === "cursor_desktop_app" ? "oauth" : "official_cli_session",
+        kind: OFFICIAL_SESSION_AUTH_KIND,
         scopes: [],
       },
       subscription: { ...candidate.subscription },
       refresh: { ...candidate.refresh },
       resources: {
+        ...officialSessionResources({
+          sourceKind: candidate.resources?.sessionSource
+            ?? (candidate.source === "cursor_desktop_app"
+              ? OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP
+              : OFFICIAL_SESSION_SOURCE_KINDS.CLI),
+          authSource: candidate.source,
+        }),
         transport: "cursor_agentservice_connect_proto",
-        accountScope: candidate.source === "cursor_desktop_app" ? "desktop_oauth_session" : "active_cli_session",
         quotaSource: candidate.resources?.quotaSource ?? "official_cursor_cli_status",
         ...(candidate.resources ?? {}),
       },
     };
   }
 
-  async startAuthorization(context = {}) {
-    if (!commandAvailable(this.cliPath)) {
-      const desktop = this.#readDesktopSession();
-      if (desktop) {
-        const account = await this.importAccount(candidateFromDesktopSession(desktop), context);
-        return {
-          sessionId: `cursor:desktop:${randomUUID()}`,
-          providerId: PROVIDER_ID,
-          status: "completed",
-          instructions: "已检测到 Cursor 桌面端官方 OAuth 登录态，当前账号已接入 Dockyard DSH。",
-          accounts: [account],
-          diagnostic: null,
-        };
-      }
+  async getActiveSession(context = {}) {
+    try {
+      const status = await this.#readStatus(context.signal);
+      if (!status.loggedIn) return null;
+      const desktop = status.source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
+      const candidate = desktop
+        ? candidateFromDesktopSession(desktop)
+        : candidateFromStatus(status, {
+          source: status.source,
+          sourceKind: status.sourceKind,
+        });
+      const account = await this.importAccount(candidate, context);
       return {
-        sessionId: `cursor:missing:${randomUUID()}`,
+        status: "completed",
         providerId: PROVIDER_ID,
-        status: "failed",
-        instructions: "未找到官方 Cursor Agent CLI；请先在 Cursor 官方客户端完成登录，或安装 cursor-agent 后重试。",
-        diagnostic: "本机没有 cursor-agent 可执行文件，也没有检测到 Cursor 桌面端 OAuth 会话；因此没有启动网页授权。",
+        instructions: "已检测到 Cursor 官方会话，当前账号已接入 Dockyard DSH。",
+        accounts: [account],
+        diagnostic: null,
       };
+    } catch {
+      return null;
     }
-    return this.oauthAuthorizer.begin(context);
   }
-  async pollAuthorization(sessionId, context = {}) { return this.oauthAuthorizer.poll(sessionId, context); }
-  async cancelAuthorization(sessionId, context = {}) { return this.oauthAuthorizer.cancel(sessionId, context); }
+
+  async startAuthorization(context = {}) {
+    // Add/Login is always a new browser account flow. Existing desktop/CLI
+    // sessions remain available through getActiveSession/scan, not this path.
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliAuthorizer.begin(context);
+    return started;
+  }
+
+  async pollAuthorization(sessionId, context = {}) {
+    const authorizer = sessionId?.includes(":official-session:")
+      ? this.clientSessionAuthorizer
+      : sessionId?.includes(":browser:")
+        ? this.browserAuthorizer
+        : this.oauthAuthorizer === this.browserAuthorizer
+          ? this.cliAuthorizer
+          : this.oauthAuthorizer;
+    return authorizer.poll(sessionId, context);
+  }
+
+  async cancelAuthorization(sessionId, context = {}) {
+    const authorizer = sessionId?.includes(":official-session:")
+      ? this.clientSessionAuthorizer
+      : sessionId?.includes(":browser:")
+        ? this.browserAuthorizer
+        : this.oauthAuthorizer === this.browserAuthorizer
+          ? this.cliAuthorizer
+          : this.oauthAuthorizer;
+    return authorizer.cancel(sessionId, context);
+  }
 
   async refreshAccount(account, context = {}) {
-    const status = await this.#readStatus(context.signal);
-    if (!status.loggedIn) {
-      const error = new Error("Cursor OAuth session is not active; authorize again");
-      error.authExpired = true;
-      throw error;
-    }
-    if (account.accountId !== status.accountId && account.accountId !== "cursor:active") {
-      const error = new Error("Cursor CLI only exposes its active local session; authorize the selected account again");
-      error.authForbidden = true;
-      throw error;
-    }
+    const status = await this.#assertActiveSession(account, context.signal, context);
     return {
       identity: { email: status.email, displayName: status.displayName },
       subscription: { plan: status.plan, status: "active", expiresAt: null },
-      refresh: { lastRefreshedAt: (context.now instanceof Date ? context.now : new Date()).toISOString(), refreshable: false },
+      refresh: {
+        accessTokenExpiresAt: this.#isBrowserAccount(account)
+          ? cursorTokenExpiresAt(status.credential, decodeJwtPayload(status.credential?.access ?? "") ?? {})
+          : account.refresh?.accessTokenExpiresAt ?? null,
+        lastRefreshedAt: (context.now instanceof Date ? context.now : new Date()).toISOString(),
+        refreshable: this.#isBrowserAccount(account) ? Boolean(status.credential?.refresh) : false,
+      },
     };
   }
 
   async getQuota(account, context = {}) {
-    const status = await this.#readStatus(context.signal);
+    const status = await this.#assertActiveSession(account, context.signal, context);
     const now = context.now instanceof Date ? context.now : new Date();
-    const windows = recursiveQuotaWindows(status.raw, { source: "cursor_cli_status", now, prefix: "cursor" });
+    const quotaSource = this.#isBrowserAccount(account) ? "official_cursor_browser_oauth" : "cursor_cli_status";
+    const windows = recursiveQuotaWindows(status.raw, { source: quotaSource, now, prefix: "cursor" });
     const primary = selectPrimaryQuotaWindow(windows);
     return {
       quota: {
@@ -447,20 +904,30 @@ export class CursorSubscriptionDriver {
         resetAt: primary.resetAt ?? null,
         windows,
         updatedAt: now.toISOString(),
-        source: "cursor_cli_status",
+        source: quotaSource,
       },
       subscription: { plan: status.plan, status: status.loggedIn ? "active" : null, expiresAt: null },
       resources: {
         quotaDiagnostic: windows.length
           ? null
-          : "Cursor 官方 CLI status 未返回实时订阅额度；详细 usage 仍以 Cursor 官方 Dashboard 为准",
+          : this.#isBrowserAccount(account)
+            ? "Cursor 官方浏览器会话未返回实时订阅额度；详细 usage 仍以 Cursor 官方 Dashboard 为准"
+            : "Cursor 官方 CLI status 未返回实时订阅额度；详细 usage 仍以 Cursor 官方 Dashboard 为准",
       },
     };
   }
 
-  async getCatalog(context = {}) { return this.catalogLoader({ force: Boolean(context.force) }); }
+  async getCatalog(context = {}) {
+    return this.catalogLoader({
+      force: Boolean(context.force),
+      accounts: context.accounts,
+      secretStore: context.secretStore,
+      signal: context.signal,
+    });
+  }
 
   async invoke(request, invocation, context = {}) {
+    await this.#assertActiveSession(invocation?.account, context.signal, context);
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") throw new Error("Cursor native invocation transport is not mounted");
     return executor({ request, invocation, context });

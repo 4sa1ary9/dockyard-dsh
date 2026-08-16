@@ -11,7 +11,8 @@ var __export = (target, all) => {
 // packages/dsh-plugin/src/dockyard-remote-host.mjs
 var dockyard_remote_host_exports = {};
 __export(dockyard_remote_host_exports, {
-  DockyardRemoteService: () => DockyardRemoteService
+  DockyardRemoteService: () => DockyardRemoteService,
+  publicAuthResult: () => publicAuthResult
 });
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 function publicAuthResult(result) {
@@ -24,6 +25,7 @@ function publicAuthResult(result) {
     ...result.instructions ? { instructions: result.instructions } : {},
     ...result.browserOpened ? { browserOpened: true } : {},
     ...result.inputRequired ? { inputRequired: true } : {},
+    ...result.authorizationCodeRequired ? { authorizationCodeRequired: true } : {},
     ...result.diagnostic ? { diagnostic: result.diagnostic } : {},
     ...Array.isArray(result.accounts) ? { accounts: result.accounts } : {}
   };
@@ -92,7 +94,7 @@ var init_dockyard_remote_host = __esm({
         return envelope(result, await this.dockyard.snapshot());
       }
       async login(request) {
-        const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId));
+        const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId, { openBrowser: false }));
         return envelope(result, await this.dockyard.snapshot());
       }
       async poll(request) {
@@ -273,7 +275,8 @@ function createAccountRecord(input, now = /* @__PURE__ */ new Date()) {
   if (!input || typeof input !== "object") throw new ValidationError("Account input is required");
   if (!input.providerId) throw new ValidationError("Account providerId is required");
   if (!input.accountId) throw new ValidationError("Account accountId is required");
-  if (!input.credentialRef) throw new ValidationError("Account credentialRef is required");
+  const credentialRef = input.credentialRef ?? input.auth?.credentialRef;
+  if (!credentialRef) throw new ValidationError("Account credentialRef is required");
   const health = input.health ?? {};
   const createdAt = isoOrNull(input.createdAt, "createdAt") ?? now.toISOString();
   const updatedAt2 = isoOrNull(input.updatedAt, "updatedAt") ?? now.toISOString();
@@ -284,7 +287,7 @@ function createAccountRecord(input, now = /* @__PURE__ */ new Date()) {
     email: stringOrNull(input.email),
     auth: {
       kind: stringOrNull(input.auth?.kind) ?? "oauth",
-      credentialRef: String(input.credentialRef),
+      credentialRef: String(credentialRef),
       scopes: Array.isArray(input.auth?.scopes) ? [...input.auth.scopes] : []
     },
     subscription: {
@@ -474,6 +477,12 @@ function defineProviderModule({
     async importSource(source, context) {
       return driver.importSource ? driver.importSource(source, context) : missingDriver(id, "oauth_source_import")(source, context);
     },
+    // A provider may expose an already authenticated official CLI, desktop
+    // client, browser, or OAuth-file session. Returning null keeps the normal
+    // provider-owned authorization flow unchanged.
+    async getActiveSession(context) {
+      return typeof driver.getActiveSession === "function" ? driver.getActiveSession(context) : null;
+    },
     async startAuthorization(context) {
       return driver.startAuthorization ? driver.startAuthorization(context) : missingDriver(id, "oauth_authorization")(context);
     },
@@ -513,7 +522,7 @@ function selectionContext(context, excludedIds) {
   return { ...context, excludeAccountIds: [...excludedIds] };
 }
 function shouldFailover(error, accountPool, context) {
-  return accountPool.policy === ACCOUNT_SELECTION_POLICY.FAILOVER && !context.accountId && (error?.rateLimited || error?.quotaExhausted || error?.authExpired);
+  return accountPool.policy === ACCOUNT_SELECTION_POLICY.FAILOVER && !context.accountId && (error?.rateLimited || error?.quotaExhausted || error?.authExpired || error?.emptyOutput);
 }
 function quotaResetAt(account) {
   const candidates = [
@@ -626,7 +635,10 @@ function createProviderRoute({ providerModule, accountPool }) {
               yield chunk;
             }
             if (!hasOutput) {
-              for (const buffered of pending) yield buffered;
+              const error = new Error("Provider stream ended without substantive output");
+              error.code = "EMPTY_STREAM_OUTPUT";
+              error.emptyOutput = true;
+              throw error;
             }
             accountPool.report(account.accountId, { status: "success" });
             return;
@@ -666,7 +678,7 @@ var AccountPool = class {
     this.policy = policy;
     this.clock = clock;
   }
-  upsert(input) {
+  upsert(input, { resetHealth = false } = {}) {
     if (input.providerId && input.providerId !== this.providerId) {
       throw new ValidationError("Account provider does not match this pool", {
         expected: this.providerId,
@@ -685,7 +697,12 @@ var AccountPool = class {
         quota: { ...current?.quota, ...input.quota },
         refresh: { ...current?.refresh, ...input.refresh },
         resources: { ...current?.resources, ...input.resources },
-        health: { ...current?.health, ...input.health },
+        health: resetHealth ? {
+          ...input.health,
+          status: input.health?.status === ACCOUNT_HEALTH.EXPIRED ? ACCOUNT_HEALTH.UNKNOWN : input.health?.status ?? ACCOUNT_HEALTH.UNKNOWN,
+          cooldownUntil: null,
+          lastError: null
+        } : { ...current?.health, ...input.health },
         createdAt: current?.createdAt ?? input.createdAt
       },
       this.clock()
@@ -744,7 +761,8 @@ var AccountPool = class {
       account = eligible.find((candidate2) => candidate2.accountId === requestedId);
       if (!account) throw new AccountSelectionError(`Account is not eligible: ${requestedId}`, { accountId: requestedId });
     } else {
-      const assignmentKey = context.sessionId ?? context.requestId ?? null;
+      const sticky = this.policy === ACCOUNT_SELECTION_POLICY.STICKY_SESSION;
+      const assignmentKey = sticky ? context.sessionId ?? context.requestId ?? null : null;
       const excludedIds = new Set(context.excludeAccountIds ?? []);
       const assignedId = assignmentKey ? this.#sessionAssignments.get(assignmentKey) : null;
       account = assignedId && !excludedIds.has(assignedId) ? eligible.find((candidate2) => candidate2.accountId === assignedId) : null;
@@ -1175,10 +1193,71 @@ var secretStoreConstants = Object.freeze({
 });
 
 // packages/runtime/src/state-store.mjs
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname as dirname2, join as join2 } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
+var LOCK_RETRY_MS = 25;
+var LOCK_TIMEOUT_MS = 3e4;
+var LOCK_STALE_MS = 12e4;
+function delay(milliseconds) {
+  return new Promise((resolve2) => setTimeout(resolve2, milliseconds));
+}
+async function acquireFileLock(filePath) {
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  await mkdir(dirname2(filePath), { recursive: true, mode: 448 });
+  while (true) {
+    try {
+      const handle = await open(lockPath, "wx", 384);
+      try {
+        await handle.writeFile(`${process.pid}
+`, "utf8");
+      } catch (error) {
+        await handle.close().catch(() => {
+        });
+        await rm(lockPath, { force: true }).catch(() => {
+        });
+        throw error;
+      }
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        await handle.close().catch(() => {
+        });
+        await rm(lockPath, { force: true }).catch(() => {
+        });
+      };
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      try {
+        const metadata = await stat(lockPath);
+        if (Date.now() - metadata.mtimeMs > LOCK_STALE_MS) {
+          await rm(lockPath, { force: true });
+          continue;
+        }
+      } catch (lockError) {
+        if (lockError?.code !== "ENOENT") throw lockError;
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        const timeout = new Error(`Timed out waiting for state file lock: ${filePath}`);
+        timeout.code = "ELOCKTIMEOUT";
+        throw timeout;
+      }
+      await delay(LOCK_RETRY_MS);
+    }
+  }
+}
+async function withFileLock(filePath, operation) {
+  const release = await acquireFileLock(filePath);
+  try {
+    return await operation();
+  } finally {
+    await release();
+  }
+}
 function defaultDockyardHome({ env = process.env, home = homedir() } = {}) {
   return env.DOCKYARD_DSH_HOME || join2(home, ".dockyard-dsh");
 }
@@ -1207,10 +1286,27 @@ var JsonStateStore = class {
       };
     } catch (error) {
       if (error?.code === "ENOENT") return emptyState();
+      if (error instanceof SyntaxError) {
+        const archivePath = `${this.filePath}.corrupted.${Date.now()}`;
+        await rename(this.filePath, archivePath).catch(() => {
+        });
+        return emptyState();
+      }
       throw error;
     }
   }
   async save(state) {
+    return withFileLock(this.filePath, () => this.#write(state));
+  }
+  async update(mutator) {
+    if (typeof mutator !== "function") throw new TypeError("State update mutator must be a function");
+    return withFileLock(this.filePath, async () => {
+      const current = await this.load();
+      const next = await mutator(current);
+      return this.#write(next);
+    });
+  }
+  async #write(state) {
     const next = {
       ...emptyState(),
       ...state,
@@ -1218,24 +1314,28 @@ var JsonStateStore = class {
     };
     await mkdir(dirname2(this.filePath), { recursive: true, mode: 448 });
     const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
-    await writeFile(tempPath, `${JSON.stringify(next, null, 2)}
+    let committed = false;
+    try {
+      await writeFile(tempPath, `${JSON.stringify(next, null, 2)}
 `, { mode: 384 });
-    await rename(tempPath, this.filePath);
-    return next;
+      await rename(tempPath, this.filePath);
+      committed = true;
+      return next;
+    } finally {
+      if (!committed) await rm(tempPath, { force: true }).catch(() => {
+      });
+    }
   }
 };
 
 // modules/provider-codex/src/driver.mjs
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { homedir as homedir2 } from "node:os";
 import { join as join4 } from "node:path";
 
-// packages/oauth/src/cli-oauth-authorizer.mjs
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdir as mkdir2, mkdtemp, readFile as readFile3, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join as join3 } from "node:path";
-import { spawn as spawn2 } from "node:child_process";
+// packages/oauth/src/browser-oauth-authorizer.mjs
+import { createHash as createHash2, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
+import { createServer } from "node:http";
 
 // packages/providers/src/provider-utils.mjs
 import { readFile as readFile2 } from "node:fs/promises";
@@ -1296,6 +1396,9 @@ async function fetchJson(url, init = {}, { timeoutMs = 2e4, fetchImpl = fetch } 
       const error = new Error(`Provider request failed (${response.status})`);
       error.status = response.status;
       error.bodyKeys = body && typeof body === "object" ? Object.keys(body) : [];
+      const upstreamError = body?.error;
+      const upstreamCode = typeof upstreamError === "string" ? upstreamError : upstreamError && typeof upstreamError === "object" ? upstreamError.code ?? upstreamError.type : body?.error_code ?? body?.code;
+      if (typeof upstreamCode === "string" && upstreamCode.length > 0) error.upstreamCode = upstreamCode;
       throw error;
     }
     return { body, response };
@@ -1309,7 +1412,7 @@ function redactError(error) {
   const message = error instanceof Error ? error.message : String(error);
   const detail = error?.detail ? ` ${String(error.detail)}` : "";
   const code = error?.code !== void 0 && error?.code !== null ? ` [code ${String(error.code)}]` : "";
-  return `${message}${detail}${code}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").slice(0, 300);
+  return `${message}${detail}${code}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]").replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]").slice(0, 300);
 }
 function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date(), prefix = "quota" } = {}) {
   const windows = [];
@@ -1361,14 +1464,307 @@ function selectPrimaryQuotaWindow(windows) {
   return preferred ?? windows[0];
 }
 
-// packages/oauth/src/cli-oauth-authorizer.mjs
-var URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
+// packages/oauth/src/browser-oauth-authorizer.mjs
 var DEFAULT_TIMEOUT_MS = 10 * 60 * 1e3;
+var DEFAULT_CALLBACK_PATH = "/oauth/callback";
+function base64Url(value) {
+  return Buffer.from(value).toString("base64url");
+}
+function createPkce() {
+  const verifier = base64Url(randomBytes(32));
+  const challenge = createHash2("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+function publicSession(session) {
+  return {
+    sessionId: session.sessionId,
+    providerId: session.providerId,
+    status: session.status,
+    authorizationUrl: session.authorizationUrl,
+    instructions: session.instructions,
+    startedAt: session.startedAt,
+    diagnostic: session.diagnostic ?? null,
+    ...session.browserOpened ? { browserOpened: true } : {},
+    ...session.authorizationCodeRequired ? { authorizationCodeRequired: true } : {}
+  };
+}
+function missingSession(sessionId, providerId, instructions) {
+  return {
+    sessionId,
+    providerId,
+    status: "missing",
+    instructions,
+    diagnostic: "OAuth \u767B\u5F55\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002"
+  };
+}
+function extractCodeInput(input) {
+  const text2 = String(input ?? "").trim();
+  if (!text2) return { code: "", state: "" };
+  try {
+    const url = new URL(text2);
+    return {
+      code: url.searchParams.get("code") ?? "",
+      state: url.searchParams.get("state") ?? "",
+      error: url.searchParams.get("error") ?? ""
+    };
+  } catch {
+    const [code, state] = text2.split("#", 2);
+    return { code: code.trim(), state: state?.trim() ?? "" };
+  }
+}
+function createBrowserOAuthAuthorizer({
+  providerId,
+  authorizationUrlBuilder,
+  exchangeCode = null,
+  pollSession = null,
+  importCredentials,
+  redirectUri,
+  callbackPath = DEFAULT_CALLBACK_PATH,
+  callbackHost = "localhost",
+  callbackPort = null,
+  instructions = "\u8BF7\u5728\u5B98\u65B9\u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\u3002",
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  browserOpened = false,
+  authorizationCodeRequired = false
+} = {}) {
+  if (!providerId) throw new Error("Browser OAuth authorizer requires providerId");
+  if (typeof authorizationUrlBuilder !== "function") {
+    throw new Error(`Browser OAuth authorizer requires an authorization URL builder for ${providerId}`);
+  }
+  if (typeof exchangeCode !== "function" && typeof pollSession !== "function") {
+    throw new Error(`Browser OAuth authorizer requires a code exchange or session poller for ${providerId}`);
+  }
+  if (typeof importCredentials !== "function") {
+    throw new Error(`Browser OAuth authorizer requires an import callback for ${providerId}`);
+  }
+  if (!redirectUri && callbackPort === null && typeof pollSession !== "function") {
+    throw new Error(`Browser OAuth authorizer requires redirectUri or callbackPort for ${providerId}`);
+  }
+  const sessions = /* @__PURE__ */ new Map();
+  async function closeServer(session) {
+    if (!session.server) return;
+    const server = session.server;
+    session.server = null;
+    await new Promise((resolve2) => {
+      server.close(() => resolve2());
+      server.closeAllConnections?.();
+    }).catch(() => {
+    });
+  }
+  async function cleanup(session) {
+    if (session.timer) clearTimeout(session.timer);
+    await closeServer(session);
+  }
+  function responseHtml(res, title, message) {
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title><p>${message}</p><p>\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u8FD4\u56DE Dockyard DSH\u3002</p>`);
+  }
+  async function handleCallback(session, req, res) {
+    const requestUrl = new URL(req.url ?? "/", "http://localhost");
+    if (requestUrl.pathname !== session.callbackPath) {
+      res.statusCode = 404;
+      res.end("Not found");
+      return;
+    }
+    const error = requestUrl.searchParams.get("error");
+    const code = requestUrl.searchParams.get("code") ?? "";
+    const state = requestUrl.searchParams.get("state") ?? "";
+    if (state !== session.state) {
+      session.callback = { error: "OAuth state \u6821\u9A8C\u5931\u8D25" };
+      responseHtml(res, "\u6388\u6743\u672A\u5B8C\u6210", "\u5B89\u5168\u6821\u9A8C\u5931\u8D25\uFF0C\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u91CD\u65B0\u5F00\u59CB\u6388\u6743\u3002");
+      return;
+    }
+    if (error) {
+      session.callback = { error, state };
+      responseHtml(res, "\u6388\u6743\u672A\u5B8C\u6210", "\u5B98\u65B9\u6388\u6743\u88AB\u62D2\u7EDD\uFF0C\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u3002");
+      return;
+    }
+    if (!code) {
+      session.callback = { error: "\u6388\u6743\u56DE\u8C03\u6CA1\u6709\u8FD4\u56DE code", state };
+      responseHtml(res, "\u6388\u6743\u672A\u5B8C\u6210", "\u56DE\u8C03\u7F3A\u5C11\u6388\u6743\u7801\uFF0C\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u3002");
+      return;
+    }
+    session.callback = { code, state };
+    responseHtml(res, "\u6388\u6743\u6210\u529F", "\u5DF2\u6536\u5230\u6388\u6743\u56DE\u8C03\uFF0C\u6B63\u5728\u8FD4\u56DE Dockyard DSH\u3002");
+  }
+  async function openCallbackServer(session) {
+    if (session.callbackPort === null || session.callbackPort === void 0) return;
+    const server = createServer((req, res) => {
+      void handleCallback(session, req, res).catch((error) => {
+        session.callback = { error: redactError(error) };
+        res.statusCode = 500;
+        res.end("OAuth callback failed");
+      });
+    });
+    session.server = server;
+    await new Promise((resolve2, reject) => {
+      const onError = (error) => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off("error", onError);
+        resolve2();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen({ host: callbackHost, port: session.callbackPort });
+    });
+    server.unref?.();
+    const address = server.address();
+    session.redirectUri = session.redirectUri ?? `http://${callbackHost}:${address.port}${callbackPath}`;
+  }
+  async function finalize(session, context = {}) {
+    if (session.result) return session.result;
+    if (session.finalizing) return session.finalizing;
+    session.finalizing = (async () => {
+      try {
+        const callback = session.callback;
+        if (!callback && !session.credentials) return publicSession(session);
+        if (callback?.error) throw new Error(callback.error);
+        const exchanged = session.credentials ?? await exchangeCode({
+          code: callback.code,
+          state: callback.state,
+          codeVerifier: session.codeVerifier,
+          redirectUri: session.redirectUri,
+          context
+        });
+        const accounts = await importCredentials(exchanged, context);
+        if (!Array.isArray(accounts) || accounts.length === 0) {
+          throw new Error("\u5B98\u65B9\u6388\u6743\u5B8C\u6210\uFF0C\u4F46 provider \u6CA1\u6709\u8FD4\u56DE\u53EF\u63A5\u5165\u7684\u8BA2\u9605\u8D26\u53F7");
+        }
+        session.status = "completed";
+        session.result = {
+          ...publicSession(session),
+          accounts,
+          diagnostic: null
+        };
+        return session.result;
+      } catch (error) {
+        session.status = "failed";
+        session.diagnostic = redactError(error);
+        return publicSession(session);
+      } finally {
+        await cleanup(session);
+      }
+    })();
+    return session.finalizing;
+  }
+  async function begin() {
+    const pkce = createPkce();
+    const session = {
+      sessionId: `${providerId}:browser:${randomUUID2()}`,
+      providerId,
+      status: "pending",
+      authorizationUrl: null,
+      instructions,
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      browserOpened,
+      authorizationCodeRequired,
+      callbackPath,
+      callbackPort,
+      redirectUri,
+      state: base64Url(randomBytes(24)),
+      codeVerifier: pkce.verifier,
+      callback: null,
+      server: null,
+      timer: null,
+      finalizing: null,
+      result: null,
+      diagnostic: null
+    };
+    sessions.set(session.sessionId, session);
+    try {
+      await openCallbackServer(session);
+      session.nonce = base64Url(randomBytes(24));
+      const built = await authorizationUrlBuilder({
+        state: session.state,
+        codeChallenge: pkce.challenge,
+        redirectUri: session.redirectUri,
+        nonce: session.nonce
+      });
+      session.authorizationUrl = typeof built === "string" ? built : built?.url;
+      session.metadata = typeof built === "object" ? built.metadata ?? null : null;
+      if (!session.authorizationUrl) throw new Error("\u5B98\u65B9 OAuth \u6CA1\u6709\u8FD4\u56DE\u6388\u6743\u9875\u9762\u5730\u5740");
+      session.timer = setTimeout(() => {
+        if (session.status !== "pending") return;
+        session.status = "failed";
+        session.diagnostic = "\u5B98\u65B9 OAuth \u767B\u5F55\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002";
+        void cleanup(session);
+      }, timeoutMs);
+      session.timer.unref?.();
+    } catch (error) {
+      session.status = "failed";
+      session.diagnostic = `\u65E0\u6CD5\u542F\u52A8\u5B98\u65B9\u6D4F\u89C8\u5668\u6388\u6743\uFF1A${redactError(error)}`;
+      await cleanup(session);
+    }
+    return publicSession(session);
+  }
+  async function poll(sessionId, context = {}) {
+    const session = sessions.get(sessionId);
+    if (!session) return missingSession(sessionId, providerId, instructions);
+    if (session.status === "failed" || session.status === "completed") {
+      const result2 = session.result ?? publicSession(session);
+      sessions.delete(sessionId);
+      return result2;
+    }
+    if (!session.callback && typeof pollSession === "function") {
+      try {
+        const credentials = await pollSession({ metadata: session.metadata, context });
+        if (credentials) session.credentials = credentials;
+      } catch (error) {
+        session.diagnostic = redactError(error);
+      }
+    }
+    if (!session.callback && !session.credentials) return publicSession(session);
+    const result = await finalize(session, context);
+    if (!["pending", "processing"].includes(result.status)) sessions.delete(sessionId);
+    return result;
+  }
+  async function submitAuthorizationCode(sessionId, input, context = {}) {
+    const session = sessions.get(sessionId);
+    if (!session) return missingSession(sessionId, providerId, instructions);
+    const parsed = extractCodeInput(input);
+    if (parsed.state !== session.state) {
+      session.callback = { error: "OAuth state \u6821\u9A8C\u5931\u8D25" };
+    } else if (parsed.error) {
+      session.callback = { error: parsed.error, state: parsed.state };
+    } else if (!parsed.code) {
+      session.diagnostic = "\u8BF7\u7C98\u8D34\u5305\u542B state \u7684\u5B8C\u6574\u56DE\u8C03\u5730\u5740\uFF0C\u6216\u4F7F\u7528 code#state \u683C\u5F0F\u3002";
+      return publicSession(session);
+    } else {
+      session.callback = { code: parsed.code, state: parsed.state };
+    }
+    return finalize(session, context);
+  }
+  async function cancel(sessionId) {
+    const session = sessions.get(sessionId);
+    if (!session) return { sessionId, providerId, status: "missing" };
+    await cleanup(session);
+    sessions.delete(sessionId);
+    return { sessionId, providerId, status: "cancelled" };
+  }
+  return Object.freeze({ begin, poll, submitAuthorizationCode, cancel });
+}
+var browserOAuthAuthorizerConstants = Object.freeze({
+  defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
+  defaultCallbackPath: DEFAULT_CALLBACK_PATH
+});
+
+// packages/oauth/src/cli-oauth-authorizer.mjs
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { mkdir as mkdir2, mkdtemp, readFile as readFile3, rm as rm2 } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as join3 } from "node:path";
+import { spawn as spawn2 } from "node:child_process";
+var URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
+var DEFAULT_TIMEOUT_MS2 = 10 * 60 * 1e3;
 var CHILD_STOP_GRACE_MS = 2e3;
 function cleanUrl(value) {
   return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f].*$/, "").replace(/[),.;]+$/, "");
 }
-function publicSession(session) {
+function publicSession2(session) {
   return {
     sessionId: session.sessionId,
     providerId: session.providerId,
@@ -1423,7 +1819,7 @@ function createCliOAuthAuthorizer({
   environment = process.env,
   profilePrefix = `dockyard-${providerId ?? "provider"}-oauth-`,
   instructions = "\u8BF7\u5728\u5B98\u65B9\u6388\u6743\u9875\u9762\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
-  timeoutMs = DEFAULT_TIMEOUT_MS,
+  timeoutMs = DEFAULT_TIMEOUT_MS2,
   importCredentials,
   profileDirectory = null,
   browserOpened = false
@@ -1440,7 +1836,7 @@ function createCliOAuthAuthorizer({
   const sessions = /* @__PURE__ */ new Map();
   async function cleanup(session) {
     if (session.cleanupProfile && session.profileDir) {
-      await rm(session.profileDir, { recursive: true, force: true }).catch(() => {
+      await rm2(session.profileDir, { recursive: true, force: true }).catch(() => {
       });
       session.profileDir = null;
     }
@@ -1461,17 +1857,17 @@ function createCliOAuthAuthorizer({
         if (session.timedOut) {
           session.status = "failed";
           session.diagnostic = "\u5B98\u65B9 OAuth \u767B\u5F55\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002";
-          return publicSession(session);
+          return publicSession2(session);
         }
         if (session.launchError) {
           session.status = "failed";
           session.diagnostic = `\u65E0\u6CD5\u542F\u52A8\u5B98\u65B9\u767B\u5F55\u547D\u4EE4\uFF1A${session.launchError}`;
-          return publicSession(session);
+          return publicSession2(session);
         }
         if (session.exitCode !== 0) {
           session.status = "failed";
           session.diagnostic = `\u5B98\u65B9 OAuth \u767B\u5F55\u672A\u5B8C\u6210\uFF08\u9000\u51FA\u7801 ${session.exitCode ?? "unknown"}\uFF09\u3002`;
-          return publicSession(session);
+          return publicSession2(session);
         }
         let raw;
         try {
@@ -1479,17 +1875,17 @@ function createCliOAuthAuthorizer({
         } catch (error) {
           session.status = "failed";
           session.diagnostic = `\u5B98\u65B9\u767B\u5F55\u5B8C\u6210\uFF0C\u4F46\u6CA1\u6709\u627E\u5230\u53EF\u8BFB\u53D6\u7684 OAuth \u72B6\u6001\uFF1A${redactError(error)}`;
-          return publicSession(session);
+          return publicSession2(session);
         }
         const accounts = await importCredentials(raw, context);
         if (!Array.isArray(accounts) || accounts.length === 0) {
           session.status = "failed";
           session.diagnostic = "\u5B98\u65B9\u767B\u5F55\u5B8C\u6210\uFF0C\u4F46 provider \u6CA1\u6709\u8FD4\u56DE\u53EF\u63A5\u5165\u7684\u8D26\u53F7\u3002";
-          return publicSession(session);
+          return publicSession2(session);
         }
         session.status = "completed";
         session.result = {
-          ...publicSession(session),
+          ...publicSession2(session),
           accounts,
           diagnostic: null
         };
@@ -1497,7 +1893,7 @@ function createCliOAuthAuthorizer({
       } catch (error) {
         session.status = "failed";
         session.diagnostic = redactError(error);
-        return publicSession(session);
+        return publicSession2(session);
       } finally {
         await cleanup(session);
       }
@@ -1509,7 +1905,7 @@ function createCliOAuthAuthorizer({
     const profileDir = profileDirectory ?? await mkdtemp(join3(tmpdir(), profilePrefix));
     if (!cleanupProfile) await mkdir2(profileDir, { recursive: true });
     const session = {
-      sessionId: `${providerId}:${randomUUID2()}`,
+      sessionId: `${providerId}:${randomUUID3()}`,
       providerId,
       profileDir,
       cleanupProfile,
@@ -1554,7 +1950,7 @@ function createCliOAuthAuthorizer({
       session.launchError = redactError(error);
       session.exitCode = -1;
     }
-    return publicSession(session);
+    return publicSession2(session);
   }
   async function poll(sessionId, context) {
     const session = sessions.get(sessionId);
@@ -1567,7 +1963,7 @@ function createCliOAuthAuthorizer({
         diagnostic: "OAuth \u767B\u5F55\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002"
       };
     }
-    if (session.exitCode === null) return publicSession(session);
+    if (session.exitCode === null) return publicSession2(session);
     if (session.timer) clearTimeout(session.timer);
     const result = await finalize(session, context);
     if (result.status !== "pending" && result.status !== "processing") sessions.delete(sessionId);
@@ -1584,12 +1980,63 @@ function createCliOAuthAuthorizer({
   }
   return Object.freeze({ begin, poll, cancel });
 }
-var cliOAuthAuthorizerConstants = Object.freeze({ defaultTimeoutMs: DEFAULT_TIMEOUT_MS });
+var cliOAuthAuthorizerConstants = Object.freeze({ defaultTimeoutMs: DEFAULT_TIMEOUT_MS2 });
+
+// packages/providers/src/session-source.mjs
+var OFFICIAL_SESSION_AUTH_KIND = "official_session";
+var LEGACY_OFFICIAL_SESSION_AUTH_KINDS = Object.freeze(["official_cli_session"]);
+var OFFICIAL_SESSION_SOURCE_KINDS = Object.freeze({
+  CLI: "cli",
+  DESKTOP_APP: "desktop_app",
+  BROWSER: "browser",
+  OAUTH_FILE: "oauth_file",
+  OTHER: "other"
+});
+function isOfficialSessionAuthKind(value) {
+  const kind = typeof value === "string" ? value : value?.kind;
+  return kind === OFFICIAL_SESSION_AUTH_KIND || LEGACY_OFFICIAL_SESSION_AUTH_KINDS.includes(kind);
+}
+function normalizeOfficialSessionResult(value, {
+  source = "official_session",
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.OTHER
+} = {}) {
+  if (value === null || value === void 0) return null;
+  if (typeof value === "string") return { output: value, source, sourceKind };
+  if (typeof value !== "object") return null;
+  let payload = typeof value.output === "string" ? value.output : "";
+  if (!payload) {
+    try {
+      payload = JSON.stringify(value.status ?? value);
+    } catch {
+      payload = "";
+    }
+  }
+  return {
+    ...value,
+    output: payload,
+    source: value.source ?? source,
+    sourceKind: value.sourceKind ?? sourceKind
+  };
+}
+function officialSessionResources({
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.OTHER,
+  authSource = null,
+  extra = {}
+} = {}) {
+  return {
+    accountScope: "active_official_session",
+    sessionSource: sourceKind,
+    ...authSource ? { authSource } : {},
+    ...extra
+  };
+}
 
 // modules/provider-codex/src/driver.mjs
 var PROVIDER_ID = "openai-codex";
 var AUTH_BASE_URL = "https://auth.openai.com";
+var DEFAULT_AUTHORIZATION_URL = `${AUTH_BASE_URL}/oauth/authorize`;
 var DEFAULT_TOKEN_URL = `${AUTH_BASE_URL}/oauth/token`;
+var DEFAULT_REDIRECT_URI = "http://localhost:1455/auth/callback";
 var DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 var DEFAULT_USAGE_URLS = Object.freeze([
   "https://chatgpt.com/backend-api/wham/usage",
@@ -1598,7 +2045,7 @@ var DEFAULT_USAGE_URLS = Object.freeze([
 var DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 var CREDENTIAL_SLOT = Symbol("dockyard-codex-credential");
 function hash(value) {
-  return createHash2("sha256").update(String(value)).digest("hex");
+  return createHash3("sha256").update(String(value)).digest("hex");
 }
 function codexAuthPath({ env = process.env, home = homedir2(), authFilePath } = {}) {
   if (authFilePath) return authFilePath;
@@ -1643,7 +2090,7 @@ function normalizeTokens(raw) {
     idPayload
   };
 }
-function accountInput(tokens, credentialRef, now = /* @__PURE__ */ new Date()) {
+function accountInput(tokens, credentialRef, now = /* @__PURE__ */ new Date(), { source = "official_codex_oauth" } = {}) {
   return {
     providerId: PROVIDER_ID,
     accountId: tokens.accountId,
@@ -1652,6 +2099,7 @@ function accountInput(tokens, credentialRef, now = /* @__PURE__ */ new Date()) {
     email: tokens.email,
     auth: {
       kind: "oauth",
+      credentialRef,
       scopes: tokens.scopes
     },
     subscription: {
@@ -1664,6 +2112,10 @@ function accountInput(tokens, credentialRef, now = /* @__PURE__ */ new Date()) {
       nextRefreshAt: null,
       lastRefreshedAt: tokens.authFileLastRefresh ?? now.toISOString(),
       refreshable: Boolean(tokens.refresh)
+    },
+    resources: {
+      sessionSource: source.includes("browser") ? OFFICIAL_SESSION_SOURCE_KINDS.BROWSER : OFFICIAL_SESSION_SOURCE_KINDS.OAUTH_FILE,
+      authSource: source
     }
   };
 }
@@ -1728,6 +2180,11 @@ var CodexOAuthDriver = class {
     catalogLoader = null,
     refreshLeewaySeconds = 60,
     oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_CODEX_BROWSER_OAUTH !== "0",
+    authorizationUrl = env.DOCKYARD_CODEX_AUTHORIZATION_URL || DEFAULT_AUTHORIZATION_URL,
+    redirectUri = env.DOCKYARD_CODEX_REDIRECT_URI || DEFAULT_REDIRECT_URI,
+    browserCallbackPort = Number(env.DOCKYARD_CODEX_CALLBACK_PORT || 1455),
     cliPath = env.DOCKYARD_CODEX_CLI || "codex"
   } = {}) {
     this.authFilePath = codexAuthPath({ env, home, authFilePath });
@@ -1738,14 +2195,55 @@ var CodexOAuthDriver = class {
     this.requestExecutor = requestExecutor;
     this.catalogLoader = catalogLoader;
     this.refreshLeewaySeconds = refreshLeewaySeconds;
-    this.oauthAuthorizer = oauthAuthorizer ?? createCliOAuthAuthorizer({
+    this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID,
       cliPath,
       loginArgs: ["login", "--device-auth"],
       environmentKey: "CODEX_HOME",
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Codex OAuth \u767B\u5F55\u3002\u8BF7\u5728\u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Codex CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728\u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context)
     });
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
+      providerId: PROVIDER_ID,
+      redirectUri,
+      callbackPath: new URL(redirectUri).pathname,
+      callbackHost: "localhost",
+      callbackPort: browserCallbackPort,
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Codex \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri: callback }) => {
+        const url = new URL(authorizationUrl);
+        url.search = new URLSearchParams({
+          client_id: clientId,
+          response_type: "code",
+          redirect_uri: callback,
+          scope: "openid email profile offline_access",
+          state,
+          code_challenge: codeChallenge,
+          code_challenge_method: "S256",
+          prompt: "login",
+          id_token_add_organizations: "true",
+          codex_cli_simplified_flow: "true"
+        });
+        return url.toString();
+      },
+      exchangeCode: async ({ code, codeVerifier, redirectUri: callback, context }) => {
+        const response = await fetchJson(this.tokenUrl, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            client_id: clientId,
+            code,
+            redirect_uri: callback,
+            code_verifier: codeVerifier
+          }),
+          ...context.signal ? { signal: context.signal } : {}
+        }, { fetchImpl: this.fetchImpl });
+        return response.body ?? {};
+      },
+      importCredentials: (raw, context) => this.#importOAuthState(raw, context, "official_codex_browser_oauth")
+    }) : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliAuthorizer;
   }
   async discover(context = {}) {
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
@@ -1787,7 +2285,9 @@ var CodexOAuthDriver = class {
       expiresAt: tokens.expiresAt,
       scopes: tokens.scopes
     });
-    return accountInput(tokens, credentialRef, context.now instanceof Date ? context.now : /* @__PURE__ */ new Date());
+    return accountInput(tokens, credentialRef, context.now instanceof Date ? context.now : /* @__PURE__ */ new Date(), {
+      source: candidate2.source
+    });
   }
   async importSource(source, context = {}) {
     let raw;
@@ -1807,14 +2307,47 @@ var CodexOAuthDriver = class {
     });
     return [await this.importAccount(candidate2, context)];
   }
+  async getActiveSession(context = {}) {
+    try {
+      const discovered = await this.discover(context);
+      if (!discovered.candidates?.length) return null;
+      const accounts = [];
+      for (const candidate2 of discovered.candidates) {
+        accounts.push(await this.importAccount(candidate2, context));
+      }
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID,
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Codex \u5B98\u65B9 OAuth \u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        accounts,
+        diagnostic: null
+      };
+    } catch {
+      return null;
+    }
+  }
   async startAuthorization(context = {}) {
-    return this.oauthAuthorizer.begin(context);
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliAuthorizer.begin(context);
+    return started;
   }
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.poll(sessionId, context);
+  }
+  async submitAuthorizationCode(sessionId, code, context = {}) {
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    if (typeof authorizer?.submitAuthorizationCode !== "function") {
+      throw new Error("\u5F53\u524D Codex \u6388\u6743\u6D41\u7A0B\u4E0D\u63A5\u6536\u624B\u52A8\u6388\u6743\u7801");
+    }
+    return authorizer.submitAuthorizationCode(sessionId, code, context);
   }
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.cancel(sessionId, context);
   }
   async #readCredential(account, context) {
     if (!context.secretStore) throw new Error("A secure credential store is required");
@@ -1870,7 +2403,7 @@ var CodexOAuthDriver = class {
       } catch (error) {
         const wrapped = new Error(`Codex OAuth refresh failed: ${redactError(error)}`);
         wrapped.authForbidden = error?.status === 403;
-        wrapped.authExpired = error?.status === 400 || error?.status === 401;
+        wrapped.authExpired = error?.status === 401 || error?.status === 400 && ["invalid_grant", "invalid_token"].includes(String(error?.upstreamCode ?? "").toLowerCase());
         throw wrapped;
       }
     }
@@ -2073,10 +2606,10 @@ function createCodexModule({ driver = {} } = {}) {
 
 // modules/provider-antigravity/src/driver.mjs
 import { spawn as spawn4 } from "node:child_process";
-import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
-import { mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
-import { tmpdir as tmpdir2 } from "node:os";
-import { join as join6 } from "node:path";
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
+import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
+import { dirname as dirname3, join as join6 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
 import { spawn as spawn3 } from "node:child_process";
@@ -2119,18 +2652,37 @@ function runCliCommand(command, args, {
     const stdout = [];
     const stderr = [];
     let timedOut = false;
+    let forceTimer = null;
+    let terminationRequested = false;
+    const terminate = () => {
+      if (terminationRequested) return;
+      terminationRequested = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+      }
+      forceTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }, 1e3);
+      forceTimer.unref?.();
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminate();
     }, timeoutMs);
     child.stdout.on("data", (chunk) => stdout.push(chunk));
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.once("error", (error) => {
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       reject(error);
     });
     child.once("close", (code, closeSignal) => {
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       const output = Buffer.concat(stdout).toString("utf8");
       const errorOutput = Buffer.concat(stderr).toString("utf8");
       if (code === 0) {
@@ -2262,15 +2814,33 @@ function nativeProviderError(providerId, message, { status, body, code } = {}) {
   if (body !== void 0) error.body = body;
   return error;
 }
+var nativeResponseControls = /* @__PURE__ */ new WeakMap();
 async function fetchNativeResponse(url, init = {}, {
   providerId,
   timeoutMs = 3e5,
   fetchImpl = fetch
 } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let cleaned = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   const upstreamSignal = init.signal;
   const abort = () => controller.abort(upstreamSignal?.reason);
+  const timeoutError = nativeProviderError(providerId, "request timed out");
+  timeoutError.code = "ETIMEDOUT";
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    clearTimeout(timer);
+    upstreamSignal?.removeEventListener?.("abort", abort);
+  };
+  const control = { cleanup, get timedOut() {
+    return timedOut;
+  }, timeoutError };
+  let handedOff = false;
   if (upstreamSignal) {
     if (upstreamSignal.aborted) abort();
     else upstreamSignal.addEventListener("abort", abort, { once: true });
@@ -2290,17 +2860,16 @@ async function fetchNativeResponse(url, init = {}, {
         code: details.code
       });
     }
+    nativeResponseControls.set(response, control);
+    handedOff = true;
     return response;
   } catch (error) {
-    if (error?.name === "AbortError" && !error.providerId) {
-      const timeout = nativeProviderError(providerId, "request timed out");
-      timeout.code = "ETIMEDOUT";
-      throw timeout;
+    if (error?.name === "AbortError" && timedOut && !error.providerId) {
+      throw timeoutError;
     }
     throw error;
   } finally {
-    clearTimeout(timer);
-    upstreamSignal?.removeEventListener?.("abort", abort);
+    if (!handedOff) cleanup();
   }
 }
 async function* responseChunks(response) {
@@ -2342,37 +2911,46 @@ function parseSseEvent(lines) {
   }
 }
 async function* readSseEvents(response) {
+  const control = nativeResponseControls.get(response);
   const decoder = new TextDecoder();
   let buffer = "";
   let lines = [];
-  for await (const chunk of responseChunks(response)) {
-    buffer += decoder.decode(chunk, { stream: true });
-    const parts = buffer.split(/\r?\n/);
-    buffer = parts.pop() ?? "";
-    for (const line of parts) {
-      if (line !== "") {
-        lines.push(line);
-        continue;
-      }
-      const parsed2 = parseSseEvent(lines);
-      lines = [];
-      if (parsed2) {
-        yield parsed2;
-        if (parsed2.done) return;
+  try {
+    for await (const chunk of responseChunks(response)) {
+      buffer += decoder.decode(chunk, { stream: true });
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() ?? "";
+      for (const line of parts) {
+        if (line !== "") {
+          lines.push(line);
+          continue;
+        }
+        const parsed2 = parseSseEvent(lines);
+        lines = [];
+        if (parsed2) {
+          yield parsed2;
+          if (parsed2.done) return;
+        }
       }
     }
+    buffer += decoder.decode();
+    if (buffer) lines.push(buffer);
+    const parsed = parseSseEvent(lines);
+    if (parsed) yield parsed;
+  } catch (error) {
+    if (control?.timedOut && !error?.providerId) throw control.timeoutError;
+    throw error;
+  } finally {
+    control?.cleanup();
+    nativeResponseControls.delete(response);
   }
-  buffer += decoder.decode();
-  if (buffer) lines.push(buffer);
-  const parsed = parseSseEvent(lines);
-  if (parsed) yield parsed;
 }
 function normalizeUsage(value) {
   if (!value || typeof value !== "object") return null;
-  const inputTokens = Number(value.input_tokens ?? value.inputTokens ?? value.prompt_tokens ?? value.promptTokens);
-  const outputTokens = Number(value.output_tokens ?? value.outputTokens ?? value.completion_tokens ?? value.completionTokens);
-  const totalTokens = Number(value.total_tokens ?? value.totalTokens);
-  const cacheReadTokens = Number(value.cache_read_input_tokens ?? value.cacheReadInputTokens);
+  const inputTokens = Number(value.input_tokens ?? value.inputTokens ?? value.prompt_tokens ?? value.promptTokens ?? value.promptTokenCount);
+  const outputTokens = Number(value.output_tokens ?? value.outputTokens ?? value.completion_tokens ?? value.completionTokens ?? value.candidatesTokenCount);
+  const totalTokens = Number(value.total_tokens ?? value.totalTokens ?? value.totalTokenCount);
+  const cacheReadTokens = Number(value.cache_read_input_tokens ?? value.cacheReadInputTokens ?? value.cachedContentTokenCount);
   const cacheWriteTokens = Number(value.cache_creation_input_tokens ?? value.cacheCreationInputTokens);
   const result = {};
   if (Number.isFinite(inputTokens)) result.inputTokens = inputTokens;
@@ -2411,7 +2989,13 @@ function dataUrlParts(value) {
   const match = value.match(/^data:([^;,]+)?(?:;base64)?,(.*)$/s);
   if (!match) return null;
   const mediaType = match[1] || "application/octet-stream";
-  const encoded = match[0].includes(";base64,") ? match[2] : Buffer.from(decodeURIComponent(match[2]), "utf8").toString("base64");
+  const encoded = match[0].includes(";base64,") ? match[2] : (() => {
+    try {
+      return Buffer.from(decodeURIComponent(match[2]), "utf8").toString("base64");
+    } catch {
+      return Buffer.from(match[2], "utf8").toString("base64");
+    }
+  })();
   return { mediaType, data: encoded };
 }
 async function resolveImageData(content, attachments) {
@@ -2474,6 +3058,25 @@ function detectAntigravityUserAgent() {
 function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
+function emailFromObject(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 5) return null;
+  const direct = firstString(value.email, value.userEmail, value.email_address, value.account?.email);
+  if (direct) return direct;
+  const idToken = firstString(value.id_token, value.idToken);
+  if (idToken) {
+    try {
+      const payload = decodeJwtPayload(idToken);
+      const fromClaims = firstString(payload?.email);
+      if (fromClaims) return fromClaims;
+    } catch {
+    }
+  }
+  for (const child of Object.values(value)) {
+    const email = emailFromObject(child, depth + 1);
+    if (email) return email;
+  }
+  return null;
+}
 function tokenFromObject(value, depth = 0) {
   if (!value || typeof value !== "object" || depth > 5) return null;
   const direct = firstString(value.access_token, value.accessToken);
@@ -2488,7 +3091,7 @@ function readOfficialTokenFile(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
     const token = tokenFromObject(parsed);
-    return token ? { token, kind: "oauth" } : null;
+    return token ? { token, kind: "oauth", email: emailFromObject(parsed) } : null;
   } catch {
     return null;
   }
@@ -2500,9 +3103,13 @@ function readAntigravityTokenFile({ env = process.env, home = homedir3() } = {})
 }
 function resolveAntigravityAccessToken({ credential, env = process.env, home = homedir3() } = {}) {
   const stored = firstString(credential?.access, credential?.token);
-  if (stored) return { token: stored, kind: "oauth" };
+  if (stored) {
+    return { token: stored, kind: "oauth", email: emailFromObject(credential) };
+  }
   const fromCredentialObject = tokenFromObject(credential);
-  if (fromCredentialObject) return { token: fromCredentialObject, kind: "oauth" };
+  if (fromCredentialObject) {
+    return { token: fromCredentialObject, kind: "oauth", email: emailFromObject(credential) };
+  }
   const fromEnv = firstString(env.DOCKYARD_ANTIGRAVITY_ACCESS_TOKEN, env.GEMINI_ACCESS_TOKEN);
   if (fromEnv) return { token: fromEnv, kind: "oauth" };
   return readAntigravityTokenFile({ env, home });
@@ -2589,11 +3196,13 @@ function responsePayload(value) {
 }
 async function* streamAntigravityResponse(response) {
   let text2 = "";
-  let textClosed = false;
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
   let usage = null;
   let stop = "stop";
-  let toolIndex = 0;
-  yield { type: "block-start", index: 0, blockType: "text" };
+  let reasoning = null;
+  yield { type: "block-start", index: textIndex, blockType: "text" };
   for await (const event of readSseEvents(response)) {
     const payload = responsePayload(event.data);
     if (!payload) continue;
@@ -2609,21 +3218,43 @@ async function* streamAntigravityResponse(response) {
     for (const part of candidate2.content?.parts ?? candidate2.parts ?? []) {
       if (part?.text) {
         if (part.thought === true || part.thoughtSignature) {
-          const index2 = 100;
-          yield { type: "reasoning-delta", index: index2, text: part.text };
+          if (textOpen) {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+            textOpen = false;
+          }
+          if (!reasoning) {
+            reasoning = { index: nextIndex++, text: "" };
+            yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+          }
+          reasoning.text += part.text;
+          yield { type: "reasoning-delta", index: reasoning.index, text: part.text };
           continue;
         }
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text2 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
         text2 += part.text;
-        yield { type: "text-delta", index: 0, text: part.text };
+        yield { type: "text-delta", index: textIndex, text: part.text };
         continue;
       }
       const call = part?.functionCall ?? part?.function_call;
       if (!call) continue;
-      if (!textClosed) {
-        yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
-        textClosed = true;
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
       }
-      const index = ++toolIndex;
+      if (textOpen) {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+        textOpen = false;
+      }
+      const index = nextIndex++;
       const id = firstString(call.id, call.name, `tool-${index}`);
       const name2 = firstString(call.name, "tool");
       const argumentsValue = JSON.stringify(call.args ?? call.arguments ?? {});
@@ -2633,7 +3264,8 @@ async function* streamAntigravityResponse(response) {
       stop = "tool_calls";
     }
   }
-  if (!textClosed) yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
+  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
   if (usage) yield { type: "usage", usage };
   yield { type: "finish", reason: finishReason(stop) };
 }
@@ -2743,6 +3375,26 @@ var DEFAULT_CLI = "agy";
 var DEFAULT_CATALOG_TTL_MS = 6e4;
 var DEFAULT_AUTH_TIMEOUT_MS = 10 * 60 * 1e3;
 var CREDENTIAL_SLOT2 = Symbol("dockyard-antigravity-session");
+var ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || "";
+var ANTIGRAVITY_BROWSER_CLIENT_SECRET = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || "";
+var ANTIGRAVITY_BROWSER_AUTHORIZATION_URL = process.env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL || "https://accounts.google.com/o/oauth2/v2/auth";
+var ANTIGRAVITY_BROWSER_TOKEN_URL = process.env.DOCKYARD_ANTIGRAVITY_TOKEN_URL || "https://oauth2.googleapis.com/token";
+var ANTIGRAVITY_BROWSER_USERINFO_URL = process.env.DOCKYARD_ANTIGRAVITY_USERINFO_URL || "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
+var ANTIGRAVITY_BROWSER_REDIRECT_URI = process.env.DOCKYARD_ANTIGRAVITY_REDIRECT_URI || "http://localhost:51121/oauth-callback";
+var ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE || [
+  "https://www.googleapis.com/auth/cloud-platform",
+  "https://www.googleapis.com/auth/userinfo.email",
+  "https://www.googleapis.com/auth/userinfo.profile",
+  "https://www.googleapis.com/auth/cclog",
+  "https://www.googleapis.com/auth/experimentsandconfigs"
+].join(" ");
+var OFFICIAL_ANTIGRAVITY_MODEL_METADATA = Object.freeze([
+  Object.freeze({
+    id: "gemini-3.7-flash",
+    contextWindow: 1048576,
+    maxTokens: 65536
+  })
+]);
 var ANTIGRAVITY_PTY_SCRIPT = String.raw`
 import os
 import pty
@@ -2803,7 +3455,7 @@ finally:
 sys.exit(exit_code)
 `;
 function hash2(value) {
-  return createHash3("sha256").update(String(value)).digest("hex");
+  return createHash4("sha256").update(String(value)).digest("hex");
 }
 var EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 function normalizeEmail(value) {
@@ -2826,13 +3478,30 @@ function extractAntigravityAccountEmail(...values) {
   return null;
 }
 function sessionFingerprint(session) {
+  const email = typeof session?.email === "string" && session.email.length > 0 ? session.email : null;
   const token = typeof session?.token === "string" && session.token.length > 0 ? session.token : null;
+  if (email) return hash2(`antigravity-session:email:${email.toLowerCase()}`).slice(0, 10).toUpperCase();
   return token ? hash2(`antigravity-session:${token}`).slice(0, 10).toUpperCase() : null;
+}
+function activeSessionError(message, { mismatch = false } = {}) {
+  const error = new Error(message);
+  error.authExpired = true;
+  if (mismatch) error.accountMismatch = true;
+  return error;
 }
 function sameEmail(left, right) {
   const a = normalizeEmail(left)?.toLowerCase();
   const b = normalizeEmail(right)?.toLowerCase();
   return Boolean(a && b && a === b);
+}
+function tokenExpiresAt(tokens, now = /* @__PURE__ */ new Date()) {
+  return isoFromEpoch(tokens?.expiresAt ?? tokens?.expires_at) ?? addSecondsIso(tokens?.expires_in ?? tokens?.expiresIn, now);
+}
+function tokenNeedsRefresh(credential, now, leewayMs = 6e4) {
+  if (!credential?.refresh) return false;
+  if (!credential.expiresAt) return true;
+  const expiresAt = Date.parse(credential.expiresAt);
+  return !Number.isFinite(expiresAt) || expiresAt <= now.getTime() + leewayMs;
 }
 function cliFailure2(code, signal, output, errorOutput) {
   const error = new Error(`Antigravity CLI failed (${signal ?? code})`);
@@ -2932,6 +3601,57 @@ function registryModels(value) {
   if (Array.isArray(value?.models)) return value.models;
   return [];
 }
+function mergedAntigravityRegistry(registry) {
+  const byId = new Map(OFFICIAL_ANTIGRAVITY_MODEL_METADATA.map((model) => [model.id, { ...model }]));
+  for (const candidate2 of registryModels(registry)) {
+    if (!candidate2 || typeof candidate2.id !== "string" || candidate2.id.length === 0) continue;
+    const defined = Object.fromEntries(Object.entries(candidate2).filter(([, value]) => value !== void 0 && value !== null));
+    byId.set(candidate2.id, { ...byId.get(candidate2.id) ?? {}, ...defined });
+  }
+  return [...byId.values()];
+}
+function catalogScopeKey(accounts) {
+  const accountIds = (Array.isArray(accounts) ? accounts : []).map((account) => typeof account?.accountId === "string" ? account.accountId : "").filter(Boolean).sort();
+  return accountIds.length > 0 ? `accounts:${hash2(accountIds.join("\n")).slice(0, 32)}` : "unscoped";
+}
+function defaultAntigravityCatalogCachePath({ env = process.env, home = homedir4() } = {}) {
+  const dockyardHome = env.DOCKYARD_DSH_HOME || join6(home, ".dockyard-dsh");
+  return join6(dockyardHome, "antigravity-catalog.json");
+}
+function persistableCatalog(value) {
+  return {
+    models: Array.isArray(value?.models) ? value.models : [],
+    source: typeof value?.source === "string" ? value.source : "official_antigravity_cli"
+  };
+}
+async function readAntigravityCatalogCache(filePath) {
+  if (!filePath) return { schema: 1, entries: {} };
+  try {
+    const parsed = JSON.parse(await readFile4(filePath, "utf8"));
+    return {
+      schema: 1,
+      entries: parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {}
+    };
+  } catch {
+    return { schema: 1, entries: {} };
+  }
+}
+async function writeAntigravityCatalogCache(filePath, cache) {
+  if (!filePath) return;
+  await mkdir3(dirname3(filePath), { recursive: true, mode: 448 });
+  const entries = Object.entries(cache.entries ?? {}).slice(-8);
+  const tempPath = `${filePath}.${randomUUID4()}.tmp`;
+  try {
+    await writeFile2(tempPath, JSON.stringify({ schema: 1, entries: Object.fromEntries(entries) }), {
+      encoding: "utf8",
+      mode: 384
+    });
+    await rename2(tempPath, filePath);
+  } finally {
+    await rm3(tempPath, { force: true }).catch(() => {
+    });
+  }
+}
 function registryMatch(model, registry) {
   const candidates = registryModels(registry).filter((candidate2) => candidate2 && typeof candidate2.id === "string" && candidate2.id.length > 0).filter((candidate2) => model.id === candidate2.id || model.id.startsWith(`${candidate2.id}-`)).sort((left, right) => right.id.length - left.id.length);
   const exact = candidates.find((candidate2) => candidate2.id === model.id);
@@ -2959,18 +3679,46 @@ function enrichAntigravityModelCatalog(models, registry) {
 function createAntigravityCatalogLoader({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
+  home = homedir4(),
+  cacheFilePath = env.DOCKYARD_ANTIGRAVITY_CATALOG_CACHE ?? defaultAntigravityCatalogCachePath({ env, home }),
   timeoutMs = 3e4,
   cacheTtlMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
   commandRunner = runCommand,
   registryLoader = null
 } = {}) {
-  let cached = null;
-  let cachedAt = 0;
-  let pending = null;
-  return async function loadCatalog({ force = false } = {}) {
-    const now = Date.now();
-    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
-    const refresh = () => Promise.resolve(commandRunner(cliPath, ["models"], {
+  const cached = /* @__PURE__ */ new Map();
+  const pending = /* @__PURE__ */ new Map();
+  const pendingRefreshes = /* @__PURE__ */ new Set();
+  let persistentPromise = null;
+  let persistentCache = null;
+  let persistWrite = Promise.resolve();
+  const loadPersistent = () => {
+    persistentPromise ??= readAntigravityCatalogCache(cacheFilePath).then((value) => {
+      persistentCache = value;
+      return value;
+    });
+    return persistentPromise;
+  };
+  const persist = (scope, value) => {
+    if (!cacheFilePath || !Array.isArray(value?.models) || value.models.length === 0) return Promise.resolve();
+    persistWrite = persistWrite.then(async () => {
+      const cache = await loadPersistent();
+      cache.entries[scope] = {
+        fetchedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        value: persistableCatalog(value)
+      };
+      const scopes = Object.keys(cache.entries);
+      if (scopes.length > 8) {
+        for (const staleScope of scopes.slice(0, scopes.length - 8)) delete cache.entries[staleScope];
+      }
+      await writeAntigravityCatalogCache(cacheFilePath, cache);
+    }).catch(() => {
+    });
+    return persistWrite;
+  };
+  const refresh = (scope) => {
+    if (pending.has(scope)) return pending.get(scope);
+    const promise = Promise.resolve(commandRunner(cliPath, ["models"], {
       env,
       timeoutMs
     })).then(async (result) => {
@@ -2982,7 +3730,7 @@ function createAntigravityCatalogLoader({
         }
       }
       const liveModels = parseAntigravityModelCatalog(result.output);
-      const models = enrichAntigravityModelCatalog(liveModels, registry);
+      const models = enrichAntigravityModelCatalog(liveModels, mergedAntigravityRegistry(registry));
       const enriched = models.some((model, index) => {
         const original = liveModels[index];
         return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
@@ -2991,29 +3739,66 @@ function createAntigravityCatalogLoader({
         models,
         source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli"
       };
-      cached = value;
-      cachedAt = Date.now();
+      cached.set(scope, { value, cachedAt: Date.now() });
+      await persist(scope, value);
       return value;
     }).catch((error) => {
+      const previous = cached.get(scope)?.value;
+      if (previous?.models?.length) {
+        return {
+          ...previous,
+          source: `${previous.source ?? "official_antigravity_cli"}_stale`,
+          diagnostics: [redactError(error)]
+        };
+      }
       const unavailable = {
         models: [],
         source: error?.code === "ENOENT" ? "antigravity_cli_not_found" : "antigravity_cli_unavailable",
         diagnostics: [redactError(error)]
       };
-      cached = unavailable;
-      cachedAt = Date.now();
+      cached.set(scope, { value: unavailable, cachedAt: Date.now() });
       return unavailable;
     }).finally(() => {
-      pending = null;
+      pending.delete(scope);
     });
-    if (!force && cached) {
-      if (!pending) pending = refresh();
-      return cached;
-    }
-    if (pending) return pending;
-    pending = refresh();
-    return pending;
+    pendingRefreshes.add(promise);
+    promise.finally(() => pendingRefreshes.delete(promise)).catch(() => {
+    });
+    pending.set(scope, promise);
+    return promise;
   };
+  const loadCatalog = async function loadCatalog2({ force = false, accounts = [] } = {}) {
+    const scope = catalogScopeKey(accounts);
+    let entry = cached.get(scope);
+    if (!entry) {
+      const persisted = await loadPersistent();
+      const stored = persistentCache?.entries?.[scope] ?? persisted.entries?.[scope];
+      if (stored?.value && Array.isArray(stored.value.models)) {
+        entry = {
+          value: {
+            ...stored.value,
+            source: `${stored.value.source ?? "official_antigravity_cli"}_persistent_cache`
+          },
+          cachedAt: 0
+        };
+        cached.set(scope, entry);
+      }
+    }
+    const fresh = entry && entry.cachedAt > 0 && Date.now() - entry.cachedAt < cacheTtlMs;
+    if (!force && fresh) return entry.value;
+    if (!force && entry) {
+      void refresh(scope).catch(() => {
+      });
+      return entry.value;
+    }
+    return refresh(scope);
+  };
+  loadCatalog.whenIdle = async () => {
+    await Promise.allSettled([...pendingRefreshes]);
+    await persistWrite.catch(() => {
+    });
+  };
+  return loadCatalog;
 }
 function quotaGroups(data) {
   if (!data || typeof data !== "object") return [];
@@ -3098,7 +3883,13 @@ function parseAntigravityNativeQuota(value, now = /* @__PURE__ */ new Date()) {
     } : null
   };
 }
-function candidate(now, { email = null, session = null, existingAccounts = [] } = {}) {
+function candidate(now, {
+  email = null,
+  session = null,
+  existingAccounts = [],
+  source = "official_antigravity_cli",
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI
+} = {}) {
   const normalizedEmail = normalizeEmail(email);
   const fingerprint = sessionFingerprint(session);
   const stableAccountId = normalizedEmail ? `antigravity:google:${hash2(`email:${normalizedEmail.toLowerCase()}`).slice(0, 20)}` : fingerprint ? `antigravity:session:${hash2(`fingerprint:${fingerprint}`).slice(0, 20)}` : "antigravity:active";
@@ -3111,22 +3902,23 @@ function candidate(now, { email = null, session = null, existingAccounts = [] } 
   const value = {
     candidateId: `antigravity:${hash2(accountId).slice(0, 20)}`,
     providerId: PROVIDER_ID3,
-    source: "official_antigravity_cli",
+    source,
     accountId,
     displayName: identityLabel,
     email: normalizedEmail,
     subscription: { plan: null, status: null, expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: null,
+      accessTokenExpiresAt: session?.expiresAt ?? null,
       nextRefreshAt: null,
-      lastRefreshedAt: null,
-      refreshable: null
+      lastRefreshedAt: session?.lastRefreshedAt ?? null,
+      refreshable: session?.refreshToken ? true : null
     },
     imported: false,
     status: "available",
     diagnostic: null,
     credentialRef,
     resources: {
+      ...officialSessionResources({ sourceKind, authSource: source }),
       identitySource,
       identityLabel,
       ...fingerprint ? { sessionFingerprint: fingerprint } : {},
@@ -3136,9 +3928,12 @@ function candidate(now, { email = null, session = null, existingAccounts = [] } 
   };
   Object.defineProperty(value, CREDENTIAL_SLOT2, {
     value: {
-      type: "official_cli_session",
+      type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID3,
-      ...session?.token ? { access: session.token } : {}
+      ...session?.token ? { access: session.token } : {},
+      ...session?.refreshToken ? { refresh: session.refreshToken } : {},
+      ...session?.expiresAt ? { expiresAt: session.expiresAt } : {},
+      ...session?.lastRefreshedAt ? { lastRefreshedAt: session.lastRefreshedAt } : {}
     },
     enumerable: false
   });
@@ -3194,7 +3989,7 @@ function createAntigravityOAuthAuthorizer({
   const sessions = /* @__PURE__ */ new Map();
   async function cleanup(session) {
     if (!session.profileDir) return;
-    await rm2(session.profileDir, { recursive: true, force: true }).catch(() => {
+    await rm3(session.profileDir, { recursive: true, force: true }).catch(() => {
     });
     session.profileDir = null;
   }
@@ -3263,7 +4058,7 @@ function createAntigravityOAuthAuthorizer({
     };
     delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     const session = {
-      sessionId: `${PROVIDER_ID3}:${randomUUID3()}`,
+      sessionId: `${PROVIDER_ID3}:${randomUUID4()}`,
       providerId: PROVIDER_ID3,
       profileDir,
       childEnv,
@@ -3339,6 +4134,9 @@ function createAntigravityOAuthAuthorizer({
     if (!session) throw new Error("\u9A8C\u8BC1\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7");
     const code = String(value ?? "").trim();
     if (!code) throw new Error("\u8BF7\u8F93\u5165 Google \u9A8C\u8BC1\u7801\u6216\u56DE\u8C03\u5730\u5740");
+    if (code.length > 4096 || /[\u0000-\u001f\u007f]/.test(code)) {
+      throw new Error("Google \u9A8C\u8BC1\u7801\u6216\u56DE\u8C03\u5730\u5740\u683C\u5F0F\u65E0\u6548");
+    }
     if (!session.child || session.exitCode !== null || !session.child.stdin?.writable) {
       throw new Error("agy \u9A8C\u8BC1\u8FDB\u7A0B\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7");
     }
@@ -3360,7 +4158,7 @@ function createAntigravityOAuthAuthorizer({
   }
   return Object.freeze({ begin, poll, cancel, submitAuthorizationCode });
 }
-var AntigravityOfficialCliDriver = class {
+var AntigravityOfficialSessionDriver = class {
   constructor({
     cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
     env = process.env,
@@ -3371,22 +4169,106 @@ var AntigravityOfficialCliDriver = class {
     quotaReader = null,
     tokenResolver = resolveAntigravityAccessToken,
     identityFromOfficialCli = true,
+    identityFromOfficialSession = identityFromOfficialCli,
     oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_ANTIGRAVITY_BROWSER_OAUTH !== "0",
+    authorizationUrl = env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL || ANTIGRAVITY_BROWSER_AUTHORIZATION_URL,
+    tokenUrl = env.DOCKYARD_ANTIGRAVITY_TOKEN_URL || ANTIGRAVITY_BROWSER_TOKEN_URL,
+    userInfoUrl = env.DOCKYARD_ANTIGRAVITY_USERINFO_URL || ANTIGRAVITY_BROWSER_USERINFO_URL,
+    clientId = env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_BROWSER_CLIENT_ID,
+    clientSecret = env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_BROWSER_CLIENT_SECRET,
+    oauthScope = env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE || ANTIGRAVITY_BROWSER_SCOPES,
+    redirectUri = env.DOCKYARD_ANTIGRAVITY_REDIRECT_URI || ANTIGRAVITY_BROWSER_REDIRECT_URI,
+    fetchImpl = fetch,
     authorizationTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS
   } = {}) {
     this.cliPath = cliPath;
     this.env = env;
     this.timeoutMs = timeoutMs;
     this.commandRunner = commandRunner;
+    this.fetchImpl = fetchImpl;
+    this.browserTokenUrl = tokenUrl;
+    this.browserClientId = clientId;
+    this.browserClientSecret = clientSecret;
     this.requestExecutor = requestExecutor;
     this.quotaReader = quotaReader;
     this.tokenResolver = tokenResolver;
-    this.identityFromOfficialCli = identityFromOfficialCli;
-    this.oauthAuthorizer = oauthAuthorizer ?? createAntigravityOAuthAuthorizer({
+    this.identityFromOfficialSession = identityFromOfficialSession;
+    this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
       cliPath,
       environment: env,
       timeoutMs: authorizationTimeoutMs
     });
+    const browserOAuthConfigured = Boolean(clientId && clientSecret);
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth && browserOAuthConfigured ? createBrowserOAuthAuthorizer({
+      providerId: PROVIDER_ID3,
+      redirectUri,
+      callbackPath: new URL(redirectUri).pathname,
+      callbackHost: new URL(redirectUri).hostname,
+      callbackPort: Number(new URL(redirectUri).port || 51121),
+      instructions: "\u8BF7\u5728 Google \u5B98\u65B9\u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      authorizationUrlBuilder: ({ state, codeChallenge, redirectUri: callback }) => `${authorizationUrl}?${new URLSearchParams({
+        access_type: "offline",
+        client_id: clientId,
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256",
+        prompt: "consent",
+        redirect_uri: callback,
+        response_type: "code",
+        scope: oauthScope,
+        state
+      })}`,
+      exchangeCode: async ({ code, codeVerifier, redirectUri: redirectUri2, context }) => {
+        const response = await this.fetchImpl(tokenUrl, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            client_id: clientId,
+            client_secret: clientSecret,
+            code,
+            code_verifier: codeVerifier,
+            grant_type: "authorization_code",
+            redirect_uri: redirectUri2
+          }),
+          ...context.signal ? { signal: context.signal } : {}
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || !body.access_token) {
+          throw new Error(`Antigravity Google token exchange failed (${response.status})`);
+        }
+        return body;
+      },
+      importCredentials: async (tokens, context) => {
+        const access2 = tokens?.access_token ?? tokens?.accessToken;
+        const refresh = tokens?.refresh_token ?? tokens?.refreshToken;
+        if (!access2) throw new Error("Antigravity Google OAuth did not return an access token");
+        let profile = null;
+        try {
+          const response = await this.fetchImpl(userInfoUrl, {
+            headers: { authorization: `Bearer ${access2}` },
+            ...context.signal ? { signal: context.signal } : {}
+          });
+          if (response.ok) profile = await response.json().catch(() => null);
+        } catch {
+        }
+        const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+        const candidateValue = candidate(now, {
+          email: profile?.email,
+          session: {
+            token: access2,
+            refreshToken: refresh,
+            expiresAt: tokenExpiresAt(tokens, now),
+            lastRefreshedAt: now.toISOString()
+          },
+          existingAccounts: context.accounts ?? [],
+          source: "official_antigravity_browser_oauth",
+          sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+        });
+        return [await this.importAccount(candidateValue, context)];
+      }
+    }) : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
     this.catalogLoader = catalogLoader ?? createAntigravityCatalogLoader({
       cliPath,
       env,
@@ -3403,11 +4285,97 @@ var AntigravityOfficialCliDriver = class {
     const parsed = parseJsonOutput2(result.output);
     return { ...result, parsed };
   }
+  async #assertActiveSession(account, signal) {
+    if (!isOfficialSessionAuthKind(account?.auth?.kind)) return;
+    if (account.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return;
+    const expectedFingerprint = account.resources?.sessionFingerprint;
+    if (expectedFingerprint) {
+      let current;
+      try {
+        current = await this.tokenResolver({ env: this.env });
+      } catch {
+        throw activeSessionError("Antigravity OAuth session is unavailable; authorize again");
+      }
+      if (!current?.token || sessionFingerprint(current) !== expectedFingerprint) {
+        const currentEmail = current?.email;
+        if (currentEmail && account.email && sameEmail(currentEmail, account.email)) return;
+        throw activeSessionError(
+          "Antigravity selected account is not the active local session; authorize it again",
+          { mismatch: true }
+        );
+      }
+      return;
+    }
+    if (account.accountId === "antigravity:active" && !account.email) return;
+    let result;
+    try {
+      result = await this.#slash("/quota", signal);
+    } catch {
+      throw activeSessionError("Antigravity active session could not be verified; authorize again");
+    }
+    const email = extractAntigravityAccountEmail(result.parsed, result.output, result.errorOutput);
+    if (account.email && email && sameEmail(account.email, email)) return;
+    throw activeSessionError(
+      "Antigravity selected account is not the active local session; authorize it again",
+      { mismatch: true }
+    );
+  }
+  async #refreshBrowserCredential(account, context = {}) {
+    if (account?.resources?.sessionSource !== OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    if (!credentialRef || typeof context.secretStore?.read !== "function") {
+      throw activeSessionError("Antigravity browser OAuth credential is unavailable; authorize again");
+    }
+    const credential = await context.secretStore.read(credentialRef);
+    if (!credential?.access) {
+      throw activeSessionError("Antigravity browser OAuth credential is missing; authorize again");
+    }
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    if (!tokenNeedsRefresh(credential, now)) return credential;
+    if (!credential.refresh) {
+      throw activeSessionError("Antigravity browser OAuth token expired; authorize again");
+    }
+    let response;
+    try {
+      response = await this.fetchImpl(this.browserTokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: this.browserClientId,
+          client_secret: this.browserClientSecret,
+          grant_type: "refresh_token",
+          refresh_token: credential.refresh
+        }),
+        ...context.signal ? { signal: context.signal } : {}
+      });
+    } catch (error) {
+      const wrapped = activeSessionError(`Antigravity Google OAuth refresh failed: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.access_token) {
+      const error = activeSessionError("Antigravity Google OAuth refresh failed; authorize again");
+      error.status = response.status;
+      throw error;
+    }
+    const updated = {
+      ...credential,
+      access: body.access_token,
+      refresh: body.refresh_token ?? credential.refresh,
+      expiresAt: tokenExpiresAt(body, now) ?? credential.expiresAt ?? null,
+      lastRefreshedAt: now.toISOString()
+    };
+    await context.secretStore.write(credentialRef, updated);
+    return updated;
+  }
   async #nativeQuota(account, context, now) {
     if (typeof this.quotaReader !== "function") return null;
     let credential = null;
     const credentialRef = account?.auth?.credentialRef;
-    if (credentialRef && context.secretStore && typeof context.secretStore.read === "function") {
+    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
+      credential = await this.#refreshBrowserCredential(account, context);
+    } else if (credentialRef && context.secretStore && typeof context.secretStore.read === "function") {
       credential = await context.secretStore.read(credentialRef);
     }
     const value = await this.quotaReader({ account, credential, context });
@@ -3433,7 +4401,7 @@ var AntigravityOfficialCliDriver = class {
       }
       let result = null;
       let cliIdentityError = null;
-      if (windows.length === 0 || this.identityFromOfficialCli) {
+      if (windows.length === 0 || this.identityFromOfficialSession) {
         try {
           result = await this.#slash("/quota", context.signal);
           const data = result.parsed?.command?.data;
@@ -3454,10 +4422,12 @@ var AntigravityOfficialCliDriver = class {
       const found = candidate(now, {
         email,
         session,
-        existingAccounts: context.accounts ?? []
+        existingAccounts: context.accounts ?? [],
+        source,
+        sourceKind: source === "antigravity_native" ? session?.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.OAUTH_FILE : OFFICIAL_SESSION_SOURCE_KINDS.CLI
       });
       found.status = windows.length ? "available" : "degraded";
-      found.diagnostic = windows.length ? null : "\u5B98\u65B9 CLI \u5DF2\u542F\u52A8\uFF0C\u4F46\u6CA1\u6709\u8FD4\u56DE\u7ED3\u6784\u5316 quota \u7A97\u53E3";
+      found.diagnostic = windows.length ? null : source === "antigravity_native" ? "\u5B98\u65B9\u4F1A\u8BDD\u5DF2\u8BFB\u53D6\uFF0C\u4F46\u6CA1\u6709\u8FD4\u56DE\u7ED3\u6784\u5316 quota \u7A97\u53E3" : "\u5B98\u65B9 CLI \u5DF2\u542F\u52A8\uFF0C\u4F46\u6CA1\u6709\u8FD4\u56DE\u7ED3\u6784\u5316 quota \u7A97\u53E3";
       return {
         candidates: [found],
         source,
@@ -3485,36 +4455,74 @@ var AntigravityOfficialCliDriver = class {
       credentialRef: value.credentialRef,
       displayName: value.displayName,
       email: value.email ?? null,
-      auth: { kind: "official_cli_session", scopes: [] },
+      auth: { kind: OFFICIAL_SESSION_AUTH_KIND, scopes: [] },
       subscription: { plan: null, status: null, expiresAt: null },
       refresh: {
-        accessTokenExpiresAt: null,
+        accessTokenExpiresAt: session.expiresAt ?? null,
         nextRefreshAt: null,
-        lastRefreshedAt: null,
-        refreshable: null
+        lastRefreshedAt: session.lastRefreshedAt ?? null,
+        refreshable: session.refresh ? true : null
       },
       resources: {
+        ...officialSessionResources({
+          sourceKind: value.resources?.sessionSource ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+          authSource: value.source ?? "official_antigravity_cli_session"
+        }),
         transport: "gemini_stream_generate_content_sse",
-        authSource: "official_antigravity_cli_session",
-        quotaSource: "antigravity_cli_status",
+        quotaSource: value.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP ? "official_client_status" : value.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER ? "antigravity_browser_oauth" : "antigravity_cli_status",
         ...value.resources ?? {}
       }
     };
   }
+  async getActiveSession(context = {}) {
+    try {
+      const discovered = await this.discover(context);
+      const candidateValue = discovered?.candidates?.[0];
+      if (!candidateValue) return null;
+      const account = await this.importAccount(candidateValue, context);
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID3,
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Antigravity \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        accounts: [account],
+        diagnostic: null
+      };
+    } catch {
+      return null;
+    }
+  }
   async startAuthorization(context = {}) {
-    return this.oauthAuthorizer.begin(context);
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliOAuthAuthorizer.begin(context);
+    return started;
+  }
+  #authorizationAuthorizer(sessionId) {
+    if (sessionId?.includes(":browser:")) return this.browserAuthorizer;
+    return this.oauthAuthorizer === this.browserAuthorizer ? this.cliOAuthAuthorizer : this.oauthAuthorizer;
   }
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    return this.#authorizationAuthorizer(sessionId).poll(sessionId, context);
   }
   async submitAuthorizationCode(sessionId, code, context = {}) {
-    return this.oauthAuthorizer.submitAuthorizationCode(sessionId, code, context);
+    return this.#authorizationAuthorizer(sessionId).submitAuthorizationCode(sessionId, code, context);
   }
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    return this.#authorizationAuthorizer(sessionId).cancel(sessionId, context);
   }
   async refreshAccount(account, context = {}) {
+    await this.#refreshBrowserCredential(account, context);
+    await this.#assertActiveSession(account, context.signal);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    let session = null;
+    try {
+      session = await this.tokenResolver({ env: this.env });
+    } catch {
+    }
+    const fingerprint = sessionFingerprint(session);
+    const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
     let nativeError = null;
     try {
       const native = await this.#nativeQuota(account, context, now);
@@ -3528,7 +4536,7 @@ var AntigravityOfficialCliDriver = class {
             source: "antigravity_native"
           },
           credits: native.credits,
-          resources: { quotaSource: "antigravity_native" },
+          resources: { quotaSource: "antigravity_native", ...fingerprintResources },
           refresh: {
             accessTokenExpiresAt: null,
             nextRefreshAt: null,
@@ -3564,6 +4572,7 @@ var AntigravityOfficialCliDriver = class {
         remaining: finiteNumber(creditsResult.parsed.command.data.remaining_credits),
         upgradeUri: stringValue(creditsResult.parsed.command.data.upgrade_uri)
       } : null,
+      resources: fingerprintResources,
       refresh: {
         accessTokenExpiresAt: null,
         nextRefreshAt: null,
@@ -3573,6 +4582,7 @@ var AntigravityOfficialCliDriver = class {
     };
   }
   async getQuota(account, context = {}) {
+    await this.#assertActiveSession(account, context.signal);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     let nativeError = null;
     try {
@@ -3628,9 +4638,14 @@ var AntigravityOfficialCliDriver = class {
     };
   }
   async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
+    return this.catalogLoader({
+      force: Boolean(context.force),
+      accounts: context.accounts
+    });
   }
   async invoke(request, invocation, context = {}) {
+    await this.#refreshBrowserCredential(invocation?.account, context);
+    await this.#assertActiveSession(invocation?.account, context.signal);
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");
@@ -3642,7 +4657,7 @@ var AntigravityOfficialCliDriver = class {
   }
 };
 function createAntigravityDriver(options = {}) {
-  return new AntigravityOfficialCliDriver(options);
+  return new AntigravityOfficialSessionDriver(options);
 }
 var antigravityDriverConstants = Object.freeze({ providerId: PROVIDER_ID3 });
 
@@ -3666,22 +4681,30 @@ function createAntigravityModule({ driver = {} } = {}) {
 }
 
 // modules/provider-grok/src/driver.mjs
-import { createHash as createHash4 } from "node:crypto";
-import { mkdtemp as mkdtemp3, readFile as readFile4, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
-import { homedir as homedir4 } from "node:os";
+import { createHash as createHash5 } from "node:crypto";
+import { mkdtemp as mkdtemp3, readFile as readFile5, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
+import { homedir as homedir5 } from "node:os";
 import { tmpdir as tmpdir3 } from "node:os";
 import { join as join7 } from "node:path";
 var PROVIDER_ID4 = "grok";
-var DEFAULT_GROK_HOME = join7(homedir4(), ".grok");
+var DEFAULT_AUTHORIZATION_URL2 = "https://auth.x.ai/oauth2/authorize";
+var DEFAULT_TOKEN_URL2 = "https://auth.x.ai/oauth2/token";
+var DEFAULT_CLIENT_ID2 = "b1a00492-073a-47ea-816f-4c329264a828";
+var DEFAULT_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
+var DEFAULT_GROK_HOME = join7(homedir5(), ".grok");
 var DEFAULT_CATALOG_TTL_MS2 = 6e4;
+var DEFAULT_GROK_USAGE_URL = "https://grok.com/?_s=usage";
+var DEFAULT_GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+var DEFAULT_GROK_TOKEN_HEADER = "xai-grok-cli";
+var DEFAULT_GROK_CLIENT_VERSION = "0.2.112";
 var CREDENTIAL_SLOT3 = Symbol("dockyard-grok-credential");
 function hash3(value) {
-  return createHash4("sha256").update(String(value)).digest("hex");
+  return createHash5("sha256").update(String(value)).digest("hex");
 }
 function firstString2(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
-function grokHomePath({ env = process.env, home = homedir4(), grokHome } = {}) {
+function grokHomePath({ env = process.env, home = homedir5(), grokHome } = {}) {
   return grokHome ?? env.GROK_HOME ?? join7(home, ".grok");
 }
 function grokCommandEnvironment(env, grokHome) {
@@ -3710,15 +4733,18 @@ function parseGrokAuth(raw) {
       value.principal_id,
       value.principalId,
       value.team_id,
-      value.teamId
+      value.teamId,
+      accessPayload.sub,
+      accessPayload.user_id,
+      accessPayload.userId
     ) ?? `${scopeKey}:${hash3(access2).slice(0, 20)}`;
-    const email = firstString2(value.email, value.user_email, value.userEmail);
+    const email = firstString2(value.email, value.user_email, value.userEmail, accessPayload.email);
     return {
       access: access2,
       refresh: firstString2(value.refresh_token, value.refreshToken),
       accountId,
       email,
-      displayName: firstString2(value.first_name, value.firstName, value.name, email, accountId),
+      displayName: firstString2(value.first_name, value.firstName, value.name, accessPayload.name, email, accountId),
       plan: firstString2(value.subscription_level, value.subscriptionLevel),
       expiresAt,
       createdAt: firstString2(value.create_time, value.createdAt),
@@ -3730,7 +4756,7 @@ function parseGrokAuth(raw) {
     };
   }).filter(Boolean);
 }
-function accountInput2(tokens, credentialRef, now = /* @__PURE__ */ new Date()) {
+function accountInput2(tokens, credentialRef, now = /* @__PURE__ */ new Date(), { source = "official_grok_oauth" } = {}) {
   return {
     providerId: PROVIDER_ID4,
     accountId: tokens.accountId,
@@ -3748,7 +4774,10 @@ function accountInput2(tokens, credentialRef, now = /* @__PURE__ */ new Date()) 
     resources: {
       transport: "xai_chat_completions_sse",
       accountScope: "oauth_account",
-      quotaSource: "official_grok_cli"
+      sessionSource: source.includes("browser") ? OFFICIAL_SESSION_SOURCE_KINDS.BROWSER : OFFICIAL_SESSION_SOURCE_KINDS.OAUTH_FILE,
+      authSource: source,
+      quotaSource: source.includes("browser") ? "official_browser_session" : "official_grok_session",
+      quotaUrl: DEFAULT_GROK_USAGE_URL
     }
   };
 }
@@ -3839,9 +4868,78 @@ function parseGrokModelCatalog(output = "", cache = null) {
     return model;
   });
 }
+function finiteValue(value) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+function centValue(value) {
+  return finiteValue(value?.val ?? value);
+}
+function periodLabel(periodType) {
+  const value = String(periodType ?? "").toUpperCase();
+  if (value.includes("WEEK")) return "\u5B98\u65B9\u5468\u989D\u5EA6\u5468\u671F";
+  if (value.includes("MONTH")) return "\u5B98\u65B9\u6708\u989D\u5EA6\u5468\u671F";
+  return "\u5B98\u65B9\u989D\u5EA6\u5468\u671F";
+}
+function parseGrokCreditsConfig(body, { now = /* @__PURE__ */ new Date() } = {}) {
+  const config = body?.config && typeof body.config === "object" ? body.config : {};
+  const updatedAt2 = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+  const usagePercent = finiteValue(config.creditUsagePercent);
+  const monthlyLimit = centValue(config.monthlyLimit);
+  const used = centValue(config.used);
+  const currentPeriod = config.currentPeriod && typeof config.currentPeriod === "object" ? config.currentPeriod : {};
+  const periodType = currentPeriod.type ?? config.periodType;
+  const periodStart = currentPeriod.start ?? config.billingPeriodStart ?? null;
+  const periodEnd = currentPeriod.end ?? config.billingPeriodEnd ?? null;
+  let remaining = null;
+  let limit = null;
+  let unit = null;
+  if (usagePercent !== null && usagePercent >= 0 && usagePercent <= 100) {
+    remaining = Math.max(0, 100 - usagePercent);
+    limit = 100;
+    unit = "percent";
+  } else if (monthlyLimit !== null && used !== null && monthlyLimit >= 0) {
+    remaining = Math.max(0, monthlyLimit - used);
+    limit = monthlyLimit;
+    unit = "USD cents";
+  }
+  const windows = periodEnd || remaining !== null || limit !== null ? [{
+    id: "grok.current_period",
+    name: periodLabel(periodType),
+    remaining,
+    limit,
+    unit,
+    resetAt: periodEnd,
+    updatedAt: updatedAt2,
+    source: "official_grok_build_billing"
+  }] : [];
+  return {
+    quota: {
+      remaining,
+      limit,
+      unit,
+      resetAt: periodEnd,
+      windows,
+      updatedAt: updatedAt2,
+      source: "official_grok_build_billing"
+    },
+    subscription: {
+      plan: typeof body?.subscriptionTier === "string" ? body.subscriptionTier : null,
+      status: null,
+      expiresAt: null
+    },
+    resources: {
+      quotaSource: "official_grok_build_billing",
+      quotaDiagnostic: windows.length === 0 ? "Grok \u5B98\u65B9 credits config \u672A\u8FD4\u56DE\u5F53\u524D\u989D\u5EA6\u5468\u671F\u6216\u5269\u4F59\u503C" : remaining === null ? "Grok \u5B98\u65B9\u5DF2\u8FD4\u56DE\u5F53\u524D\u989D\u5EA6\u5468\u671F\uFF0C\u4F46\u672A\u8FD4\u56DE\u5269\u4F59\u767E\u5206\u6BD4" : null,
+      quotaPeriodType: periodType ?? null,
+      quotaPeriodStart: periodStart,
+      quotaUrl: DEFAULT_GROK_USAGE_URL
+    }
+  };
+}
 function createGrokCatalogLoader({
   env = process.env,
-  home = homedir4(),
+  home = homedir5(),
   grokHome,
   cliPath = env.DOCKYARD_GROK_CLI || "grok",
   commandRunner = null,
@@ -3900,13 +4998,23 @@ var GrokOAuthDriver = class {
   constructor({
     authFilePath,
     env = process.env,
-    home = homedir4(),
+    home = homedir5(),
     grokHome,
     catalogLoader = null,
     oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_GROK_BROWSER_OAUTH !== "0",
+    authorizationUrl = env.DOCKYARD_GROK_AUTHORIZATION_URL || DEFAULT_AUTHORIZATION_URL2,
+    tokenUrl = env.DOCKYARD_GROK_TOKEN_URL || DEFAULT_TOKEN_URL2,
+    clientId = env.DOCKYARD_GROK_CLIENT_ID || DEFAULT_CLIENT_ID2,
+    oauthScope = env.DOCKYARD_GROK_OAUTH_SCOPE || DEFAULT_OAUTH_SCOPE,
     cliPath = env.DOCKYARD_GROK_CLI || "grok",
     commandRunner = runCliCommand,
     requestExecutor = null,
+    fetchImpl = fetch,
+    creditsUrl = env.DOCKYARD_GROK_CREDITS_URL || DEFAULT_GROK_CREDITS_URL,
+    tokenHeader = env.DOCKYARD_GROK_TOKEN_HEADER || DEFAULT_GROK_TOKEN_HEADER,
+    clientVersion = env.DOCKYARD_GROK_CLIENT_VERSION || DEFAULT_GROK_CLIENT_VERSION,
     timeoutMs = 3e4
   } = {}) {
     this.env = env;
@@ -3915,7 +5023,14 @@ var GrokOAuthDriver = class {
     this.cliPath = cliPath;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
+    this.fetchImpl = fetchImpl;
+    this.creditsUrl = validateNativeEndpoint(creditsUrl, { providerId: PROVIDER_ID4 });
+    this.tokenHeader = String(tokenHeader || DEFAULT_GROK_TOKEN_HEADER);
+    this.clientVersion = String(clientVersion || DEFAULT_GROK_CLIENT_VERSION);
     this.timeoutMs = timeoutMs;
+    this.tokenUrl = tokenUrl;
+    this.clientId = clientId;
+    this.oauthScope = oauthScope;
     this.catalogLoader = catalogLoader ?? createGrokCatalogLoader({
       env,
       home,
@@ -3924,7 +5039,7 @@ var GrokOAuthDriver = class {
       commandRunner,
       timeoutMs
     });
-    this.oauthAuthorizer = oauthAuthorizer ?? createCliOAuthAuthorizer({
+    this.cliAuthorizer = createCliOAuthAuthorizer({
       providerId: PROVIDER_ID4,
       cliPath,
       loginArgs: ["login", "--oauth"],
@@ -3932,9 +5047,60 @@ var GrokOAuthDriver = class {
       environment: env,
       profileDirectory: this.grokHome,
       browserOpened: true,
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Grok OAuth \u767B\u5F55\u3002\u8BF7\u5728 auth.x.ai \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Grok CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 auth.x.ai \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
       importCredentials: (raw, context) => this.#importOAuthState(raw, context)
     });
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
+      providerId: PROVIDER_ID4,
+      callbackPath: "/callback",
+      callbackHost: "127.0.0.1",
+      callbackPort: 0,
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Grok \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri, nonce }) => {
+        const url = new URL(authorizationUrl);
+        url.search = new URLSearchParams({
+          response_type: "code",
+          client_id: clientId,
+          redirect_uri: redirectUri,
+          scope: oauthScope,
+          code_challenge: codeChallenge,
+          code_challenge_method: "S256",
+          state,
+          nonce,
+          referrer: "grok-build"
+        });
+        return url.toString();
+      },
+      exchangeCode: async ({ code, codeVerifier, redirectUri, context }) => {
+        const response = await this.fetchImpl(`${tokenUrl}`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            client_id: clientId,
+            code,
+            redirect_uri: redirectUri,
+            code_verifier: codeVerifier
+          }),
+          ...context.signal ? { signal: context.signal } : {}
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = new Error(`Grok OAuth token exchange failed (${response.status})`);
+          error.status = response.status;
+          error.upstreamCode = body.error ?? body.error_code;
+          throw error;
+        }
+        return {
+          ...body,
+          oidc_client_id: body.oidc_client_id ?? body.client_id ?? clientId,
+          auth_mode: "oauth",
+          scope: body.scope ?? oauthScope
+        };
+      },
+      importCredentials: (raw, context) => this.#importOAuthState(raw, context, "official_grok_browser_oauth")
+    }) : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliAuthorizer;
   }
   async discover(context = {}) {
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
@@ -3966,7 +5132,9 @@ var GrokOAuthDriver = class {
       scopes: tokens.scopes,
       scopeKey: tokens.scopeKey
     });
-    return accountInput2(tokens, credentialRef, context.now instanceof Date ? context.now : /* @__PURE__ */ new Date());
+    return accountInput2(tokens, credentialRef, context.now instanceof Date ? context.now : /* @__PURE__ */ new Date(), {
+      source: candidate2.source
+    });
   }
   async importSource(source, context = {}) {
     let raw;
@@ -3989,14 +5157,47 @@ var GrokOAuthDriver = class {
     }
     return accounts;
   }
+  async getActiveSession(context = {}) {
+    try {
+      const discovered = await this.discover(context);
+      if (!discovered.candidates?.length) return null;
+      const accounts = [];
+      for (const candidate2 of discovered.candidates) {
+        accounts.push(await this.importAccount(candidate2, context));
+      }
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID4,
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Grok \u5B98\u65B9 OAuth \u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        accounts,
+        diagnostic: null
+      };
+    } catch {
+      return null;
+    }
+  }
   async startAuthorization(context = {}) {
-    return this.oauthAuthorizer.begin(context);
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliAuthorizer.begin(context);
+    return started;
   }
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.poll(sessionId, context);
+  }
+  async submitAuthorizationCode(sessionId, code, context = {}) {
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    if (typeof authorizer?.submitAuthorizationCode !== "function") {
+      throw new Error("\u5F53\u524D Grok \u6388\u6743\u6D41\u7A0B\u4E0D\u63A5\u6536\u624B\u52A8\u6388\u6743\u7801");
+    }
+    return authorizer.submitAuthorizationCode(sessionId, code, context);
   }
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.cancel(sessionId, context);
   }
   async #readCredential(account, context = {}) {
     if (!context.secretStore) throw new Error("A secure credential store is required");
@@ -4024,12 +5225,12 @@ var GrokOAuthDriver = class {
         ...credential.expiresAt ? { expires_at: credential.expiresAt } : {}
       }
     };
-    await writeFile2(authPath, JSON.stringify(raw), { mode: 384 });
+    await writeFile3(authPath, JSON.stringify(raw), { mode: 384 });
     return { profileDir, authPath, credential, env: grokCommandEnvironment(this.env, profileDir) };
   }
   async #finishCredentialEnvironment(prepared, account, context = {}) {
     try {
-      const raw = JSON.parse(await readFile4(prepared.authPath, "utf8"));
+      const raw = JSON.parse(await readFile5(prepared.authPath, "utf8"));
       const updated = parseGrokAuth(raw).find((value) => value.accountId === (account.accountId ?? prepared.credential.accountId)) ?? parseGrokAuth(raw)[0];
       if (updated && context.secretStore) {
         const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
@@ -4043,16 +5244,15 @@ var GrokOAuthDriver = class {
         });
       }
       return updated;
-    } catch {
-      return null;
     } finally {
-      await rm3(prepared.profileDir, { recursive: true, force: true }).catch(() => {
+      await rm4(prepared.profileDir, { recursive: true, force: true }).catch(() => {
       });
     }
   }
   async refreshAccount(account, context = {}) {
     const prepared = await this.#prepareCredentialEnvironment(account, context);
     let updated = null;
+    let commandError2 = null;
     try {
       await this.commandRunner(this.cliPath, ["models"], {
         env: prepared.env,
@@ -4061,10 +5261,19 @@ var GrokOAuthDriver = class {
       });
     } catch (error) {
       error.authExpired = error.code === 401 || /auth|login|expired|credential|access token.{0,80}(?:valid|invalid|expired|revok)/i.test(String(error.message));
-      throw error;
-    } finally {
-      updated = await this.#finishCredentialEnvironment(prepared, account, context);
+      commandError2 = error;
     }
+    let finishError = null;
+    try {
+      updated = await this.#finishCredentialEnvironment(prepared, account, context);
+    } catch (error) {
+      finishError = error;
+    }
+    if (commandError2) {
+      if (finishError && !commandError2.cause) commandError2.cause = finishError;
+      throw commandError2;
+    }
+    if (finishError) throw finishError;
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     return {
       refresh: {
@@ -4077,19 +5286,32 @@ var GrokOAuthDriver = class {
   }
   async getQuota(account, context = {}) {
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
-    return {
-      quota: {
-        remaining: null,
-        limit: null,
-        unit: null,
-        resetAt: null,
-        windows: [],
-        updatedAt: now.toISOString(),
-        source: "official_grok_cli"
+    const credential = await this.#readCredential(account, context);
+    const accountId = credential.accountId ?? account.accountId;
+    const response = await this.fetchImpl(this.creditsUrl, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${credential.access}`,
+        "x-xai-token-auth": this.tokenHeader,
+        "x-userid": accountId,
+        "x-grok-client-version": this.clientVersion
       },
-      subscription: { ...account.subscription },
-      resources: {
-        quotaDiagnostic: "Grok \u5B98\u65B9 CLI/\u516C\u5F00\u6587\u6863\u6CA1\u6709\u63D0\u4F9B\u53EF\u4F9D\u8D56\u7684\u8BA2\u9605\u989D\u5EA6 JSON\uFF1BDockyard \u4E0D\u663E\u793A\u4F30\u7B97\u767E\u5206\u6BD4"
+      ...context.signal ? { signal: context.signal } : {}
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(`Grok credits request failed (${response.status})`);
+      error.status = response.status;
+      error.authExpired = response.status === 401 || response.status === 403;
+      throw error;
+    }
+    const parsed = parseGrokCreditsConfig(body, { now });
+    return {
+      ...parsed,
+      subscription: {
+        ...account.subscription,
+        ...parsed.subscription.plan ? { plan: parsed.subscription.plan } : {}
       }
     };
   }
@@ -4114,15 +5336,31 @@ var GrokOAuthDriver = class {
         context: { ...context, env: prepared.env }
       });
     } catch (error) {
-      await this.#finishCredentialEnvironment(prepared, account, context);
+      try {
+        await this.#finishCredentialEnvironment(prepared, account, context);
+      } catch (finishError) {
+        if (!error.cause) error.cause = finishError;
+      }
       throw error;
     }
     return (async function* streamWithCleanup() {
       const driver = this;
+      let streamError = null;
       try {
         for await (const chunk of output) yield chunk;
+      } catch (error) {
+        streamError = error;
+        throw error;
       } finally {
-        await driver.#finishCredentialEnvironment(prepared, account, context);
+        try {
+          await driver.#finishCredentialEnvironment(prepared, account, context);
+        } catch (finishError) {
+          if (streamError) {
+            if (!streamError.cause) streamError.cause = finishError;
+          } else {
+            throw finishError;
+          }
+        }
       }
     }).call(this);
   }
@@ -4238,11 +5476,14 @@ async function buildGrokRequest(request = {}, context = {}) {
 }
 async function* streamGrokResponse(response) {
   let text2 = "";
-  let textClosed = false;
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
   let usage = null;
   let stop = "stop";
+  let reasoning = null;
   const tools = /* @__PURE__ */ new Map();
-  yield { type: "block-start", index: 0, blockType: "text" };
+  yield { type: "block-start", index: textIndex, blockType: "text" };
   for await (const event of readSseEvents(response)) {
     const payload = event.data;
     if (!payload || typeof payload !== "object") continue;
@@ -4259,20 +5500,46 @@ async function* streamGrokResponse(response) {
     const delta = choice.delta ?? {};
     const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
     if (content) {
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      if (!textOpen) {
+        textIndex = nextIndex++;
+        text2 = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+      }
       text2 += content;
-      yield { type: "text-delta", index: 0, text: content };
+      yield { type: "text-delta", index: textIndex, text: content };
     }
-    const reasoning = delta.reasoning_content ?? delta.reasoningContent;
-    if (reasoning) yield { type: "reasoning-delta", index: 1, text: String(reasoning) };
+    const reasoningDelta = delta.reasoning_content ?? delta.reasoningContent;
+    if (reasoningDelta) {
+      if (textOpen) {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+        textOpen = false;
+      }
+      if (!reasoning) {
+        reasoning = { index: nextIndex++, text: "" };
+        yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+      }
+      const value = String(reasoningDelta);
+      reasoning.text += value;
+      yield { type: "reasoning-delta", index: reasoning.index, text: value };
+    }
     for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
       const key = Number(call.index ?? tools.size);
       if (!tools.has(key)) {
-        if (!textClosed) {
-          yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
-          textClosed = true;
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+          textOpen = false;
         }
         const state2 = {
-          index: key + 1,
+          index: nextIndex++,
           id: firstString3(call.id, `tool-${key}`),
           name: firstString3(call.function?.name, call.name, "tool"),
           arguments: ""
@@ -4290,7 +5557,8 @@ async function* streamGrokResponse(response) {
       }
     }
   }
-  if (!textClosed) yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
+  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
   for (const state of tools.values()) {
     yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" } };
   }
@@ -4356,17 +5624,17 @@ function createGrokModule({ driver = {} } = {}) {
 }
 
 // modules/provider-claude/src/driver.mjs
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 
 // packages/oauth/src/cli-status-authorizer.mjs
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID5 } from "node:crypto";
 import { spawn as spawn5 } from "node:child_process";
 var URL_PATTERN2 = /https?:\/\/[^\s"'<>]+/gi;
 var CHILD_STOP_GRACE_MS2 = 2e3;
 function cleanUrl2(value) {
   return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[),.;]+$/, "");
 }
-function publicSession2(session) {
+function publicSession3(session) {
   return {
     sessionId: session.sessionId,
     providerId: session.providerId,
@@ -4442,31 +5710,31 @@ function createCliStatusAuthorizer({
         if (session.timedOut) {
           session.status = "failed";
           session.diagnostic = "\u5B98\u65B9 OAuth \u767B\u5F55\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002";
-          return publicSession2(session);
+          return publicSession3(session);
         }
         if (session.launchError) {
           session.status = "failed";
           session.diagnostic = `\u65E0\u6CD5\u542F\u52A8\u5B98\u65B9\u767B\u5F55\u547D\u4EE4\uFF1A${session.launchError}`;
-          return publicSession2(session);
+          return publicSession3(session);
         }
         if (session.exitCode !== 0) {
           session.status = "failed";
           session.diagnostic = `\u5B98\u65B9 OAuth \u767B\u5F55\u672A\u5B8C\u6210\uFF08\u9000\u51FA\u7801 ${session.exitCode ?? "unknown"}\uFF09\u3002`;
-          return publicSession2(session);
+          return publicSession3(session);
         }
         const accounts = await importStatus(context);
         if (!Array.isArray(accounts) || accounts.length === 0) {
           session.status = "failed";
           session.diagnostic = "\u5B98\u65B9\u767B\u5F55\u5B8C\u6210\uFF0C\u4F46 provider status \u6CA1\u6709\u8FD4\u56DE\u53EF\u63A5\u5165\u7684\u8BA2\u9605\u8D26\u53F7\u3002";
-          return publicSession2(session);
+          return publicSession3(session);
         }
         session.status = "completed";
-        session.result = { ...publicSession2(session), accounts, diagnostic: null };
+        session.result = { ...publicSession3(session), accounts, diagnostic: null };
         return session.result;
       } catch (error) {
         session.status = "failed";
         session.diagnostic = redactError(error);
-        return publicSession2(session);
+        return publicSession3(session);
       } finally {
         if (session.timer) clearTimeout(session.timer);
       }
@@ -4475,7 +5743,7 @@ function createCliStatusAuthorizer({
   }
   async function begin() {
     const session = {
-      sessionId: `${providerId}:${randomUUID4()}`,
+      sessionId: `${providerId}:${randomUUID5()}`,
       providerId,
       browserOpened,
       status: "pending",
@@ -4518,7 +5786,7 @@ function createCliStatusAuthorizer({
       session.launchError = redactError(error);
       session.exitCode = -1;
     }
-    return publicSession2(session);
+    return publicSession3(session);
   }
   async function poll(sessionId, context) {
     const session = sessions.get(sessionId);
@@ -4531,7 +5799,7 @@ function createCliStatusAuthorizer({
         diagnostic: "OAuth \u767B\u5F55\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002"
       };
     }
-    if (session.exitCode === null) return publicSession2(session);
+    if (session.exitCode === null) return publicSession3(session);
     const result = await finalize(session, context);
     if (result.status !== "pending" && result.status !== "processing") sessions.delete(sessionId);
     return result;
@@ -4547,11 +5815,119 @@ function createCliStatusAuthorizer({
   return Object.freeze({ begin, poll, cancel });
 }
 
+// packages/oauth/src/official-session-authorizer.mjs
+import { randomUUID as randomUUID6 } from "node:crypto";
+var DEFAULT_TIMEOUT_MS3 = 10 * 60 * 1e3;
+function publicSession4(session) {
+  return {
+    sessionId: session.sessionId,
+    providerId: session.providerId,
+    status: session.status,
+    instructions: session.instructions,
+    startedAt: session.startedAt,
+    diagnostic: session.diagnostic ?? null,
+    ...session.browserOpened ? { browserOpened: true } : {}
+  };
+}
+function createOfficialSessionAuthorizer({
+  providerId,
+  source = "official_client",
+  instructions = "\u8BF7\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+  timeoutMs = DEFAULT_TIMEOUT_MS3,
+  browserOpened = false,
+  readSession,
+  onCancel = null
+} = {}) {
+  if (!providerId) throw new Error("Official session authorizer requires providerId");
+  if (typeof readSession !== "function") throw new Error(`Official session authorizer requires a reader for ${providerId}`);
+  const sessions = /* @__PURE__ */ new Map();
+  function missing(sessionId) {
+    return {
+      sessionId,
+      providerId,
+      status: "missing",
+      instructions,
+      diagnostic: "\u5B98\u65B9\u5BA2\u6237\u7AEF\u767B\u5F55\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u5F00\u59CB\u6388\u6743\u3002"
+    };
+  }
+  async function begin() {
+    const session = {
+      sessionId: `${providerId}:official-session:${randomUUID6()}`,
+      providerId,
+      source,
+      browserOpened,
+      status: "pending",
+      instructions,
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      diagnostic: null,
+      result: null
+    };
+    sessions.set(session.sessionId, session);
+    return publicSession4(session);
+  }
+  async function poll(sessionId, context = {}) {
+    const session = sessions.get(sessionId);
+    if (!session) return missing(sessionId);
+    if (session.result) return session.result;
+    if (Date.now() - Date.parse(session.startedAt) >= timeoutMs) {
+      session.status = "failed";
+      session.diagnostic = "\u5B98\u65B9\u5BA2\u6237\u7AEF\u767B\u5F55\u8D85\u65F6\uFF0C\u8BF7\u5B8C\u6210\u767B\u5F55\u540E\u91CD\u65B0\u5F00\u59CB\u6388\u6743\u3002";
+      sessions.delete(sessionId);
+      return publicSession4(session);
+    }
+    try {
+      const value = await readSession(context);
+      const accounts = Array.isArray(value) ? value : value?.accounts;
+      if (Array.isArray(accounts) && accounts.length > 0) {
+        session.status = "completed";
+        session.result = {
+          ...publicSession4(session),
+          accounts,
+          diagnostic: null
+        };
+        sessions.delete(sessionId);
+        return session.result;
+      }
+      session.status = value?.status === "processing" ? "processing" : "pending";
+      session.diagnostic = value?.diagnostic ?? null;
+      return publicSession4(session);
+    } catch (error) {
+      session.status = "processing";
+      session.diagnostic = redactError(error);
+      return publicSession4(session);
+    }
+  }
+  async function cancel(sessionId, context = {}) {
+    const session = sessions.get(sessionId);
+    if (!session) return missing(sessionId);
+    try {
+      await onCancel?.(context);
+    } finally {
+      sessions.delete(sessionId);
+    }
+    return { sessionId, providerId, status: "cancelled" };
+  }
+  async function submitAuthorizationCode(sessionId) {
+    const session = sessions.get(sessionId);
+    if (!session) return missing(sessionId);
+    throw new Error("\u5F53\u524D\u5B98\u65B9\u5BA2\u6237\u7AEF\u6388\u6743\u6D41\u7A0B\u4E0D\u63A5\u6536\u9A8C\u8BC1\u7801");
+  }
+  return Object.freeze({ begin, poll, cancel, submitAuthorizationCode });
+}
+var officialSessionAuthorizerConstants = Object.freeze({
+  defaultTimeoutMs: DEFAULT_TIMEOUT_MS3
+});
+
 // modules/provider-claude/src/driver.mjs
 var PROVIDER_ID6 = "claude";
+var DEFAULT_BROWSER_AUTHORIZATION_URL = "https://claude.com/cai/oauth/authorize";
+var DEFAULT_BROWSER_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+var DEFAULT_BROWSER_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+var DEFAULT_BROWSER_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
+var DEFAULT_BROWSER_SCOPE = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 var CREDENTIAL_SLOT4 = Symbol("dockyard-claude-session");
 function hash4(value) {
-  return createHash5("sha256").update(String(value)).digest("hex");
+  return createHash6("sha256").update(String(value)).digest("hex");
 }
 function firstString4(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
@@ -4613,7 +5989,18 @@ function parseClaudeAuthStatus(output) {
     raw: value
   };
 }
-function candidateFromStatus(status, { source = "official_claude_cli", imported = false } = {}) {
+function activeSessionError2(message, { mismatch = false } = {}) {
+  const error = new Error(message);
+  error.authExpired = true;
+  if (mismatch) error.accountMismatch = true;
+  return error;
+}
+function candidateFromStatus(status, {
+  source = "official_claude_cli",
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+  imported = false,
+  credential = null
+} = {}) {
   const credentialRef = createCredentialRef(PROVIDER_ID6, status.accountId);
   const candidate2 = {
     candidateId: `claude:${hash4(status.accountId).slice(0, 20)}`,
@@ -4630,19 +6017,65 @@ function candidateFromStatus(status, { source = "official_claude_cli", imported 
       refreshable: false
     },
     credentialRef,
+    resources: officialSessionResources({ sourceKind, authSource: source }),
     imported,
     status: status.isSubscription ? "available" : "degraded",
-    diagnostic: status.isApiKey ? "\u5F53\u524D Claude CLI \u4F7F\u7528 API key\uFF0C\u4E0D\u662F Claude Pro/Max \u8BA2\u9605 OAuth" : status.isSubscription ? null : "Claude CLI \u6CA1\u6709\u8FD4\u56DE\u53EF\u8BC6\u522B\u7684 Claude \u8BA2\u9605 OAuth \u72B6\u6001"
+    diagnostic: status.isApiKey ? "\u5F53\u524D Claude \u5B98\u65B9\u4F1A\u8BDD\u4F7F\u7528 API key\uFF0C\u4E0D\u662F Claude Pro/Max \u8BA2\u9605 OAuth" : status.isSubscription ? null : "Claude \u5B98\u65B9\u4F1A\u8BDD\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BC6\u522B\u7684\u8BA2\u9605 OAuth \u72B6\u6001"
   };
   Object.defineProperty(candidate2, CREDENTIAL_SLOT4, {
-    value: {
-      type: "official_cli_session",
+    value: credential ?? {
+      type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID6,
       accountId: status.accountId,
-      authMethod: status.authMethod
+      authMethod: status.authMethod,
+      sourceKind
     },
     enumerable: false
   });
+  return candidate2;
+}
+function browserTokenExpiry(raw, now = /* @__PURE__ */ new Date()) {
+  if (typeof raw?.expires_at === "string") return raw.expires_at;
+  const expiresIn = Number(raw?.expires_in);
+  return Number.isFinite(expiresIn) ? new Date(now.getTime() + expiresIn * 1e3).toISOString() : null;
+}
+function candidateFromBrowserToken(raw, { source = "official_claude_browser_oauth", now = /* @__PURE__ */ new Date() } = {}) {
+  const access2 = firstString4(raw?.access_token, raw?.accessToken);
+  const refresh = firstString4(raw?.refresh_token, raw?.refreshToken);
+  if (!access2 || !refresh) throw new Error("Claude browser OAuth response is missing access and refresh tokens");
+  const account = raw.account ?? {};
+  const organization = raw.organization ?? {};
+  const email = firstString4(raw.email, account.email, account.email_address, account.emailAddress);
+  const accountId = firstString4(raw.accountId, raw.account_id, account.uuid, account.id, email) ?? "claude:active";
+  const candidate2 = candidateFromStatus({
+    loggedIn: true,
+    authMethod: "oauth",
+    apiProvider: "firstParty",
+    isApiKey: false,
+    isSubscription: true,
+    accountId,
+    email,
+    displayName: firstString4(raw.name, account.name, email, accountId),
+    plan: firstString4(raw.plan, raw.plan_type, organization.name)
+  }, {
+    source,
+    sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+    credential: {
+      type: "oauth",
+      providerId: PROVIDER_ID6,
+      accountId,
+      access: access2,
+      refresh,
+      expiresAt: browserTokenExpiry(raw, now),
+      sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+      clientId: raw.client_id ?? raw.clientId ?? null
+    }
+  });
+  candidate2.refresh = {
+    ...candidate2.refresh,
+    accessTokenExpiresAt: browserTokenExpiry(raw, now),
+    refreshable: true
+  };
   return candidate2;
 }
 function summarizeClaudeCandidate(candidate2) {
@@ -4701,7 +6134,7 @@ function createClaudeCatalogLoader({ registryLoader = null } = {}) {
     cached = {
       models,
       source: "dsh_live_provider_registry",
-      ...models.length ? {} : { diagnostics: ["Claude CLI \u6CA1\u6709\u516C\u5F00\u6A21\u578B\u76EE\u5F55\uFF0C\u4E14\u5F53\u524D DSH registry \u672A\u8FD4\u56DE Anthropic \u6A21\u578B"] }
+      ...models.length ? {} : { diagnostics: ["Claude \u5B98\u65B9\u6CA1\u6709\u516C\u5F00\u6A21\u578B\u76EE\u5F55\uFF0C\u4E14\u5F53\u524D DSH registry \u672A\u8FD4\u56DE Anthropic \u6A21\u578B"] }
     };
     return cached;
   };
@@ -4712,52 +6145,249 @@ var ClaudeSubscriptionDriver = class {
     env = process.env,
     commandRunner = runCliCommand,
     requestExecutor = null,
-    catalogLoader = null
+    catalogLoader = null,
+    sessionReader = null,
+    sessionSource = "official_claude_client",
+    sessionSourceKind = OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
+    oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_CLAUDE_BROWSER_OAUTH !== "0",
+    authorizationUrl = env.DOCKYARD_CLAUDE_AUTHORIZATION_URL || DEFAULT_BROWSER_AUTHORIZATION_URL,
+    tokenUrl = env.DOCKYARD_CLAUDE_TOKEN_URL || DEFAULT_BROWSER_TOKEN_URL,
+    clientId = env.DOCKYARD_CLAUDE_CLIENT_ID || DEFAULT_BROWSER_CLIENT_ID,
+    redirectUri = env.DOCKYARD_CLAUDE_REDIRECT_URI || DEFAULT_BROWSER_REDIRECT_URI,
+    oauthScope = env.DOCKYARD_CLAUDE_OAUTH_SCOPE || DEFAULT_BROWSER_SCOPE,
+    fetchImpl = fetch
   } = {}) {
     this.cliPath = cliPath;
     this.env = env;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
+    this.fetchImpl = fetchImpl;
+    this.browserTokenUrl = tokenUrl;
+    this.browserClientId = clientId;
+    this.sessionReader = sessionReader;
+    this.sessionSource = sessionSource;
+    this.sessionSourceKind = sessionSourceKind;
     this.catalogLoader = catalogLoader ?? createClaudeCatalogLoader();
-    this.oauthAuthorizer = createCliStatusAuthorizer({
+    this.clientSessionAuthorizer = typeof sessionReader === "function" ? createOfficialSessionAuthorizer({
+      providerId: PROVIDER_ID6,
+      source: sessionSource,
+      instructions: "\u8BF7\u5728 Claude \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      readSession: async (context = {}) => {
+        const status = await this.#activeStatus(context.signal);
+        const candidate2 = candidateFromStatus(status, {
+          source: status.source,
+          sourceKind: status.sourceKind
+        });
+        return { accounts: [await this.importAccount(candidate2, context)] };
+      }
+    }) : null;
+    this.cliAuthorizer = createCliStatusAuthorizer({
       providerId: PROVIDER_ID6,
       cliPath,
       loginArgs: ["auth", "login", "--claudeai"],
       environment: env,
       browserOpened: true,
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Claude \u8BA2\u9605 OAuth \u767B\u5F55\u3002\u8BF7\u5728 Claude \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Claude CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 Claude \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
       importStatus: async (context) => {
-        const result = await this.#readStatus();
-        const status = parseClaudeAuthStatus(result.output);
+        const status = await this.#activeStatus();
         if (!status.loggedIn || !status.isSubscription) return [];
-        return [await this.importAccount(candidateFromStatus(status), context)];
+        return [await this.importAccount(candidateFromStatus(status, {
+          source: status.source,
+          sourceKind: status.sourceKind
+        }), context)];
       }
     });
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
+      providerId: PROVIDER_ID6,
+      redirectUri,
+      callbackPort: 0,
+      authorizationCodeRequired: true,
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Claude \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF0C\u7136\u540E\u5C06\u9875\u9762\u8FD4\u56DE\u7684\u6388\u6743\u7801\u7C98\u8D34\u56DE Dockyard DSH\u3002",
+      authorizationUrlBuilder: async ({ state, codeChallenge, redirectUri: callback }) => {
+        const url = new URL(authorizationUrl);
+        url.search = new URLSearchParams({
+          code: "true",
+          client_id: clientId,
+          response_type: "code",
+          redirect_uri: callback,
+          scope: oauthScope,
+          code_challenge: codeChallenge,
+          code_challenge_method: "S256",
+          state
+        });
+        return url.toString();
+      },
+      exchangeCode: async ({ code, state, codeVerifier, redirectUri: callback, context }) => {
+        const response = await this.fetchImpl(tokenUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({
+            grant_type: "authorization_code",
+            code: code.includes("#") ? code.split("#", 1)[0] : code,
+            redirect_uri: callback,
+            client_id: clientId,
+            code_verifier: codeVerifier,
+            state
+          }),
+          ...context.signal ? { signal: context.signal } : {}
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const error = new Error(`Claude OAuth token exchange failed (${response.status})`);
+          error.status = response.status;
+          error.upstreamCode = body.error;
+          throw error;
+        }
+        return body;
+      },
+      importCredentials: async (raw, context) => [await this.importAccount(candidateFromBrowserToken(raw, {
+        source: "official_claude_browser_oauth",
+        now: context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()
+      }), context)]
+    }) : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliAuthorizer;
+  }
+  #statusFromResult(result, defaults = {}) {
+    const normalized = normalizeOfficialSessionResult(result, {
+      source: defaults.source ?? "official_claude_cli",
+      sourceKind: defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI
+    });
+    const status = parseClaudeAuthStatus(normalized?.output ?? "");
+    return {
+      ...status,
+      source: normalized?.source ?? defaults.source ?? "official_claude_cli",
+      sourceKind: normalized?.sourceKind ?? defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI
+    };
   }
   async #readStatus(signal) {
-    return this.commandRunner(this.cliPath, ["auth", "status", "--json"], {
+    if (typeof this.sessionReader === "function") {
+      try {
+        const value = await this.sessionReader({ env: this.env, signal });
+        const normalized = normalizeOfficialSessionResult(value, {
+          source: this.sessionSource,
+          sourceKind: this.sessionSourceKind
+        });
+        if (normalized) return normalized;
+      } catch {
+      }
+    }
+    const result = await this.commandRunner(this.cliPath, ["auth", "status", "--json"], {
       env: this.env,
       providerId: PROVIDER_ID6,
       timeoutMs: 3e4,
       ...signal ? { signal } : {}
     });
+    return normalizeOfficialSessionResult(result, {
+      source: "official_claude_cli",
+      sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI
+    });
+  }
+  #isBrowserAccount(account) {
+    return account?.resources?.authSource === "official_claude_browser_oauth";
+  }
+  async #readBrowserCredential(account, context = {}) {
+    if (!context.secretStore) throw new Error("A secure credential store is required");
+    const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
+    const credential = await context.secretStore.read(credentialRef);
+    if (!credential?.access) throw activeSessionError2("Claude browser OAuth credential is missing; authorize again");
+    return { ...credential, credentialRef };
+  }
+  async #refreshBrowserCredential(account, context = {}) {
+    const credential = await this.#readBrowserCredential(account, context);
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    const expiresAt = Date.parse(credential.expiresAt ?? "");
+    if (!credential.refresh || Number.isFinite(expiresAt) && expiresAt - now.getTime() > 6e4) return credential;
+    const response = await this.fetchImpl(this.browserTokenUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: credential.refresh,
+        client_id: credential.clientId ?? this.browserClientId
+      }),
+      ...context.signal ? { signal: context.signal } : {}
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.access_token) {
+      const error = new Error(`Claude browser OAuth refresh failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    const updated = {
+      ...credential,
+      access: body.access_token,
+      refresh: body.refresh_token ?? credential.refresh,
+      expiresAt: typeof body.expires_in === "number" ? new Date(now.getTime() + body.expires_in * 1e3).toISOString() : credential.expiresAt
+    };
+    await context.secretStore.write(credential.credentialRef, updated);
+    return updated;
+  }
+  async #browserStatus(account, context = {}) {
+    const credential = await this.#refreshBrowserCredential(account, context);
+    return {
+      loggedIn: true,
+      authMethod: "oauth",
+      apiProvider: "firstParty",
+      isApiKey: false,
+      isSubscription: true,
+      accountId: account.accountId,
+      email: account.email,
+      displayName: account.displayName,
+      plan: account.subscription?.plan ?? null,
+      raw: {},
+      source: "official_claude_browser_oauth",
+      sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+      credential
+    };
+  }
+  async #activeStatus(signal, account = null, context = {}) {
+    if (this.#isBrowserAccount(account)) return this.#browserStatus(account, context);
+    const result = await this.#readStatus(signal);
+    const status = this.#statusFromResult(result, {
+      source: this.sessionSource,
+      sourceKind: this.sessionSourceKind
+    });
+    if (!status.loggedIn || status.isApiKey || !status.isSubscription) {
+      throw activeSessionError2("Claude subscription OAuth is not the active official session; authorize again");
+    }
+    return status;
+  }
+  async #assertActiveSession(account, signal, context = {}) {
+    const status = await this.#activeStatus(signal, account, context);
+    if (account?.accountId !== status.accountId && account?.accountId !== "claude:active") {
+      throw activeSessionError2(
+        "Claude only exposes its active official session; select the active account or authorize it again",
+        { mismatch: true }
+      );
+    }
+    return status;
   }
   async discover() {
     try {
       const result = await this.#readStatus();
-      const status = parseClaudeAuthStatus(result.output);
+      const status = this.#statusFromResult(result, {
+        source: this.sessionSource,
+        sourceKind: this.sessionSourceKind
+      });
+      const source = status.source ?? "official_claude_cli";
       if (!status.loggedIn) {
-        return { candidates: [], source: "official_claude_cli", diagnostics: ["Claude CLI \u5F53\u524D\u672A\u767B\u5F55"] };
+        return { candidates: [], source, diagnostics: ["Claude \u5B98\u65B9\u4F1A\u8BDD\u5F53\u524D\u672A\u767B\u5F55"] };
       }
       if (status.isApiKey) {
-        return { candidates: [], source: "official_claude_cli", diagnostics: ["Claude CLI \u5F53\u524D\u4F7F\u7528 API key\uFF1B\u8BF7\u4F7F\u7528 Claude \u8BA2\u9605 OAuth \u767B\u5F55"] };
+        return { candidates: [], source, diagnostics: ["Claude \u5B98\u65B9\u4F1A\u8BDD\u5F53\u524D\u4F7F\u7528 API key\uFF1B\u8BF7\u4F7F\u7528\u8BA2\u9605 OAuth \u767B\u5F55"] };
       }
       if (!status.isSubscription) {
-        return { candidates: [], source: "official_claude_cli", diagnostics: ["Claude CLI \u5F53\u524D\u767B\u5F55\u6001\u4E0D\u662F\u53EF\u8BC6\u522B\u7684 Claude \u8BA2\u9605 OAuth"] };
+        return { candidates: [], source, diagnostics: ["Claude \u5B98\u65B9\u4F1A\u8BDD\u4E0D\u662F\u53EF\u8BC6\u522B\u7684\u8BA2\u9605 OAuth"] };
       }
-      return { candidates: [candidateFromStatus(status, { source: "official_claude_cli" })], source: "official_claude_cli", diagnostics: [] };
+      return {
+        candidates: [candidateFromStatus(status, { source, sourceKind: status.sourceKind })],
+        source,
+        diagnostics: []
+      };
     } catch (error) {
-      return { candidates: [], source: "official_claude_cli", diagnostics: [`\u65E0\u6CD5\u8BFB\u53D6 Claude \u5B98\u65B9\u767B\u5F55\u6001\uFF1A${error.message}`] };
+      return { candidates: [], source: this.sessionSource, diagnostics: [`\u65E0\u6CD5\u8BFB\u53D6 Claude \u5B98\u65B9\u4F1A\u8BDD\uFF1A${error.message}`] };
     }
   }
   async importAccount(candidate2, context = {}) {
@@ -4771,49 +6401,79 @@ var ClaudeSubscriptionDriver = class {
       credentialRef: candidate2.credentialRef,
       displayName: candidate2.displayName,
       email: candidate2.email,
-      auth: { kind: "official_cli_session", scopes: [] },
+      auth: { kind: OFFICIAL_SESSION_AUTH_KIND, scopes: [] },
       subscription: { ...candidate2.subscription },
       refresh: { ...candidate2.refresh },
       resources: {
+        ...officialSessionResources({
+          sourceKind: candidate2.resources?.sessionSource ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+          authSource: candidate2.source
+        }),
         transport: "anthropic_messages_sse",
-        accountScope: "active_cli_session",
-        quotaSource: "official_cli_status"
+        quotaSource: candidate2.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP ? "official_client_status" : candidate2.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER ? "official_browser_status" : "official_cli_status"
       }
     };
   }
+  async getActiveSession(context = {}) {
+    try {
+      const status = await this.#activeStatus(context.signal);
+      const candidate2 = candidateFromStatus(status, {
+        source: status.source,
+        sourceKind: status.sourceKind
+      });
+      const account = await this.importAccount(candidate2, context);
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID6,
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Claude \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        accounts: [account],
+        diagnostic: null
+      };
+    } catch {
+      return null;
+    }
+  }
   async startAuthorization(context = {}) {
-    return this.oauthAuthorizer.begin(context);
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliAuthorizer.begin(context);
+    return started;
   }
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.poll(sessionId, context);
+  }
+  async submitAuthorizationCode(sessionId, code, context = {}) {
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    if (typeof authorizer?.submitAuthorizationCode !== "function") {
+      throw new Error("\u5F53\u524D Claude \u6388\u6743\u6D41\u7A0B\u4E0D\u63A5\u6536\u624B\u52A8\u6388\u6743\u7801");
+    }
+    return authorizer.submitAuthorizationCode(sessionId, code, context);
   }
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.cancel(sessionId, context);
   }
   async refreshAccount(account, context = {}) {
-    const result = await this.#readStatus(context.signal);
-    const status = parseClaudeAuthStatus(result.output);
-    if (!status.loggedIn || status.isApiKey || !status.isSubscription) {
-      const error = new Error("Claude subscription OAuth is not the active CLI session; authorize again");
-      error.authExpired = true;
-      throw error;
-    }
-    if (account.accountId !== status.accountId && account.accountId !== "claude:active") {
-      const error = new Error("Claude CLI only exposes its active keychain session; select the active account or authorize it again");
-      error.authForbidden = true;
-      throw error;
-    }
+    if (this.#isBrowserAccount(account)) await this.#refreshBrowserCredential(account, context);
+    const status = await this.#assertActiveSession(account, context.signal, context);
     return {
       identity: { email: status.email, displayName: status.displayName },
       subscription: { plan: status.plan, status: "active", expiresAt: null },
-      refresh: { lastRefreshedAt: (context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()).toISOString(), refreshable: false }
+      refresh: {
+        accessTokenExpiresAt: status.credential?.expiresAt ?? null,
+        lastRefreshedAt: (context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()).toISOString(),
+        refreshable: Boolean(status.credential?.refresh)
+      }
     };
   }
   async getQuota(account, context = {}) {
-    const result = await this.#readStatus(context.signal);
-    const status = parseClaudeAuthStatus(result.output);
+    const status = await this.#assertActiveSession(account, context.signal, context);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
-    const windows = recursiveQuotaWindows(status.raw, { source: "claude_cli_status", now, prefix: "claude" });
+    const quotaSource = status.sourceKind === OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP ? "official_client_status" : "claude_cli_status";
+    const windows = recursiveQuotaWindows(status.raw, { source: quotaSource, now, prefix: "claude" });
     const primary = selectPrimaryQuotaWindow(windows);
     return {
       quota: {
@@ -4823,11 +6483,11 @@ var ClaudeSubscriptionDriver = class {
         resetAt: primary.resetAt ?? null,
         windows,
         updatedAt: now.toISOString(),
-        source: "claude_cli_status"
+        source: quotaSource
       },
       subscription: { plan: status.plan, status: status.isSubscription ? "active" : null, expiresAt: null },
       resources: {
-        quotaDiagnostic: windows.length ? null : "Claude \u5B98\u65B9 CLI auth status \u672A\u8FD4\u56DE\u5B9E\u65F6\u8BA2\u9605\u989D\u5EA6\uFF1BDockyard \u4E0D\u663E\u793A\u4F30\u7B97\u767E\u5206\u6BD4"
+        quotaDiagnostic: windows.length ? null : "Claude \u5B98\u65B9\u4F1A\u8BDD\u72B6\u6001\u672A\u8FD4\u56DE\u5B9E\u65F6\u8BA2\u9605\u989D\u5EA6\uFF1BDockyard \u4E0D\u663E\u793A\u4F30\u7B97\u767E\u5206\u6BD4"
       }
     };
   }
@@ -4835,6 +6495,7 @@ var ClaudeSubscriptionDriver = class {
     return this.catalogLoader({ force: Boolean(context.force) });
   }
   async invoke(request, invocation, context = {}) {
+    await this.#assertActiveSession(invocation?.account, context.signal, context);
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") throw new Error("Claude native invocation transport is not mounted");
     return executor({ request, invocation, context });
@@ -4849,8 +6510,8 @@ function createClaudeDriver(options = {}) {
 var claudeDriverConstants = Object.freeze({ providerId: PROVIDER_ID6 });
 
 // modules/provider-claude/src/native-transport.mjs
-import { readFile as readFile5 } from "node:fs/promises";
-import { homedir as homedir5 } from "node:os";
+import { readFile as readFile6 } from "node:fs/promises";
+import { homedir as homedir6 } from "node:os";
 import { join as join8 } from "node:path";
 var PROVIDER_ID7 = "claude";
 var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
@@ -4859,7 +6520,7 @@ function firstString5(...values) {
 }
 async function readJson(path) {
   try {
-    return JSON.parse(await readFile5(path, "utf8"));
+    return JSON.parse(await readFile6(path, "utf8"));
   } catch {
     return null;
   }
@@ -4872,7 +6533,7 @@ function oauthTokenFromJson(value) {
 async function resolveClaudeAccessToken({
   credential,
   env = process.env,
-  home = homedir5()
+  home = homedir6()
 } = {}) {
   const stored = firstString5(credential?.access, credential?.token);
   if (stored) return { token: stored, kind: credential?.type === "api_key" ? "apiKey" : "oauth" };
@@ -4997,12 +6658,14 @@ function mergeUsage(previous, next) {
 }
 async function* streamClaudeResponse(response) {
   let text2 = "";
-  let textClosed = false;
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
   let usage = null;
   let stop = "stop";
   const tools = /* @__PURE__ */ new Map();
   const reasoning = /* @__PURE__ */ new Map();
-  yield { type: "block-start", index: 0, blockType: "text" };
+  yield { type: "block-start", index: textIndex, blockType: "text" };
   for await (const event of readSseEvents(response)) {
     const payload = event.data;
     if (!payload || typeof payload !== "object") continue;
@@ -5012,40 +6675,79 @@ async function* streamClaudeResponse(response) {
     }
     if (payload.type === "content_block_start") {
       const block = payload.content_block ?? {};
-      if (block.type === "tool_use") {
-        if (!textClosed) {
-          yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
-          textClosed = true;
+      if (block.type === "tool_use" || block.type === "thinking" || block.type === "redacted_thinking") {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+          textOpen = false;
         }
-        const index = Number(payload.index) + 1;
-        tools.set(payload.index, {
-          index,
-          id: firstString5(block.id, `tool-${payload.index}`),
-          name: firstString5(block.name, "tool"),
-          arguments: ""
-        });
-        yield { type: "block-start", index, blockType: "tool-call" };
+        const index = nextIndex++;
+        if (block.type === "tool_use") {
+          tools.set(payload.index, {
+            index,
+            id: firstString5(block.id, `tool-${payload.index}`),
+            name: firstString5(block.name, "tool"),
+            arguments: ""
+          });
+          yield { type: "block-start", index, blockType: "tool-call" };
+        } else {
+          reasoning.set(payload.index, { index, text: "" });
+          yield { type: "block-start", index, blockType: "reasoning" };
+        }
         continue;
       }
-      if (block.type === "thinking" || block.type === "redacted_thinking") {
-        const index = Number(payload.index) + 1;
-        reasoning.set(payload.index, index);
-        yield { type: "block-start", index, blockType: "reasoning" };
+      if (block.type === "text" && !textOpen) {
+        textIndex = nextIndex++;
+        text2 = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
       }
       continue;
     }
     if (payload.type === "content_block_delta") {
       const delta = payload.delta ?? {};
       if (delta.type === "text_delta" && delta.text) {
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text2 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
         text2 += delta.text;
-        yield { type: "text-delta", index: 0, text: delta.text };
+        yield { type: "text-delta", index: textIndex, text: delta.text };
       } else if (delta.type === "thinking_delta" && delta.thinking) {
-        const index = reasoning.get(payload.index) ?? Number(payload.index) + 1;
-        yield { type: "reasoning-delta", index, text: delta.thinking };
+        let state = reasoning.get(payload.index);
+        if (!state) {
+          if (textOpen) {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+            textOpen = false;
+          }
+          state = { index: nextIndex++, text: "" };
+          reasoning.set(payload.index, state);
+          yield { type: "block-start", index: state.index, blockType: "reasoning" };
+        }
+        state.text += delta.thinking;
+        yield { type: "reasoning-delta", index: state.index, text: delta.thinking };
       } else if (delta.type === "input_json_delta" && tools.has(payload.index)) {
         const tool = tools.get(payload.index);
         tool.arguments += delta.partial_json ?? "";
         yield { type: "tool-call-delta", index: tool.index, id: tool.id, name: tool.name, argumentsDelta: delta.partial_json ?? "" };
+      }
+      continue;
+    }
+    if (payload.type === "content_block_stop") {
+      const thought = reasoning.get(payload.index);
+      if (thought) {
+        yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
+        reasoning.delete(payload.index);
+      }
+      const tool = tools.get(payload.index);
+      if (tool) {
+        yield {
+          type: "block-end",
+          index: tool.index,
+          block: { type: "tool-call", id: tool.id, name: tool.name, arguments: tool.arguments || "{}" }
+        };
+        tools.delete(payload.index);
       }
       continue;
     }
@@ -5061,7 +6763,10 @@ async function* streamClaudeResponse(response) {
       });
     }
   }
-  if (!textClosed) yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
+  for (const thought of reasoning.values()) {
+    yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
+  }
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
   for (const tool of tools.values()) {
     yield {
       type: "block-end",
@@ -5075,7 +6780,7 @@ async function* streamClaudeResponse(response) {
 function createClaudeNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_CLAUDE_ENDPOINT || DEFAULT_ENDPOINT3,
   env = process.env,
-  home = homedir5(),
+  home = homedir6(),
   timeoutMs = 3e5,
   fetchImpl = fetch,
   tokenResolver = resolveClaudeAccessToken
@@ -5130,19 +6835,18 @@ function createClaudeModule({ driver = {} } = {}) {
 }
 
 // modules/provider-cursor/src/driver.mjs
-import { execFileSync as execFileSync3 } from "node:child_process";
-import { createHash as createHash7, randomUUID as randomUUID7 } from "node:crypto";
-import { homedir as homedir7 } from "node:os";
+import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as randomUUID9 } from "node:crypto";
+import { homedir as homedir8 } from "node:os";
 
 // modules/provider-cursor/src/native-transport.mjs
 import { execFileSync as execFileSync2 } from "node:child_process";
 import * as http2 from "node:http2";
-import { homedir as homedir6 } from "node:os";
+import { homedir as homedir7 } from "node:os";
 import { join as join9 } from "node:path";
-import { randomBytes, randomUUID as randomUUID6 } from "node:crypto";
+import { randomBytes as randomBytes2, randomUUID as randomUUID8 } from "node:crypto";
 
 // modules/provider-cursor/src/native-protocol.mjs
-import { createHash as createHash6, randomUUID as randomUUID5 } from "node:crypto";
+import { createHash as createHash7, randomUUID as randomUUID7 } from "node:crypto";
 var textEncoder = new TextEncoder();
 var textDecoder = new TextDecoder();
 function concatBytes(parts) {
@@ -5248,7 +6952,7 @@ function firstString6(fields, field) {
   return bytes ? textDecoder.decode(bytes) : "";
 }
 function sha256(bytes) {
-  return new Uint8Array(createHash6("sha256").update(bytes).digest());
+  return new Uint8Array(createHash7("sha256").update(bytes).digest());
 }
 function putBlob(store, value) {
   const bytes = value instanceof Uint8Array ? value : textEncoder.encode(String(value));
@@ -5288,12 +6992,11 @@ function encodeAssistantStep(text2) {
   return conversationStep;
 }
 function encodeConversationTurn(userMessageId, stepIds, requestId) {
-  const agentTurn = concatBytes([
+  return concatBytes([
     bytesField(1, userMessageId),
     ...stepIds.map((id) => bytesField(2, id)),
     ...requestId ? [stringField(3, requestId)] : []
   ]);
-  return bytesField(1, agentTurn);
 }
 function encodeConversationState(messages, blobStore, requestId) {
   const roots = [];
@@ -5321,7 +7024,7 @@ ${message.content}`;
     turnRecords.at(-1)?.steps.push(putBlob(blobStore, encodeAssistantStep(resultText)));
   }
   for (const record of turnRecords.slice(0, -1)) {
-    const userMessageId = putBlob(blobStore, encodeUserMessage(record.text, randomUUID5()));
+    const userMessageId = putBlob(blobStore, encodeUserMessage(record.text, randomUUID7()));
     const turn = encodeConversationTurn(userMessageId, record.steps, requestId);
     turns.push(putBlob(blobStore, turn));
   }
@@ -5364,7 +7067,7 @@ function encodeMcpTools(tools) {
 function encodeAgentRunRequest({
   messages,
   model,
-  requestId = randomUUID5(),
+  requestId = randomUUID7(),
   conversationId = requestId,
   tools = [],
   timeZone = "UTC"
@@ -5409,6 +7112,40 @@ function decodeConnectFrames(buffer) {
     offset += 5 + length;
   }
   return { frames, rest: buffer.slice(offset) };
+}
+function cursorFrameMetadata(message, flags = null) {
+  const bytes = message instanceof Uint8Array ? message : Uint8Array.from(message ?? []);
+  const fieldPaths = [];
+  const visit = (value, prefix = [], depth = 0) => {
+    if (depth > 4 || fieldPaths.length >= 64) return;
+    for (const field of decodeProtoFields(value).slice(0, 32)) {
+      const path = [...prefix, field.field].join(".");
+      fieldPaths.push({ path, wireType: field.wireType, byteLength: field.value instanceof Uint8Array ? field.value.byteLength : null });
+      if (field.wireType === 2) visit(field.value, [...prefix, field.field], depth + 1);
+      if (fieldPaths.length >= 64) return;
+    }
+  };
+  visit(bytes);
+  return {
+    ...Number.isInteger(flags) ? { flags } : {},
+    payloadLength: bytes.byteLength,
+    fieldPaths
+  };
+}
+function decodeCursorConnectTrailer(payload) {
+  const text2 = textDecoder.decode(payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? [])).trim();
+  if (!text2) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(text2);
+  } catch {
+    return { code: "CURSOR_CONNECT_ERROR", message: text2.slice(0, 500) };
+  }
+  const error = parsed?.error && typeof parsed.error === "object" ? parsed.error : null;
+  if (!error) return null;
+  const code = typeof error.code === "string" && error.code.trim() ? error.code.trim() : "CURSOR_CONNECT_ERROR";
+  const message = typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 500) : code;
+  return { code, message };
 }
 function decodeCursorText(message) {
   try {
@@ -5506,13 +7243,14 @@ function createAsyncQueue() {
 function readCursorDesktopSession({
   credential,
   env = process.env,
-  home = homedir6()
+  home = homedir7()
 } = {}) {
   const stored = firstString7(credential?.access, credential?.token);
   if (stored) {
     return {
       token: stored,
       refreshToken: firstString7(credential?.refresh, credential?.refreshToken),
+      expiresAt: firstString7(credential?.expiresAt, credential?.expires_at),
       email: firstString7(credential?.email),
       plan: firstString7(credential?.plan),
       kind: "oauth",
@@ -5547,11 +7285,11 @@ function readCursorDesktopSession({
 }
 function resolveCursorAccessToken(options = {}) {
   const session = readCursorDesktopSession(options);
-  return session ? { token: session.token, kind: session.kind } : null;
+  return session ? { token: session.token, kind: session.kind, ...session.expiresAt ? { expiresAt: session.expiresAt } : {} } : null;
 }
 function cursorHeaders(endpoint2, token, requestId, env) {
   const clientVersion = env.DOCKYARD_CURSOR_CLIENT_VERSION ?? `cli-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10).replace(/-/g, ".")}-agent-host`;
-  const clientKey = randomBytes(32).toString("hex");
+  const clientKey = randomBytes2(32).toString("hex");
   return {
     ":method": "POST",
     ":path": `${endpoint2.pathname}${endpoint2.search}`,
@@ -5573,7 +7311,7 @@ function cursorStatusError(status) {
 }
 function streamCursor({ endpoint: endpoint2, token, request, context, http2Module = http2 }) {
   return (async function* cursorStream() {
-    const requestId = firstString7(request.requestId, context.requestId, randomUUID6());
+    const requestId = firstString7(request.requestId, context.requestId, randomUUID8());
     const conversationId = firstString7(request.sessionId, context.sessionId, requestId);
     const model = firstString7(request.model);
     if (!model) throw nativeProviderError(PROVIDER_ID8, "Cursor model is missing");
@@ -5601,6 +7339,12 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
     let stream = null;
     let responseStatus = 0;
     let responseBuffer = new Uint8Array();
+    const responseDiagnostics = [];
+    const protocolError = (message, code) => {
+      const error = nativeProviderError(PROVIDER_ID8, message, { code });
+      if (responseDiagnostics.length > 0) error.cursorDiagnostics = responseDiagnostics.slice(0, 32);
+      return error;
+    };
     let completed = false;
     let cleaned = false;
     let heartbeat;
@@ -5635,12 +7379,21 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
         responseBuffer = decoded.rest;
         for (const frame of decoded.frames) {
           if ((frame.flags & 2) !== 0) {
-            completed = true;
-            queue.push({ type: "complete" });
+            const trailer = decodeCursorConnectTrailer(frame.payload);
+            if (trailer) {
+              queue.fail(nativeProviderError(PROVIDER_ID8, trailer.message, {
+                code: trailer.code,
+                body: { code: trailer.code, message: trailer.message }
+              }));
+            } else {
+              completed = true;
+              queue.push({ type: "complete" });
+            }
             continue;
           }
           if ((frame.flags & 1) !== 0) {
-            queue.fail(nativeProviderError(PROVIDER_ID8, "Cursor returned a compressed protobuf frame"));
+            responseDiagnostics.push(cursorFrameMetadata(frame.payload, frame.flags));
+            queue.fail(protocolError("Cursor returned a compressed protobuf frame", "CURSOR_COMPRESSED_RESPONSE"));
             continue;
           }
           const kv = decodeCursorKvRequest(frame.payload);
@@ -5653,14 +7406,26 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
             continue;
           }
           const text3 = decodeCursorText(frame.payload);
+          const turnComplete = cursorTurnComplete(frame.payload);
           if (text3) queue.push({ type: "text", text: text3 });
-          if (cursorTurnComplete(frame.payload)) {
+          if (!text3) responseDiagnostics.push(cursorFrameMetadata(frame.payload, frame.flags));
+          if (turnComplete) {
             completed = true;
             queue.push({ type: "complete" });
           }
         }
       });
-      stream.once("end", () => queue.close());
+      stream.once("end", () => {
+        if (responseBuffer.byteLength > 0) {
+          responseDiagnostics.push({
+            payloadLength: responseBuffer.byteLength,
+            incomplete: true
+          });
+          queue.fail(protocolError("Cursor AgentService returned an incomplete Connect frame", "CURSOR_INCOMPLETE_RESPONSE"));
+        } else {
+          queue.close();
+        }
+      });
       stream.once("error", (error) => queue.fail(error));
       stream.write(Buffer.from(encoded.frame));
       heartbeat = setInterval(() => {
@@ -5692,8 +7457,14 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
         cleanup();
       }
       if (!failed) {
+        if (!completed) {
+          throw protocolError("Cursor AgentService ended before completing the turn", "CURSOR_INCOMPLETE_RESPONSE");
+        }
+        if (text2.trim().length === 0) {
+          throw protocolError("Cursor AgentService completed without assistant text", "CURSOR_EMPTY_RESPONSE");
+        }
         yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
-        yield { type: "finish", reason: { kind: completed ? "stop" : "stop" } };
+        yield { type: "finish", reason: { kind: "stop" } };
       }
     } catch (error) {
       cleanup();
@@ -5704,7 +7475,7 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
 function createCursorNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_CURSOR_ENDPOINT || DEFAULT_ENDPOINT4,
   env = process.env,
-  home = homedir6(),
+  home = homedir7(),
   tokenResolver = resolveCursorAccessToken,
   http2Module = http2
 } = {}) {
@@ -5721,6 +7492,16 @@ function createCursorNativeExecutor({
       error.authExpired = true;
       throw error;
     }
+    if (auth.expiresAt) {
+      const expiry = Date.parse(auth.expiresAt);
+      if (Number.isFinite(expiry) && expiry <= Date.now()) {
+        const error = nativeProviderError(PROVIDER_ID8, "Cursor OAuth access token expired; authorize Cursor again", {
+          code: "CURSOR_TOKEN_EXPIRED"
+        });
+        error.authExpired = true;
+        throw error;
+      }
+    }
     return streamCursor({ endpoint: safeEndpoint, token: auth.token, request, context, http2Module });
   };
   executor.nativeTransport = "cursor-connect-agent-service";
@@ -5735,10 +7516,37 @@ var cursorNativeTransportConstants = Object.freeze({
 var PROVIDER_ID9 = "cursor";
 var CREDENTIAL_SLOT5 = Symbol("dockyard-cursor-session");
 function hash5(value) {
-  return createHash7("sha256").update(String(value)).digest("hex");
+  return createHash8("sha256").update(String(value)).digest("hex");
 }
 function firstString8(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+function normalizeTokenExpiry(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const millis = value > 1e12 ? value : value * 1e3;
+    const date2 = new Date(millis);
+    return Number.isNaN(date2.getTime()) ? null : date2.toISOString();
+  }
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+function cursorTokenExpiresAt(raw = {}, payload = {}) {
+  const direct = normalizeTokenExpiry(raw.expiresAt ?? raw.expires_at);
+  if (direct) return direct;
+  const expiresIn = raw.expiresIn ?? raw.expires_in;
+  if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
+    return new Date(Date.now() + expiresIn * 1e3).toISOString();
+  }
+  return normalizeTokenExpiry(payload.exp);
+}
+function tokenIsExpired(value, now = Date.now()) {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) && timestamp <= now;
+}
+function tokenNeedsRefresh2(value, now = Date.now(), leewayMs = 6e4) {
+  const timestamp = Date.parse(String(value ?? ""));
+  return Number.isFinite(timestamp) && timestamp <= now + leewayMs;
 }
 function statusObject2(output) {
   return parseJsonOutput(output) ?? {};
@@ -5757,14 +7565,6 @@ function statusValue(value, ...keys) {
 }
 function parseTextEmail(output) {
   return String(output).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? null;
-}
-function commandAvailable(command) {
-  try {
-    execFileSync3("which", [command], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
 }
 function parseCursorAuthStatus(output) {
   const raw = statusObject2(output);
@@ -5799,7 +7599,18 @@ function parseCursorAuthStatus(output) {
     raw
   };
 }
-function candidateFromStatus2(status, { source = "official_cursor_cli", imported = false } = {}) {
+function activeSessionError3(message, { mismatch = false } = {}) {
+  const error = new Error(message);
+  error.authExpired = true;
+  if (mismatch) error.accountMismatch = true;
+  return error;
+}
+function candidateFromStatus2(status, {
+  source = "official_cursor_cli",
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+  imported = false,
+  credential = null
+} = {}) {
   const credentialRef = createCredentialRef(PROVIDER_ID9, status.accountId);
   const candidate2 = {
     candidateId: `cursor:${hash5(status.accountId).slice(0, 20)}`,
@@ -5816,18 +7627,96 @@ function candidateFromStatus2(status, { source = "official_cursor_cli", imported
       refreshable: false
     },
     credentialRef,
+    resources: officialSessionResources({ sourceKind, authSource: source }),
     imported,
     status: status.loggedIn ? "available" : "degraded",
-    diagnostic: status.loggedIn ? null : "Cursor CLI \u5F53\u524D\u672A\u8FD4\u56DE\u5DF2\u767B\u5F55\u72B6\u6001"
+    diagnostic: status.loggedIn ? null : "Cursor \u5B98\u65B9\u4F1A\u8BDD\u5F53\u524D\u672A\u8FD4\u56DE\u5DF2\u767B\u5F55\u72B6\u6001"
   };
   Object.defineProperty(candidate2, CREDENTIAL_SLOT5, {
-    value: {
-      type: "official_cli_session",
+    value: credential ?? {
+      type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID9,
-      accountId: status.accountId
+      accountId: status.accountId,
+      sourceKind
     },
     enumerable: false
   });
+  return candidate2;
+}
+async function resolveCursorBrowserEmail(raw, access2, {
+  fetchImpl = null,
+  apiBaseUrl = "https://api2.cursor.sh",
+  home = homedir8(),
+  signal
+} = {}) {
+  const payload = decodeJwtPayload(access2) ?? {};
+  const direct = firstString8(
+    raw?.email,
+    raw?.user?.email,
+    raw?.profile?.email,
+    payload.email,
+    payload.user_email,
+    payload.email_address,
+    payload["https://cursor.com/email"]
+  );
+  if (direct) return direct;
+  try {
+    const desktop = readCursorDesktopSession({ home });
+    if (desktop?.email) return desktop.email;
+  } catch {
+  }
+  if (typeof fetchImpl !== "function") return null;
+  try {
+    const response = await fetchImpl(`${apiBaseUrl.replace(/\/+$/, "")}/aiserver.v1.AuthService/GetEmail`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${access2}`
+      },
+      body: "{}",
+      ...signal ? { signal } : {}
+    });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => ({}));
+    return firstString8(body?.email, body?.user?.email, body?.profile?.email);
+  } catch {
+    return null;
+  }
+}
+async function candidateFromBrowserTokens(raw, options = {}) {
+  const access2 = firstString8(raw?.accessToken, raw?.access_token);
+  const refresh = firstString8(raw?.refreshToken, raw?.refresh_token);
+  if (!access2 || !refresh) throw new Error("Cursor browser login did not return access and refresh tokens");
+  const payload = decodeJwtPayload(access2) ?? {};
+  const expiresAt = cursorTokenExpiresAt(raw, payload);
+  const email = await resolveCursorBrowserEmail(raw, access2, options);
+  const accountId = firstString8(raw.accountId, raw.account_id, raw.userId, raw.user_id, payload.sub, payload.user_id, email) ?? `cursor:${hash5(access2).slice(0, 20)}`;
+  const candidate2 = candidateFromStatus2({
+    loggedIn: true,
+    accountId,
+    email,
+    plan: firstString8(raw.plan, raw.subscription?.plan, raw.membershipType, payload.plan),
+    displayName: firstString8(raw.name, raw.user?.name, email, accountId)
+  }, {
+    source: "official_cursor_browser_oauth",
+    sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+    credential: {
+      type: "oauth",
+      providerId: PROVIDER_ID9,
+      accountId,
+      access: access2,
+      refresh,
+      ...expiresAt ? { expiresAt } : {},
+      email,
+      sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+    }
+  });
+  candidate2.refresh = {
+    ...candidate2.refresh,
+    accessTokenExpiresAt: expiresAt,
+    refreshable: true
+  };
   return candidate2;
 }
 function desktopSessionAccountId(session) {
@@ -5836,6 +7725,7 @@ function desktopSessionAccountId(session) {
 function statusFromDesktopSession(session) {
   return {
     source: "cursor_desktop_app",
+    sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
     loggedIn: true,
     accountId: session.accountId,
     email: session.email,
@@ -5871,6 +7761,10 @@ function candidateFromDesktopSession(session) {
     status: "available",
     diagnostic: null,
     resources: {
+      ...officialSessionResources({
+        sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
+        authSource: "cursor_desktop_app"
+      }),
       transport: "cursor_connect_agent_service",
       identitySource: "cursor_desktop_app",
       sessionPersistence: "captured",
@@ -5879,7 +7773,7 @@ function candidateFromDesktopSession(session) {
   };
   Object.defineProperty(candidate2, CREDENTIAL_SLOT5, {
     value: {
-      type: "oauth",
+      type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID9,
       accountId,
       access: session.token,
@@ -5909,48 +7803,108 @@ function normalizeModel(value) {
   if (!value || typeof value !== "object") return null;
   const id = firstString8(value.id, value.model, value.modelId, value.name);
   if (!id) return null;
+  const contextWindow = value.contextWindow ?? value.context_window ?? value.contextTokenLimit ?? value.context_token_limit;
+  const maxTokens = value.maxTokens ?? value.max_tokens ?? value.maxOutputTokens ?? value.max_output_tokens;
+  const inputModalities = value.input ?? value.inputModalities ?? value.input_modalities ?? (value.supportsImages || value.supports_images ? ["text", "image"] : null);
   return {
     id,
-    name: firstString8(value.name, value.label, id),
-    ...Number.isInteger(value.contextWindow ?? value.context_window) ? { contextWindow: value.contextWindow ?? value.context_window } : {},
-    ...Number.isInteger(value.maxTokens ?? value.max_tokens ?? value.maxOutputTokens) ? { maxTokens: value.maxTokens ?? value.max_tokens ?? value.maxOutputTokens } : {},
-    ...Array.isArray(value.input ?? value.inputModalities) ? { inputModalities: [...value.input ?? value.inputModalities] } : {},
-    ...value.reasoning ? { reasoning: value.reasoning } : {}
+    name: firstString8(
+      value.clientDisplayName,
+      value.client_display_name,
+      value.displayName,
+      value.display_name,
+      value.name,
+      value.label,
+      id
+    ),
+    ...Number.isInteger(contextWindow) ? { contextWindow } : {},
+    ...Number.isInteger(maxTokens) ? { maxTokens } : {},
+    ...Array.isArray(inputModalities) ? { inputModalities: [...inputModalities] } : {},
+    ...value.reasoning ? { reasoning: value.reasoning } : {},
+    ...value.supportsThinking || value.supports_thinking ? { reasoning: { supported: true } } : {}
   };
 }
 function createCursorCatalogLoader({
   cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
   env = process.env,
-  commandRunner = runCliCommand
+  commandRunner = runCliCommand,
+  apiBaseUrl = process.env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
+  fetchImpl = fetch
 } = {}) {
   let cached = null;
   let pending = null;
-  return async function loadCatalog({ force = false } = {}) {
-    if (!force && cached) return cached;
+  const normalizedApiBaseUrl = apiBaseUrl.replace(/\/+$/, "");
+  async function loadBrowserCatalog({ accounts, secretStore, signal }) {
+    const account = (Array.isArray(accounts) ? accounts : []).find((entry) => entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER || entry?.resources?.authSource === "official_cursor_browser_oauth");
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    if (!account || !credentialRef || typeof secretStore?.read !== "function") return null;
+    const credential = await secretStore.read(credentialRef);
+    if (!credential?.access) return null;
+    const response = await fetchImpl(`${normalizedApiBaseUrl}/aiserver.v1.AiService/AvailableModels`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${credential.access}`
+      },
+      body: JSON.stringify({
+        isNightly: false,
+        excludeMaxNamedModels: true,
+        additionalModelNames: [],
+        useModelParameters: true,
+        useReactModelPicker: true
+      }),
+      ...signal ? { signal } : {}
+    });
+    if (!response.ok) return null;
+    const body = await response.json().catch(() => ({}));
+    const values = Array.isArray(body?.models) ? body.models : body?.modelNames ?? body?.model_names;
+    const models = (Array.isArray(values) ? values : []).map(normalizeModel).filter(Boolean);
+    if (models.length === 0) return null;
+    return {
+      models,
+      source: "official_cursor_browser_oauth_api"
+    };
+  }
+  return async function loadCatalog({ force = false, accounts = [], secretStore, signal } = {}) {
+    const hasBrowserAccount = (Array.isArray(accounts) ? accounts : []).some((entry) => entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER || entry?.resources?.authSource === "official_cursor_browser_oauth");
+    if (!force && cached && (hasBrowserAccount ? cached.source === "official_cursor_browser_oauth_api" : cached.source !== "official_cursor_browser_oauth_api")) return cached;
     if (pending) return pending;
     pending = (async () => {
+      try {
+        const browser = await loadBrowserCatalog({ accounts, secretStore, signal });
+        if (browser) {
+          cached = browser;
+          return cached;
+        }
+      } catch {
+      }
       try {
         const result = await commandRunner(cliPath, ["status"], {
           env,
           providerId: PROVIDER_ID9,
-          timeoutMs: 3e4
+          timeoutMs: 3e4,
+          ...signal ? { signal } : {}
         });
         const status = parseCursorAuthStatus(result.output);
         const models = status.models.map(normalizeModel).filter(Boolean);
-        cached = {
+        const catalog = {
           models,
           source: "official_cursor_cli_status",
-          ...models.length ? {} : { diagnostics: ["Cursor \u5B98\u65B9 CLI status \u6CA1\u6709\u8FD4\u56DE\u6A21\u578B\u76EE\u5F55\uFF1B\u4E0D\u5728 Dockyard \u4E2D\u786C\u7F16\u7801\u6A21\u578B\u7248\u672C"] }
+          ...models.length ? {} : { diagnostics: ["Cursor \u5B98\u65B9 status \u6CA1\u6709\u8FD4\u56DE\u6A21\u578B\u76EE\u5F55"] }
         };
+        cached = models.length ? catalog : null;
+        return catalog;
       } catch (error) {
         const desktop = readCursorDesktopSession({ env });
-        cached = {
+        const catalog = {
           models: [],
           source: error?.code === "ENOENT" ? desktop ? "cursor_desktop_app" : "cursor_cli_not_found" : "official_cursor_cli_status",
-          diagnostics: [desktop ? "\u5DF2\u68C0\u6D4B\u5230 Cursor \u684C\u9762\u7AEF OAuth\uFF1B\u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u4ECD\u9700 cursor-agent status \u8FD4\u56DE\uFF0C\u672A\u786C\u7F16\u7801\u6A21\u578B" : `\u65E0\u6CD5\u8BFB\u53D6 Cursor \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\uFF1A${error.message}`]
+          diagnostics: [desktop ? "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9 OAuth\uFF1B\u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BF7\u6C42\u672A\u8FD4\u56DE\u7ED3\u679C" : `\u65E0\u6CD5\u8BFB\u53D6 Cursor \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\uFF1A${error.message}`]
         };
+        cached = null;
+        return catalog;
       }
-      return cached;
     })().finally(() => {
       pending = null;
     });
@@ -5961,30 +7915,114 @@ var CursorSubscriptionDriver = class {
   constructor({
     cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
     env = process.env,
-    home = homedir7(),
+    home = homedir8(),
     commandRunner = runCliCommand,
     requestExecutor = null,
-    catalogLoader = null
+    catalogLoader = null,
+    sessionReader = null,
+    sessionSource = "official_cursor_client",
+    sessionSourceKind = OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP,
+    oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_CURSOR_BROWSER_OAUTH !== "0",
+    websiteUrl = env.CURSOR_WEBSITE_URL || "https://cursor.com",
+    apiBaseUrl = env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
+    refreshUrl = env.CURSOR_REFRESH_URL || `${apiBaseUrl}/auth/exchange_user_api_key`,
+    fetchImpl = fetch
   } = {}) {
     this.cliPath = cliPath;
     this.env = env;
     this.home = home;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
-    this.catalogLoader = catalogLoader ?? createCursorCatalogLoader({ cliPath, env, commandRunner });
-    this.oauthAuthorizer = createCliStatusAuthorizer({
+    this.fetchImpl = fetchImpl;
+    this.websiteUrl = websiteUrl.replace(/\/+$/, "");
+    this.apiBaseUrl = apiBaseUrl.replace(/\/+$/, "");
+    const refreshEndpoint = new URL(refreshUrl);
+    if (refreshEndpoint.protocol !== "https:") {
+      throw new Error("Cursor OAuth refresh endpoint must use HTTPS");
+    }
+    this.refreshUrl = refreshEndpoint.toString().replace(/\/$/, "");
+    this.sessionReader = sessionReader;
+    this.sessionSource = sessionSource;
+    this.sessionSourceKind = sessionSourceKind;
+    this.catalogLoader = catalogLoader ?? createCursorCatalogLoader({
+      cliPath,
+      env,
+      commandRunner,
+      apiBaseUrl: this.apiBaseUrl,
+      fetchImpl: this.fetchImpl
+    });
+    this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
+      providerId: PROVIDER_ID9,
+      source: sessionSource,
+      instructions: "\u8BF7\u5728 Cursor \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      readSession: async (context = {}) => {
+        const status = this.sessionReader ? await this.#readStatus(context.signal) : (() => {
+          const desktop2 = this.#readDesktopSession();
+          return desktop2 ? statusFromDesktopSession(desktop2) : null;
+        })();
+        if (!status?.loggedIn) return { accounts: [] };
+        const desktop = status.source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
+        const candidate2 = desktop ? candidateFromDesktopSession(desktop) : candidateFromStatus2(status, { source: status.source, sourceKind: status.sourceKind });
+        return { accounts: [await this.importAccount(candidate2, context)] };
+      }
+    });
+    this.cliAuthorizer = createCliStatusAuthorizer({
       providerId: PROVIDER_ID9,
       cliPath,
       loginArgs: ["login"],
       environment: env,
       browserOpened: true,
-      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Cursor OAuth \u767B\u5F55\u3002\u8BF7\u5728 Cursor \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Cursor CLI OAuth \u767B\u5F55\u3002\u8BF7\u5728 Cursor \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
       importStatus: async (context) => {
         const status = await this.#readStatus();
         if (!status.loggedIn) return [];
-        return [await this.importAccount(candidateFromStatus2(status), context)];
+        return [await this.importAccount(candidateFromStatus2(status, {
+          source: status.source,
+          sourceKind: status.sourceKind
+        }), context)];
       }
     });
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
+      providerId: PROVIDER_ID9,
+      instructions: "\u8BF7\u5728\u5B98\u65B9 Cursor \u6388\u6743\u9875\u9762\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1B\u5B8C\u6210\u540E\u4F1A\u81EA\u52A8\u8FD4\u56DE Dockyard DSH\u3002",
+      authorizationUrlBuilder: async () => {
+        const verifier = randomBytes3(32).toString("base64url");
+        const challenge = createHash8("sha256").update(verifier).digest("base64url");
+        const uuid = randomUUID9();
+        return {
+          url: `${this.websiteUrl}/loginDeepControl?${new URLSearchParams({
+            challenge,
+            uuid,
+            mode: "login",
+            redirectTarget: "cli"
+          })}`,
+          metadata: { uuid, verifier }
+        };
+      },
+      pollSession: async ({ metadata, context }) => {
+        if (!metadata?.uuid || !metadata.verifier) return null;
+        const response = await this.fetchImpl(`${this.apiBaseUrl}/auth/poll?${new URLSearchParams({
+          uuid: metadata.uuid,
+          verifier: metadata.verifier
+        })}`, {
+          headers: { "content-type": "application/json" },
+          ...context.signal ? { signal: context.signal } : {}
+        });
+        if (response.status === 404) return null;
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(`Cursor browser OAuth polling failed (${response.status})`);
+        return body?.accessToken && body?.refreshToken ? body : null;
+      },
+      importCredentials: async (raw, context) => [await this.importAccount(await candidateFromBrowserTokens(raw, {
+        fetchImpl: this.fetchImpl,
+        apiBaseUrl: this.apiBaseUrl,
+        home: this.home,
+        signal: context.signal
+      }), context)]
+    }) : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliAuthorizer;
   }
   #readDesktopSession() {
     const session = readCursorDesktopSession({ env: this.env, home: this.home });
@@ -5994,7 +8032,33 @@ var CursorSubscriptionDriver = class {
       accountId: desktopSessionAccountId(session)
     };
   }
+  #statusFromResult(result, defaults = {}) {
+    const normalized = normalizeOfficialSessionResult(result, {
+      source: defaults.source ?? "official_cursor_cli",
+      sourceKind: defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI
+    });
+    const status = parseCursorAuthStatus(normalized?.output ?? "");
+    return {
+      ...status,
+      source: normalized?.source ?? defaults.source ?? "official_cursor_cli",
+      sourceKind: normalized?.sourceKind ?? defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI
+    };
+  }
   async #readStatus(signal) {
+    if (typeof this.sessionReader === "function") {
+      try {
+        const value = await this.sessionReader({ env: this.env, home: this.home, signal });
+        const normalized = normalizeOfficialSessionResult(value, {
+          source: this.sessionSource,
+          sourceKind: this.sessionSourceKind
+        });
+        if (normalized) return this.#statusFromResult(normalized, {
+          source: this.sessionSource,
+          sourceKind: this.sessionSourceKind
+        });
+      } catch {
+      }
+    }
     try {
       const result = await this.commandRunner(this.cliPath, ["status"], {
         env: this.env,
@@ -6002,7 +8066,10 @@ var CursorSubscriptionDriver = class {
         timeoutMs: 3e4,
         ...signal ? { signal } : {}
       });
-      const status = parseCursorAuthStatus(result.output);
+      const status = this.#statusFromResult(result, {
+        source: "official_cursor_cli",
+        sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI
+      });
       if (status.loggedIn) return status;
       const desktop = this.#readDesktopSession();
       return desktop ? statusFromDesktopSession(desktop) : status;
@@ -6012,13 +8079,97 @@ var CursorSubscriptionDriver = class {
       throw error;
     }
   }
+  #isBrowserAccount(account) {
+    return account?.resources?.authSource === "official_cursor_browser_oauth";
+  }
+  async #refreshBrowserCredential(account, context = {}) {
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    const credential = context.secretStore && credentialRef ? await context.secretStore.read(credentialRef) : null;
+    if (!credential?.access) throw activeSessionError3("Cursor browser OAuth credential is missing; authorize again");
+    const expiresAt = cursorTokenExpiresAt(credential, decodeJwtPayload(credential.access) ?? {});
+    const now = context.now instanceof Date ? context.now.getTime() : Date.now();
+    if (!tokenNeedsRefresh2(expiresAt, now)) return credential;
+    if (!credential.refresh) throw activeSessionError3("Cursor browser OAuth token expired; authorize again");
+    let response;
+    try {
+      response = await this.fetchImpl(this.refreshUrl, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${credential.refresh}`,
+          "content-type": "application/json",
+          accept: "application/json"
+        },
+        body: "{}",
+        ...context.signal ? { signal: context.signal } : {}
+      });
+    } catch (error) {
+      const wrapped = activeSessionError3("Cursor browser OAuth access token expired and refresh failed; authorize again");
+      wrapped.cause = error;
+      throw wrapped;
+    }
+    const body = await response.json().catch(() => ({}));
+    const access2 = firstString8(body?.accessToken, body?.access_token);
+    if (!response.ok || !access2) {
+      const error = activeSessionError3("Cursor browser OAuth access token expired and refresh failed; authorize again");
+      error.status = response.status;
+      throw error;
+    }
+    const refresh = firstString8(body?.refreshToken, body?.refresh_token, credential.refresh);
+    const refreshedExpiresAt = cursorTokenExpiresAt({
+      expiresAt: body?.expiresAt ?? body?.expires_at,
+      expiresIn: body?.expiresIn ?? body?.expires_in
+    }, decodeJwtPayload(access2) ?? {});
+    const updated = {
+      ...credential,
+      access: access2,
+      refresh,
+      ...refreshedExpiresAt ? { expiresAt: refreshedExpiresAt } : {},
+      lastRefreshedAt: new Date(now).toISOString()
+    };
+    await context.secretStore.write(credentialRef, updated);
+    return updated;
+  }
+  async #browserStatus(account, context = {}) {
+    const credential = await this.#refreshBrowserCredential(account, context);
+    const expiresAt = cursorTokenExpiresAt(credential, decodeJwtPayload(credential.access) ?? {});
+    if (tokenIsExpired(expiresAt)) {
+      throw activeSessionError3("Cursor browser OAuth access token expired; authorize again");
+    }
+    const email = account.email ?? await resolveCursorBrowserEmail({}, credential.access, {
+      fetchImpl: this.fetchImpl,
+      apiBaseUrl: this.apiBaseUrl,
+      home: this.home,
+      signal: context.signal
+    });
+    return {
+      loggedIn: true,
+      accountId: account.accountId,
+      email,
+      displayName: email ?? account.displayName,
+      plan: account.subscription?.plan ?? null,
+      credential,
+      raw: {}
+    };
+  }
+  async #assertActiveSession(account, signal, context = {}) {
+    if (this.#isBrowserAccount(account)) return this.#browserStatus(account, context);
+    const status = await this.#readStatus(signal);
+    if (!status.loggedIn) throw activeSessionError3("Cursor OAuth session is not active; authorize again");
+    if (account?.accountId !== status.accountId && account?.accountId !== "cursor:active") {
+      throw activeSessionError3(
+        "Cursor only exposes its active official session; authorize the selected account again",
+        { mismatch: true }
+      );
+    }
+    return status;
+  }
   async discover() {
     try {
       const status = await this.#readStatus();
       const source = status.source ?? "official_cursor_cli";
       if (!status.loggedIn) return { candidates: [], source, diagnostics: ["Cursor \u5B98\u65B9\u73AF\u5883\u5F53\u524D\u672A\u767B\u5F55"] };
       const desktop = source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
-      const candidate2 = desktop ? candidateFromDesktopSession(desktop) : candidateFromStatus2(status, { source });
+      const candidate2 = desktop ? candidateFromDesktopSession(desktop) : candidateFromStatus2(status, { source, sourceKind: status.sourceKind });
       return { candidates: candidate2 ? [candidate2] : [], source, diagnostics: [] };
     } catch (error) {
       return { candidates: [], source: "official_cursor_cli", diagnostics: [`\u65E0\u6CD5\u8BFB\u53D6 Cursor \u5B98\u65B9\u767B\u5F55\u6001\uFF1A${error.message}`] };
@@ -6036,71 +8187,76 @@ var CursorSubscriptionDriver = class {
       displayName: candidate2.displayName,
       email: candidate2.email,
       auth: {
-        kind: candidate2.source === "cursor_desktop_app" ? "oauth" : "official_cli_session",
+        kind: OFFICIAL_SESSION_AUTH_KIND,
         scopes: []
       },
       subscription: { ...candidate2.subscription },
       refresh: { ...candidate2.refresh },
       resources: {
+        ...officialSessionResources({
+          sourceKind: candidate2.resources?.sessionSource ?? (candidate2.source === "cursor_desktop_app" ? OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP : OFFICIAL_SESSION_SOURCE_KINDS.CLI),
+          authSource: candidate2.source
+        }),
         transport: "cursor_agentservice_connect_proto",
-        accountScope: candidate2.source === "cursor_desktop_app" ? "desktop_oauth_session" : "active_cli_session",
         quotaSource: candidate2.resources?.quotaSource ?? "official_cursor_cli_status",
         ...candidate2.resources ?? {}
       }
     };
   }
-  async startAuthorization(context = {}) {
-    if (!commandAvailable(this.cliPath)) {
-      const desktop = this.#readDesktopSession();
-      if (desktop) {
-        const account = await this.importAccount(candidateFromDesktopSession(desktop), context);
-        return {
-          sessionId: `cursor:desktop:${randomUUID7()}`,
-          providerId: PROVIDER_ID9,
-          status: "completed",
-          instructions: "\u5DF2\u68C0\u6D4B\u5230 Cursor \u684C\u9762\u7AEF\u5B98\u65B9 OAuth \u767B\u5F55\u6001\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
-          accounts: [account],
-          diagnostic: null
-        };
-      }
+  async getActiveSession(context = {}) {
+    try {
+      const status = await this.#readStatus(context.signal);
+      if (!status.loggedIn) return null;
+      const desktop = status.source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
+      const candidate2 = desktop ? candidateFromDesktopSession(desktop) : candidateFromStatus2(status, {
+        source: status.source,
+        sourceKind: status.sourceKind
+      });
+      const account = await this.importAccount(candidate2, context);
       return {
-        sessionId: `cursor:missing:${randomUUID7()}`,
+        status: "completed",
         providerId: PROVIDER_ID9,
-        status: "failed",
-        instructions: "\u672A\u627E\u5230\u5B98\u65B9 Cursor Agent CLI\uFF1B\u8BF7\u5148\u5728 Cursor \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u6216\u5B89\u88C5 cursor-agent \u540E\u91CD\u8BD5\u3002",
-        diagnostic: "\u672C\u673A\u6CA1\u6709 cursor-agent \u53EF\u6267\u884C\u6587\u4EF6\uFF0C\u4E5F\u6CA1\u6709\u68C0\u6D4B\u5230 Cursor \u684C\u9762\u7AEF OAuth \u4F1A\u8BDD\uFF1B\u56E0\u6B64\u6CA1\u6709\u542F\u52A8\u7F51\u9875\u6388\u6743\u3002"
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        accounts: [account],
+        diagnostic: null
       };
+    } catch {
+      return null;
     }
-    return this.oauthAuthorizer.begin(context);
+  }
+  async startAuthorization(context = {}) {
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliAuthorizer.begin(context);
+    return started;
   }
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.poll(sessionId, context);
   }
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    return authorizer.cancel(sessionId, context);
   }
   async refreshAccount(account, context = {}) {
-    const status = await this.#readStatus(context.signal);
-    if (!status.loggedIn) {
-      const error = new Error("Cursor OAuth session is not active; authorize again");
-      error.authExpired = true;
-      throw error;
-    }
-    if (account.accountId !== status.accountId && account.accountId !== "cursor:active") {
-      const error = new Error("Cursor CLI only exposes its active local session; authorize the selected account again");
-      error.authForbidden = true;
-      throw error;
-    }
+    const status = await this.#assertActiveSession(account, context.signal, context);
     return {
       identity: { email: status.email, displayName: status.displayName },
       subscription: { plan: status.plan, status: "active", expiresAt: null },
-      refresh: { lastRefreshedAt: (context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()).toISOString(), refreshable: false }
+      refresh: {
+        accessTokenExpiresAt: this.#isBrowserAccount(account) ? cursorTokenExpiresAt(status.credential, decodeJwtPayload(status.credential?.access ?? "") ?? {}) : account.refresh?.accessTokenExpiresAt ?? null,
+        lastRefreshedAt: (context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()).toISOString(),
+        refreshable: this.#isBrowserAccount(account) ? Boolean(status.credential?.refresh) : false
+      }
     };
   }
   async getQuota(account, context = {}) {
-    const status = await this.#readStatus(context.signal);
+    const status = await this.#assertActiveSession(account, context.signal, context);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
-    const windows = recursiveQuotaWindows(status.raw, { source: "cursor_cli_status", now, prefix: "cursor" });
+    const quotaSource = this.#isBrowserAccount(account) ? "official_cursor_browser_oauth" : "cursor_cli_status";
+    const windows = recursiveQuotaWindows(status.raw, { source: quotaSource, now, prefix: "cursor" });
     const primary = selectPrimaryQuotaWindow(windows);
     return {
       quota: {
@@ -6110,18 +8266,24 @@ var CursorSubscriptionDriver = class {
         resetAt: primary.resetAt ?? null,
         windows,
         updatedAt: now.toISOString(),
-        source: "cursor_cli_status"
+        source: quotaSource
       },
       subscription: { plan: status.plan, status: status.loggedIn ? "active" : null, expiresAt: null },
       resources: {
-        quotaDiagnostic: windows.length ? null : "Cursor \u5B98\u65B9 CLI status \u672A\u8FD4\u56DE\u5B9E\u65F6\u8BA2\u9605\u989D\u5EA6\uFF1B\u8BE6\u7EC6 usage \u4ECD\u4EE5 Cursor \u5B98\u65B9 Dashboard \u4E3A\u51C6"
+        quotaDiagnostic: windows.length ? null : this.#isBrowserAccount(account) ? "Cursor \u5B98\u65B9\u6D4F\u89C8\u5668\u4F1A\u8BDD\u672A\u8FD4\u56DE\u5B9E\u65F6\u8BA2\u9605\u989D\u5EA6\uFF1B\u8BE6\u7EC6 usage \u4ECD\u4EE5 Cursor \u5B98\u65B9 Dashboard \u4E3A\u51C6" : "Cursor \u5B98\u65B9 CLI status \u672A\u8FD4\u56DE\u5B9E\u65F6\u8BA2\u9605\u989D\u5EA6\uFF1B\u8BE6\u7EC6 usage \u4ECD\u4EE5 Cursor \u5B98\u65B9 Dashboard \u4E3A\u51C6"
       }
     };
   }
   async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
+    return this.catalogLoader({
+      force: Boolean(context.force),
+      accounts: context.accounts,
+      secretStore: context.secretStore,
+      signal: context.signal
+    });
   }
   async invoke(request, invocation, context = {}) {
+    await this.#assertActiveSession(invocation?.account, context.signal, context);
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") throw new Error("Cursor native invocation transport is not mounted");
     return executor({ request, invocation, context });
@@ -6173,6 +8335,19 @@ function refreshTimeoutError(providerId, accountId, timeoutMs) {
   error.refreshTimeout = true;
   error.timeoutMs = timeoutMs;
   return error;
+}
+function reportPostRefreshHealth(pool, accountId) {
+  const account = pool.get(accountId);
+  if (!account || account.health?.status === ACCOUNT_HEALTH.EXPIRED) return;
+  const remaining = account.quota?.remaining;
+  if (typeof remaining === "number" && remaining <= 0) {
+    pool.report(accountId, {
+      status: "quota_exhausted",
+      message: "\u5237\u65B0\u540E\u5B98\u65B9\u989D\u5EA6\u4ECD\u4E3A 0\uFF0C\u8BF7\u5207\u6362\u8D26\u53F7\u6216\u7A0D\u540E\u91CD\u8BD5"
+    });
+    return;
+  }
+  pool.report(accountId, { status: "success" });
 }
 function withRefreshTimeout(task, { providerId, accountId, timeoutMs }) {
   const controller = new AbortController();
@@ -6266,7 +8441,7 @@ function providerAccount2(pool, accountId) {
   };
 }
 function providerErrorStatus(error) {
-  if (error?.authExpired) return "auth_expired";
+  if (error?.authExpired || error?.accountMismatch) return "auth_expired";
   if (error?.authForbidden) return "error";
   if (error?.quotaExhausted) return "quota_exhausted";
   if (error?.rateLimited) return "rate_limited";
@@ -6276,6 +8451,8 @@ var DockyardRuntime = class {
   #entries = /* @__PURE__ */ new Map();
   #candidates = /* @__PURE__ */ new Map();
   #refreshPromises = /* @__PURE__ */ new Map();
+  #accountRefreshPromises = /* @__PURE__ */ new Map();
+  #saveQueue = Promise.resolve();
   #initialized = false;
   #initPromise = null;
   constructor({
@@ -6382,7 +8559,7 @@ var DockyardRuntime = class {
         if (fingerprintChanged && typeof entry.module.importAccount === "function") {
           try {
             const captured = await entry.module.importAccount(candidate2, providerContext(this));
-            entry.pool.upsert(captured);
+            entry.pool.upsert(captured, { resetHealth: true });
             changedProviderIds.add(currentProviderId);
           } catch {
           }
@@ -6416,7 +8593,7 @@ var DockyardRuntime = class {
     const candidate2 = this.#candidates.get(providerId)?.get(candidateId);
     if (!candidate2) throw new Error("Candidate is missing; scan local OAuth states again");
     const rawAccount = await entry.module.importAccount(candidate2, providerContext(this));
-    entry.pool.upsert(rawAccount);
+    entry.pool.upsert(rawAccount, { resetHealth: true });
     await this.#saveState([providerId]);
     return {
       account: entry.pool.get(rawAccount.accountId),
@@ -6433,7 +8610,7 @@ var DockyardRuntime = class {
     const imported = await entry.module.importSource(source, providerContext(this));
     const rawAccounts = Array.isArray(imported) ? imported : Array.isArray(imported?.accounts) ? imported.accounts : [imported];
     const accounts = rawAccounts.filter((account) => account?.accountId).map((account) => {
-      entry.pool.upsert(account);
+      entry.pool.upsert(account, { resetHealth: true });
       return entry.pool.get(account.accountId);
     });
     if (accounts.length === 0) throw new Error("OAuth source did not contain an importable account");
@@ -6443,9 +8620,10 @@ var DockyardRuntime = class {
   async startAuthorization(providerId) {
     await this.init();
     const entry = this.#entry(providerId);
-    const result = await entry.module.startAuthorization(providerContext(this, {
+    const context = providerContext(this, {
       accounts: entry.pool.list()
-    }));
+    });
+    const result = await entry.module.startAuthorization(context);
     return this.#persistAuthorizationResult(entry, providerId, result);
   }
   async pollAuthorization(providerId, sessionId) {
@@ -6468,20 +8646,31 @@ var DockyardRuntime = class {
     }));
   }
   async refreshAccount(providerId, accountId, { force = false, tolerateFailure = false } = {}) {
-    try {
-      return await withRefreshTimeout(
-        (signal) => this.#refreshAccountNow(providerId, accountId, { force, tolerateFailure, signal }),
-        { providerId, accountId, timeoutMs: this.refreshTimeoutMs }
-      );
-    } catch (error) {
-      if (!error?.refreshTimeout || !tolerateFailure) throw error;
-      await this.init();
-      const entry = this.#entry(providerId);
-      if (entry.pool.get(accountId)) {
-        entry.pool.report(accountId, { status: "error", message: error.message });
-        await this.#saveState([providerId]);
+    const key = `${providerId}\0${accountId}`;
+    const existing = this.#accountRefreshPromises.get(key);
+    if (existing) return existing;
+    const promise = (async () => {
+      try {
+        return await withRefreshTimeout(
+          (signal) => this.#refreshAccountNow(providerId, accountId, { force, tolerateFailure, signal }),
+          { providerId, accountId, timeoutMs: this.refreshTimeoutMs }
+        );
+      } catch (error) {
+        if (!error?.refreshTimeout || !tolerateFailure) throw error;
+        await this.init();
+        const entry = this.#entry(providerId);
+        if (entry.pool.get(accountId)) {
+          entry.pool.report(accountId, { status: "error", message: error.message });
+          await this.#saveState([providerId]);
+        }
+        return { account: entry.pool.get(accountId), diagnostics: [error.message] };
       }
-      return { account: entry.pool.get(accountId), diagnostics: [error.message] };
+    })();
+    this.#accountRefreshPromises.set(key, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.#accountRefreshPromises.get(key) === promise) this.#accountRefreshPromises.delete(key);
     }
   }
   async #refreshAccountNow(providerId, accountId, { force = false, tolerateFailure = false, signal } = {}) {
@@ -6514,10 +8703,7 @@ var DockyardRuntime = class {
     }
     try {
       if (refresh && Object.hasOwn(refresh, "quota")) {
-        const health2 = entry.pool.get(accountId)?.health;
-        if (health2?.status !== "expired") {
-          entry.pool.report(accountId, { status: "success" });
-        }
+        reportPostRefreshHealth(entry.pool, accountId);
         await this.#saveState([providerId]);
         return { account: entry.pool.get(accountId), diagnostics };
       }
@@ -6526,10 +8712,7 @@ var DockyardRuntime = class {
         providerContext(this, { signal })
       );
       this.#applyPatch(entry.pool, accountId, quota);
-      const health = entry.pool.get(accountId)?.health;
-      if (health?.status !== "expired") {
-        entry.pool.report(accountId, { status: "success" });
-      }
+      reportPostRefreshHealth(entry.pool, accountId);
     } catch (error) {
       if (signal?.aborted) throw error;
       diagnostics.push(`\u5237\u65B0\u5B9E\u65F6\u989D\u5EA6\u5931\u8D25\uFF1A${redactError(error)}`);
@@ -6611,12 +8794,19 @@ var DockyardRuntime = class {
   }
   async getCatalog(providerId) {
     await this.init();
-    return this.#entry(providerId).module.getCatalog(providerContext(this));
+    const entry = this.#entry(providerId);
+    const accounts = entry.pool.list().map((account) => providerAccount2(entry.pool, account.accountId));
+    return entry.module.getCatalog(providerContext(this, { accounts }));
   }
   async invoke(providerId, request, context = {}) {
     await this.init();
     const route = this.bridge.getRoute(providerId);
-    return route.invoke(request, providerContext(this, context));
+    try {
+      return await route.invoke(request, providerContext(this, context));
+    } finally {
+      await this.#saveState([providerId]).catch(() => {
+      });
+    }
   }
   async stream(providerId, request, context = {}) {
     await this.init();
@@ -6673,33 +8863,46 @@ var DockyardRuntime = class {
         account?.auth?.credentialRef || account?.auth?.kind && account?.credentialRef && !account?.candidateId
       );
       const imported = alreadyImported || typeof entry.module.importAccount !== "function" ? account : await entry.module.importAccount(account, providerContext(this));
-      entry.pool.upsert(imported);
+      entry.pool.upsert(imported, { resetHealth: true });
       accounts.push(entry.pool.get(imported.accountId));
     }
     return accounts;
   }
   async #saveState(changedProviderIds = null) {
-    const changed = changedProviderIds === null ? new Set(this.#entries.keys()) : new Set(changedProviderIds);
-    const latest = await this.stateStore.load().catch(() => ({ pools: {} }));
-    const pools = {
-      ...latest?.pools && typeof latest.pools === "object" ? latest.pools : {}
-    };
-    for (const [providerId, entry] of this.#entries) {
-      if (!changed.has(providerId) && Object.hasOwn(pools, providerId)) continue;
-      pools[providerId] = {
-        policy: entry.pool.policy,
-        defaultAccountId: entry.pool.getDefaultAccountId(),
-        accounts: entry.pool.listForStorage()
+    const write = async () => {
+      const changed = changedProviderIds === null ? new Set(this.#entries.keys()) : new Set(changedProviderIds);
+      const merge = (latest2) => {
+        const pools = {
+          ...latest2?.pools && typeof latest2.pools === "object" ? latest2.pools : {}
+        };
+        for (const [providerId, entry] of this.#entries) {
+          if (!changed.has(providerId) && Object.hasOwn(pools, providerId)) continue;
+          pools[providerId] = {
+            policy: entry.pool.policy,
+            defaultAccountId: entry.pool.getDefaultAccountId(),
+            accounts: entry.pool.listForStorage()
+          };
+        }
+        return { ...latest2, pools };
       };
-    }
-    await this.stateStore.save({ ...latest, pools });
+      if (typeof this.stateStore.update === "function") {
+        await this.stateStore.update(merge);
+        return;
+      }
+      const latest = await this.stateStore.load();
+      await this.stateStore.save(merge(latest));
+    };
+    const queued = this.#saveQueue.then(write, write);
+    this.#saveQueue = queued.catch(() => {
+    });
+    await queued;
   }
 };
 
 // packages/dsh-plugin/src/codex-transport.mjs
-import { access, readFile as readFile6 } from "node:fs/promises";
+import { access, readFile as readFile7 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname3, join as join10, resolve } from "node:path";
+import { dirname as dirname4, join as join10, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var DSH_LLM_PI_AI = "@deepseek-ai/dsh-llm-pi-ai";
 var PI_AI = "@earendil-works/pi-ai";
@@ -6739,13 +8942,13 @@ async function findPackageRoot(startDirectory, packageName) {
   while (true) {
     const candidate2 = join10(current, "node_modules", ...packageParts);
     if (await isFile(join10(candidate2, "package.json"))) return candidate2;
-    const parent = dirname3(current);
+    const parent = dirname4(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile6(join10(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile7(join10(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -6773,7 +8976,7 @@ async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
   const dshRequire = createRequire(anchor);
   const dshLlmPath = dshRequire.resolve(DSH_LLM_PI_AI);
-  const dshPackageRoot = dirname3(dirname3(dshLlmPath));
+  const dshPackageRoot = dirname4(dirname4(dshLlmPath));
   const piRoot = await findPackageRoot(dshPackageRoot, PI_AI);
   if (!piRoot) throw new Error(`Cannot find ${PI_AI} beside ${DSH_LLM_PI_AI}`);
   const [{ PiAiAdapter }, { createProvider }, { openAICodexResponsesApi }, { openaiCodexProvider }, builtinProviders2] = await Promise.all([
@@ -7081,7 +9284,7 @@ var DockyardDshService = class {
     if (!accountId) throw new Error("\u79FB\u9664\u8D26\u53F7\u9700\u8981 accountId");
     return this.runtime.removeAccount(providerId, accountId);
   }
-  async startAuthorization(providerInput) {
+  async startAuthorization(providerInput, { openBrowser = true } = {}) {
     await this.ready;
     const manifest = manifestFor2(this.runtime, providerInput);
     if (!manifest) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
@@ -7089,12 +9292,12 @@ var DockyardDshService = class {
       return {
         status: "unsupported",
         providerId: manifest.id,
-        instructions: `${providerName(manifest)} \u6CA1\u6709\u72EC\u7ACB\u7684\u5B98\u65B9 OAuth \u767B\u5F55\u547D\u4EE4\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u73AF\u5883\u767B\u5F55\u6216\u5207\u6362\u8D26\u53F7\uFF0C\u7136\u540E\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\uFF0C\u518D\u6DFB\u52A0\u5019\u9009\u3002`
+        instructions: `${providerName(manifest)} \u6CA1\u6709\u72EC\u7ACB\u7684\u5B98\u65B9\u6388\u6743\u5165\u53E3\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u767B\u5F55/\u5207\u6362\u8D26\u53F7\uFF0C\u7136\u540E\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\uFF0C\u518D\u6DFB\u52A0\u5019\u9009\u3002`
       };
     }
     const existingStart = this.#authStartPromises.get(manifest.id);
     if (existingStart) return existingStart;
-    const startPromise = this.#startAuthorization(manifest);
+    const startPromise = this.#startAuthorization(manifest, { openBrowser });
     const trackedStart = startPromise.finally(() => {
       if (this.#authStartPromises.get(manifest.id) === trackedStart) {
         this.#authStartPromises.delete(manifest.id);
@@ -7103,7 +9306,7 @@ var DockyardDshService = class {
     this.#authStartPromises.set(manifest.id, trackedStart);
     return trackedStart;
   }
-  async #startAuthorization(manifest) {
+  async #startAuthorization(manifest, { openBrowser = true } = {}) {
     const existing = this.#activeAuthSession(manifest.id);
     if (existing) {
       let current;
@@ -7132,9 +9335,10 @@ var DockyardDshService = class {
       providerId: manifest.id,
       sessionId: started.sessionId,
       status: started.status,
-      authorizationUrl: started.authorizationUrl ?? null
+      authorizationUrl: started.authorizationUrl ?? null,
+      openBrowser
     });
-    const result = await this.#waitForAuthorizationUrl(manifest.id, started);
+    const result = await this.#waitForAuthorizationUrl(manifest.id, started, openBrowser);
     const tracked = this.#authSessions.get(started.sessionId);
     if (tracked) Object.assign(tracked, {
       status: result.status,
@@ -7148,9 +9352,9 @@ var DockyardDshService = class {
     return result;
   }
   async pollAuthorization(providerId, sessionId) {
-    const result = await this.runtime.pollAuthorization(providerId, sessionId);
-    this.#openAuthorizationUrl(result);
     const tracked = this.#authSessions.get(sessionId);
+    const result = await this.runtime.pollAuthorization(providerId, sessionId);
+    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
     if (tracked) Object.assign(tracked, {
       status: result.status,
       authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null
@@ -7176,9 +9380,9 @@ var DockyardDshService = class {
   async submitAuthorizationCode(providerInput, sessionId, code) {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput) ?? String(providerInput);
-    const result = await this.runtime.submitAuthorizationCode(providerId, sessionId, code);
-    this.#openAuthorizationUrl(result);
     const tracked = this.#authSessions.get(sessionId);
+    const result = await this.runtime.submitAuthorizationCode(providerId, sessionId, code);
+    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
     if (tracked) Object.assign(tracked, {
       status: result.status,
       authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null
@@ -7199,7 +9403,7 @@ var DockyardDshService = class {
       "/dockyard status                         \u67E5\u770B\u8D26\u53F7\u3001\u5B9E\u65F6\u989D\u5EA6\u548C\u5237\u65B0\u65F6\u95F4",
       "/dockyard scan [provider]                \u626B\u63CF\u672C\u673A\u5B98\u65B9\u767B\u5F55\u6001",
       "/dockyard add [provider] [candidateId]   \u6DFB\u52A0\u626B\u63CF\u5230\u7684 OAuth \u8D26\u53F7",
-      "/dockyard login <provider>               \u6253\u5F00 provider \u5B98\u65B9 OAuth \u9A8C\u8BC1\u9875\u5E76\u767B\u5F55",
+      "/dockyard login <provider>               \u542F\u52A8 provider \u5B98\u65B9\u6388\u6743\u6D41\u7A0B\u5E76\u767B\u5F55",
       "/dockyard refresh [provider]             \u5F3A\u5236\u8BFB\u53D6\u5B9E\u65F6\u989D\u5EA6",
       "/dockyard models <provider>              \u8BFB\u53D6 provider \u5B9E\u65F6\u6A21\u578B/\u6863\u4F4D",
       "/dockyard policy <provider> <policy>     \u8BBE\u7F6E manual/sticky_session/round_robin/failover",
@@ -7209,10 +9413,10 @@ var DockyardDshService = class {
       `\u5F53\u524D providers\uFF1A${providers.length ? providers.join("\u3001") : "\u6682\u65E0"}`
     ].join("\n");
   }
-  #openAuthorizationUrl(result) {
-    if (!result?.authorizationUrl || this.#authOpened.has(result.sessionId)) return;
+  #openAuthorizationUrl(result, openBrowser = true) {
+    if (!openBrowser || !result?.authorizationUrl || this.#authOpened.has(result.sessionId)) return;
     this.#authOpened.add(result.sessionId);
-    if (result.browserOpened || result.providerId === "antigravity") return;
+    if (result.browserOpened) return;
     void Promise.resolve(this.openBrowser(result.authorizationUrl)).catch((error) => {
       this.#warn("could not open authorization URL", error);
     });
@@ -7220,15 +9424,15 @@ var DockyardDshService = class {
   #activeAuthSession(providerId) {
     return [...this.#authSessions.values()].find((session) => session.providerId === providerId && ["pending", "processing"].includes(session.status ?? "pending")) ?? null;
   }
-  async #waitForAuthorizationUrl(providerId, started) {
-    this.#openAuthorizationUrl(started);
+  async #waitForAuthorizationUrl(providerId, started, openBrowser = true) {
+    this.#openAuthorizationUrl(started, openBrowser);
     if (started.authorizationUrl || !["pending", "processing"].includes(started.status)) return started;
     const deadline = Date.now() + AUTH_URL_WAIT_MS;
     let result = started;
     while (Date.now() < deadline && ["pending", "processing"].includes(result.status)) {
       await sleep(100);
       result = await this.runtime.pollAuthorization(providerId, started.sessionId);
-      this.#openAuthorizationUrl(result);
+      this.#openAuthorizationUrl(result, openBrowser);
     }
     return result;
   }
@@ -7367,9 +9571,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash8 } from "node:crypto";
+import { createHash as createHash9 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash8("sha256").update(String(ref)).digest("hex");
+  const digest = createHash9("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {
@@ -7558,6 +9762,11 @@ function usageModuleFor(providerId) {
 var POLICIES = /* @__PURE__ */ new Set(["manual", "round_robin", "failover"]);
 var PATCH_MARK = Symbol("dockyard-native-key-pool");
 var VISIBLE_STREAM_CHUNKS = /* @__PURE__ */ new Set(["text-delta", "reasoning-delta", "tool-call-delta"]);
+function retryableStreamError(error) {
+  return Boolean(
+    error?.rateLimited || error?.quotaExhausted || error?.authExpired || error?.authForbidden || [401, 403, 429].includes(Number(error?.status)) || [401, 403, 429].includes(Number(error?.upstreamStatus))
+  );
+}
 function text(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -7610,6 +9819,8 @@ var NativeKeyPoolHost = class {
   stateStore;
   records = /* @__PURE__ */ new Map();
   cursors = /* @__PURE__ */ new Map();
+  #failoverExcluded = /* @__PURE__ */ new Map();
+  #lastResolvedKey = /* @__PURE__ */ new Map();
   patches = [];
   offAdapters = null;
   offStreams = null;
@@ -7740,6 +9951,8 @@ var NativeKeyPoolHost = class {
     const record = this.record(providerId);
     record.policy = policy;
     this.cursors.delete(providerId);
+    this.#failoverExcluded.delete(providerId);
+    this.#lastResolvedKey.delete(providerId);
     await this.saveState();
     return this.status(providerId);
   }
@@ -7772,20 +9985,26 @@ var NativeKeyPoolHost = class {
       usage: null
     };
   }
-  async pickKey(providerId, record, activeRef) {
+  async pickKey(providerId, record, activeRef, { excluded = [] } = {}) {
     const candidates = [];
     for (const entry of record.keys) {
       const credential = await this.credentialInfo(entry.ref);
       if (credential.configured) candidates.push(entry);
     }
     if (candidates.length === 0) return null;
+    const excludedSet = new Set(excluded);
+    const available = candidates.filter((entry) => !excludedSet.has(entry.ref));
+    const pool = available.length > 0 ? available : candidates;
     const policy = record.policy;
     if (policy === "manual") {
-      return candidates.find((entry) => entry.ref === activeRef) ?? candidates[0];
+      return pool.find((entry) => entry.ref === activeRef) ?? pool[0];
+    }
+    if (policy === "failover") {
+      return pool.find((entry) => entry.ref === activeRef) ?? pool[0];
     }
     const cursor = this.cursors.get(providerId) ?? 0;
-    const chosen = candidates[cursor % candidates.length];
-    this.cursors.set(providerId, (cursor + 1) % candidates.length);
+    const chosen = pool[cursor % pool.length];
+    this.cursors.set(providerId, (cursor + 1) % pool.length);
     return chosen;
   }
   async resolveApiKey(providerId, profile, original) {
@@ -7793,8 +10012,10 @@ var NativeKeyPoolHost = class {
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(providerId, profile);
     }
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef);
+    const excluded = [...this.#failoverExcluded.get(providerId) ?? []];
+    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(providerId, profile);
+    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
     const resolved = await this.credentials.resolve(chosen.ref);
     const value = text(resolved?.value);
     if (value) return value;
@@ -7806,8 +10027,10 @@ var NativeKeyPoolHost = class {
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(connection);
     }
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef);
+    const excluded = [...this.#failoverExcluded.get(providerId) ?? []];
+    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(connection);
+    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
     const resolved = await this.credentials.resolve(chosen.ref);
     const value = text(resolved?.value);
     if (value) return value;
@@ -7826,25 +10049,42 @@ var NativeKeyPoolHost = class {
     const configured = await this.configuredKeys(this.records.get(options.provider));
     const attempts = Math.max(1, configured.filter((entry) => entry.configured).length);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (attempt > 0) {
+        const used = this.#lastResolvedKey.get(options.provider);
+        if (used) {
+          const excluded = this.#failoverExcluded.get(options.provider) ?? /* @__PURE__ */ new Set();
+          excluded.add(used);
+          this.#failoverExcluded.set(options.provider, excluded);
+        }
+      }
       const buffered = [];
       let emitted = false;
       let retryable = false;
-      for await (const chunk of next()) {
-        if (VISIBLE_STREAM_CHUNKS.has(chunk?.type)) emitted = true;
-        if (!emitted) buffered.push(chunk);
-        else if (buffered.length > 0) {
-          yield* buffered.splice(0);
-          yield chunk;
-        } else yield chunk;
-        if (chunk?.type === "finish" && chunk.reason?.kind === "error") {
-          retryable = !emitted;
-          if (retryable && attempt + 1 < attempts) break;
+      try {
+        for await (const chunk of next()) {
+          if (VISIBLE_STREAM_CHUNKS.has(chunk?.type)) emitted = true;
+          if (!emitted) buffered.push(chunk);
+          else if (buffered.length > 0) {
+            yield* buffered.splice(0);
+            yield chunk;
+          } else yield chunk;
+          if (chunk?.type === "finish" && chunk.reason?.kind === "error") {
+            retryable = !emitted;
+            if (retryable && attempt + 1 < attempts) break;
+          }
         }
+      } catch (error) {
+        retryable = !emitted && retryableStreamError(error);
+        if (!retryable || attempt + 1 >= attempts) throw error;
       }
       if (retryable && !emitted && attempt + 1 < attempts) continue;
       if (buffered.length > 0) yield* buffered;
+      this.#failoverExcluded.delete(options.provider);
+      this.#lastResolvedKey.delete(options.provider);
       return;
     }
+    this.#failoverExcluded.delete(options.provider);
+    this.#lastResolvedKey.delete(options.provider);
   }
   async refreshUsage(providerId, signal) {
     const synced = await this.syncProvider(providerId);
@@ -7930,10 +10170,12 @@ function apply(ctx, config = {}) {
   if (catalogWarmers.length > 0 && typeof runtime.init === "function") {
     void (async () => {
       await runtime.init();
+      const providers = runtime.snapshot?.().providers ?? [];
       const connected = new Set(
-        (runtime.snapshot?.().providers ?? []).filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
+        providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || connected.has(providerId)).map(([, loader]) => loader().catch(() => null)));
+      const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
+      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -7994,11 +10236,26 @@ function apply(ctx, config = {}) {
         });
       }
       return async () => {
-        await remoteFiberPromise?.catch?.(() => null);
-        await nativeKeyPoolReady.catch?.(() => null);
-        nativeKeyPool?.dispose?.();
-        unregister?.();
-        await service.dispose();
+        try {
+          await remoteFiberPromise?.catch?.(() => null);
+        } catch {
+        }
+        try {
+          await nativeKeyPoolReady.catch?.(() => null);
+        } catch {
+        }
+        try {
+          nativeKeyPool?.dispose?.();
+        } catch {
+        }
+        try {
+          unregister?.();
+        } catch {
+        }
+        try {
+          await service.dispose();
+        } catch {
+        }
       };
     };
     if (typeof ctx.effect === "function") {

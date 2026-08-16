@@ -6,6 +6,17 @@ const POLICIES = new Set(["manual", "round_robin", "failover"]);
 const PATCH_MARK = Symbol("dockyard-native-key-pool");
 const VISIBLE_STREAM_CHUNKS = new Set(["text-delta", "reasoning-delta", "tool-call-delta"]);
 
+function retryableStreamError(error) {
+  return Boolean(
+    error?.rateLimited
+      || error?.quotaExhausted
+      || error?.authExpired
+      || error?.authForbidden
+      || [401, 403, 429].includes(Number(error?.status))
+      || [401, 403, 429].includes(Number(error?.upstreamStatus)),
+  );
+}
+
 function text(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -64,6 +75,8 @@ export class NativeKeyPoolHost {
   stateStore;
   records = new Map();
   cursors = new Map();
+  #failoverExcluded = new Map();
+  #lastResolvedKey = new Map();
   patches = [];
   offAdapters = null;
   offStreams = null;
@@ -218,6 +231,8 @@ export class NativeKeyPoolHost {
     const record = this.record(providerId);
     record.policy = policy;
     this.cursors.delete(providerId);
+    this.#failoverExcluded.delete(providerId);
+    this.#lastResolvedKey.delete(providerId);
     await this.saveState();
     return this.status(providerId);
   }
@@ -254,20 +269,29 @@ export class NativeKeyPoolHost {
     };
   }
 
-  async pickKey(providerId, record, activeRef) {
+  async pickKey(providerId, record, activeRef, { excluded = [] } = {}) {
     const candidates = [];
     for (const entry of record.keys) {
       const credential = await this.credentialInfo(entry.ref);
       if (credential.configured) candidates.push(entry);
     }
     if (candidates.length === 0) return null;
+    const excludedSet = new Set(excluded);
+    const available = candidates.filter((entry) => !excludedSet.has(entry.ref));
+    const pool = available.length > 0 ? available : candidates;
     const policy = record.policy;
     if (policy === "manual") {
-      return candidates.find((entry) => entry.ref === activeRef) ?? candidates[0];
+      return pool.find((entry) => entry.ref === activeRef) ?? pool[0];
+    }
+    if (policy === "failover") {
+      // Failover keeps one primary key for every healthy request and only
+      // advances to the next configured key when a retry excludes the failed
+      // one. This preserves prompt-cache locality instead of rotating keys.
+      return pool.find((entry) => entry.ref === activeRef) ?? pool[0];
     }
     const cursor = this.cursors.get(providerId) ?? 0;
-    const chosen = candidates[cursor % candidates.length];
-    this.cursors.set(providerId, (cursor + 1) % candidates.length);
+    const chosen = pool[cursor % pool.length];
+    this.cursors.set(providerId, (cursor + 1) % pool.length);
     return chosen;
   }
 
@@ -276,8 +300,10 @@ export class NativeKeyPoolHost {
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(providerId, profile);
     }
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef);
+    const excluded = [...(this.#failoverExcluded.get(providerId) ?? [])];
+    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(providerId, profile);
+    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
     const resolved = await this.credentials.resolve(chosen.ref);
     const value = text(resolved?.value);
     if (value) return value;
@@ -290,8 +316,10 @@ export class NativeKeyPoolHost {
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(connection);
     }
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef);
+    const excluded = [...(this.#failoverExcluded.get(providerId) ?? [])];
+    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(connection);
+    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
     const resolved = await this.credentials.resolve(chosen.ref);
     const value = text(resolved?.value);
     if (value) return value;
@@ -312,25 +340,46 @@ export class NativeKeyPoolHost {
     const configured = await this.configuredKeys(this.records.get(options.provider));
     const attempts = Math.max(1, configured.filter((entry) => entry.configured).length);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      // Failover semantics: the first attempt uses the primary key; each
+      // retry excludes the key that just failed so the next attempt advances
+      // to the next configured key. The exclusion set is cleared when the
+      // stream settles so healthy requests return to the primary key.
+      if (attempt > 0) {
+        const used = this.#lastResolvedKey.get(options.provider);
+        if (used) {
+          const excluded = this.#failoverExcluded.get(options.provider) ?? new Set();
+          excluded.add(used);
+          this.#failoverExcluded.set(options.provider, excluded);
+        }
+      }
       const buffered = [];
       let emitted = false;
       let retryable = false;
-      for await (const chunk of next()) {
-        if (VISIBLE_STREAM_CHUNKS.has(chunk?.type)) emitted = true;
-        if (!emitted) buffered.push(chunk);
-        else if (buffered.length > 0) {
-          yield* buffered.splice(0);
-          yield chunk;
-        } else yield chunk;
-        if (chunk?.type === "finish" && chunk.reason?.kind === "error") {
-          retryable = !emitted;
-          if (retryable && attempt + 1 < attempts) break;
+      try {
+        for await (const chunk of next()) {
+          if (VISIBLE_STREAM_CHUNKS.has(chunk?.type)) emitted = true;
+          if (!emitted) buffered.push(chunk);
+          else if (buffered.length > 0) {
+            yield* buffered.splice(0);
+            yield chunk;
+          } else yield chunk;
+          if (chunk?.type === "finish" && chunk.reason?.kind === "error") {
+            retryable = !emitted;
+            if (retryable && attempt + 1 < attempts) break;
+          }
         }
+      } catch (error) {
+        retryable = !emitted && retryableStreamError(error);
+        if (!retryable || attempt + 1 >= attempts) throw error;
       }
       if (retryable && !emitted && attempt + 1 < attempts) continue;
       if (buffered.length > 0) yield* buffered;
+      this.#failoverExcluded.delete(options.provider);
+      this.#lastResolvedKey.delete(options.provider);
       return;
     }
+    this.#failoverExcluded.delete(options.provider);
+    this.#lastResolvedKey.delete(options.provider);
   }
 
   async refreshUsage(providerId, signal) {

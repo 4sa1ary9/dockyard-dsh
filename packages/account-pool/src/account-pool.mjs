@@ -29,7 +29,7 @@ export class AccountPool {
     this.clock = clock;
   }
 
-  upsert(input) {
+  upsert(input, { resetHealth = false } = {}) {
     if (input.providerId && input.providerId !== this.providerId) {
       throw new ValidationError("Account provider does not match this pool", {
         expected: this.providerId,
@@ -48,7 +48,16 @@ export class AccountPool {
         quota: { ...current?.quota, ...input.quota },
         refresh: { ...current?.refresh, ...input.refresh },
         resources: { ...current?.resources, ...input.resources },
-        health: { ...current?.health, ...input.health },
+        health: resetHealth
+          ? {
+            ...input.health,
+            status: input.health?.status === ACCOUNT_HEALTH.EXPIRED
+              ? ACCOUNT_HEALTH.UNKNOWN
+              : input.health?.status ?? ACCOUNT_HEALTH.UNKNOWN,
+            cooldownUntil: null,
+            lastError: null,
+          }
+          : { ...current?.health, ...input.health },
         createdAt: current?.createdAt ?? input.createdAt,
       },
       this.clock(),
@@ -118,7 +127,8 @@ export class AccountPool {
       account = eligible.find((candidate) => candidate.accountId === requestedId);
       if (!account) throw new AccountSelectionError(`Account is not eligible: ${requestedId}`, { accountId: requestedId });
     } else {
-      const assignmentKey = context.sessionId ?? context.requestId ?? null;
+      const sticky = this.policy === ACCOUNT_SELECTION_POLICY.STICKY_SESSION;
+      const assignmentKey = sticky ? context.sessionId ?? context.requestId ?? null : null;
       const excludedIds = new Set(context.excludeAccountIds ?? []);
       const assignedId = assignmentKey ? this.#sessionAssignments.get(assignmentKey) : null;
       account = assignedId && !excludedIds.has(assignedId)

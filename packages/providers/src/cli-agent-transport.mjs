@@ -46,18 +46,31 @@ export function runCliCommand(command, args, {
     const stdout = [];
     const stderr = [];
     let timedOut = false;
+    let forceTimer = null;
+    let terminationRequested = false;
+    const terminate = () => {
+      if (terminationRequested) return;
+      terminationRequested = true;
+      try { child.kill("SIGTERM"); } catch { /* process is already gone */ }
+      forceTimer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* process is already gone */ }
+      }, 1_000);
+      forceTimer.unref?.();
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminate();
     }, timeoutMs);
     child.stdout.on("data", (chunk) => stdout.push(chunk));
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.once("error", (error) => {
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       reject(error);
     });
     child.once("close", (code, closeSignal) => {
       clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
       const output = Buffer.concat(stdout).toString("utf8");
       const errorOutput = Buffer.concat(stderr).toString("utf8");
       if (code === 0) {
@@ -88,14 +101,34 @@ export function runCliStreamingCommand(command, args, {
     const stderr = [];
     let spawnError = null;
     let timedOut = false;
-    const timer = setTimeout(() => {
+    let closedResult = null;
+    let forceTimer = null;
+    let timer = null;
+    let terminationRequested = false;
+    const terminate = () => {
+      if (closedResult || terminationRequested) return;
+      terminationRequested = true;
+      try { child.kill("SIGTERM"); } catch { /* process is already gone */ }
+      forceTimer = setTimeout(() => {
+        if (!closedResult) {
+          try { child.kill("SIGKILL"); } catch { /* process is already gone */ }
+        }
+      }, 1_000);
+      forceTimer.unref?.();
+    };
+    timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminate();
     }, timeoutMs);
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.once("error", (error) => { spawnError = error; });
     const closed = new Promise((resolve) => {
-      child.once("close", (code, closeSignal) => resolve({ code, closeSignal }));
+      child.once("close", (code, closeSignal) => {
+        closedResult = { code, closeSignal };
+        clearTimeout(timer);
+        if (forceTimer) clearTimeout(forceTimer);
+        resolve(closedResult);
+      });
     });
     const reader = createInterface({ input: child.stdout });
     try {
@@ -105,8 +138,9 @@ export function runCliStreamingCommand(command, args, {
       }
     } finally {
       reader.close();
+      terminate();
+      clearTimeout(timer);
     }
-    clearTimeout(timer);
     const result = await closed;
     const output = stdout.join("\n");
     const errorOutput = Buffer.concat(stderr).toString("utf8");

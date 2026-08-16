@@ -1,16 +1,18 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
+import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import {
   contentHasImageInCurrentTurn,
   unsupportedContentError,
 } from "../../../packages/providers/src/cli-agent-transport.mjs";
 import {
+  addSecondsIso,
   finiteNumber,
   isoFromEpoch,
   recursiveQuotaWindows,
@@ -18,6 +20,12 @@ import {
   selectPrimaryQuotaWindow,
   stringValue,
 } from "../../../packages/providers/src/provider-utils.mjs";
+import {
+  OFFICIAL_SESSION_AUTH_KIND,
+  OFFICIAL_SESSION_SOURCE_KINDS,
+  isOfficialSessionAuthKind,
+  officialSessionResources,
+} from "../../../packages/providers/src/session-source.mjs";
 import {
   createAntigravityNativeQuotaReader,
   readAntigravityTokenFile,
@@ -29,6 +37,36 @@ const DEFAULT_CLI = "agy";
 const DEFAULT_CATALOG_TTL_MS = 60_000;
 const DEFAULT_AUTH_TIMEOUT_MS = 10 * 60 * 1000;
 const CREDENTIAL_SLOT = Symbol("dockyard-antigravity-session");
+const ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || "";
+const ANTIGRAVITY_BROWSER_CLIENT_SECRET = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || "";
+const ANTIGRAVITY_BROWSER_AUTHORIZATION_URL = process.env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL
+  || "https://accounts.google.com/o/oauth2/v2/auth";
+const ANTIGRAVITY_BROWSER_TOKEN_URL = process.env.DOCKYARD_ANTIGRAVITY_TOKEN_URL
+  || "https://oauth2.googleapis.com/token";
+const ANTIGRAVITY_BROWSER_USERINFO_URL = process.env.DOCKYARD_ANTIGRAVITY_USERINFO_URL
+  || "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
+const ANTIGRAVITY_BROWSER_REDIRECT_URI = process.env.DOCKYARD_ANTIGRAVITY_REDIRECT_URI
+  || "http://localhost:51121/oauth-callback";
+const ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE
+  || [
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/cclog",
+    "https://www.googleapis.com/auth/experimentsandconfigs",
+  ].join(" ");
+
+// agy models currently returns only id/name rows. Keep this small fallback
+// tied to Google's published model card until the live registry exposes the
+// same family metadata; do not infer capacity from request usage.
+// Source: https://deepmind.google/models/model-cards/gemini-3-7-flash/
+const OFFICIAL_ANTIGRAVITY_MODEL_METADATA = Object.freeze([
+  Object.freeze({
+    id: "gemini-3.7-flash",
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
+  }),
+]);
 
 // agy checks for a real TTY before it starts its first-party OAuth bootstrap.
 // This tiny hidden helper gives agy a PTY and keeps DSH's pipe on the outside;
@@ -130,16 +168,42 @@ export function extractAntigravityAccountEmail(...values) {
 }
 
 function sessionFingerprint(session) {
+  // Prefer a stable identity (email) when the local session exposes one so a
+  // token rotation by the official client does not invalidate the fingerprint.
+  // The raw token hash remains the fallback for sessions without identity.
+  const email = typeof session?.email === "string" && session.email.length > 0
+    ? session.email
+    : null;
   const token = typeof session?.token === "string" && session.token.length > 0
     ? session.token
     : null;
+  if (email) return hash(`antigravity-session:email:${email.toLowerCase()}`).slice(0, 10).toUpperCase();
   return token ? hash(`antigravity-session:${token}`).slice(0, 10).toUpperCase() : null;
+}
+
+function activeSessionError(message, { mismatch = false } = {}) {
+  const error = new Error(message);
+  error.authExpired = true;
+  if (mismatch) error.accountMismatch = true;
+  return error;
 }
 
 function sameEmail(left, right) {
   const a = normalizeEmail(left)?.toLowerCase();
   const b = normalizeEmail(right)?.toLowerCase();
   return Boolean(a && b && a === b);
+}
+
+function tokenExpiresAt(tokens, now = new Date()) {
+  return isoFromEpoch(tokens?.expiresAt ?? tokens?.expires_at)
+    ?? addSecondsIso(tokens?.expires_in ?? tokens?.expiresIn, now);
+}
+
+function tokenNeedsRefresh(credential, now, leewayMs = 60_000) {
+  if (!credential?.refresh) return false;
+  if (!credential.expiresAt) return true;
+  const expiresAt = Date.parse(credential.expiresAt);
+  return !Number.isFinite(expiresAt) || expiresAt <= now.getTime() + leewayMs;
 }
 
 function cliFailure(code, signal, output, errorOutput) {
@@ -218,16 +282,36 @@ function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300
     const stderr = [];
     let spawnError = null;
     let timedOut = false;
-    const timer = setTimeout(() => {
+    let closedResult = null;
+    let forceTimer = null;
+    let timer = null;
+    let terminationRequested = false;
+    const terminate = () => {
+      if (closedResult || terminationRequested) return;
+      terminationRequested = true;
+      try { child.kill("SIGTERM"); } catch { /* process is already gone */ }
+      forceTimer = setTimeout(() => {
+        if (!closedResult) {
+          try { child.kill("SIGKILL"); } catch { /* process is already gone */ }
+        }
+      }, 1_000);
+      forceTimer.unref?.();
+    };
+    timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminate();
     }, timeoutMs);
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.once("error", (error) => {
       spawnError = error;
     });
     const closed = new Promise((resolve) => {
-      child.once("close", (code, closeSignal) => resolve({ code, signal: closeSignal }));
+      child.once("close", (code, closeSignal) => {
+        closedResult = { code, signal: closeSignal };
+        clearTimeout(timer);
+        if (forceTimer) clearTimeout(forceTimer);
+        resolve(closedResult);
+      });
     });
     const reader = createInterface({ input: child.stdout });
     try {
@@ -237,8 +321,9 @@ function runStreamingCommand(command, args, { env = process.env, timeoutMs = 300
       }
     } finally {
       reader.close();
+      terminate();
+      clearTimeout(timer);
     }
-    clearTimeout(timer);
     const result = await closed;
     const output = stdout.join("\n");
     const errorOutput = Buffer.concat(stderr).toString("utf8");
@@ -313,6 +398,67 @@ function registryModels(value) {
   return [];
 }
 
+function mergedAntigravityRegistry(registry) {
+  const byId = new Map(OFFICIAL_ANTIGRAVITY_MODEL_METADATA.map((model) => [model.id, { ...model }]));
+  for (const candidate of registryModels(registry)) {
+    if (!candidate || typeof candidate.id !== "string" || candidate.id.length === 0) continue;
+    const defined = Object.fromEntries(Object.entries(candidate).filter(([, value]) => value !== undefined && value !== null));
+    byId.set(candidate.id, { ...(byId.get(candidate.id) ?? {}), ...defined });
+  }
+  return [...byId.values()];
+}
+
+function catalogScopeKey(accounts) {
+  const accountIds = (Array.isArray(accounts) ? accounts : [])
+    .map((account) => typeof account?.accountId === "string" ? account.accountId : "")
+    .filter(Boolean)
+    .sort();
+  return accountIds.length > 0
+    ? `accounts:${hash(accountIds.join("\n")).slice(0, 32)}`
+    : "unscoped";
+}
+
+function defaultAntigravityCatalogCachePath({ env = process.env, home = homedir() } = {}) {
+  const dockyardHome = env.DOCKYARD_DSH_HOME || join(home, ".dockyard-dsh");
+  return join(dockyardHome, "antigravity-catalog.json");
+}
+
+function persistableCatalog(value) {
+  return {
+    models: Array.isArray(value?.models) ? value.models : [],
+    source: typeof value?.source === "string" ? value.source : "official_antigravity_cli",
+  };
+}
+
+async function readAntigravityCatalogCache(filePath) {
+  if (!filePath) return { schema: 1, entries: {} };
+  try {
+    const parsed = JSON.parse(await readFile(filePath, "utf8"));
+    return {
+      schema: 1,
+      entries: parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {},
+    };
+  } catch {
+    return { schema: 1, entries: {} };
+  }
+}
+
+async function writeAntigravityCatalogCache(filePath, cache) {
+  if (!filePath) return;
+  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+  const entries = Object.entries(cache.entries ?? {}).slice(-8);
+  const tempPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tempPath, JSON.stringify({ schema: 1, entries: Object.fromEntries(entries) }), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await rename(tempPath, filePath);
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
 function registryMatch(model, registry) {
   const candidates = registryModels(registry)
     .filter((candidate) => candidate && typeof candidate.id === "string" && candidate.id.length > 0)
@@ -357,22 +503,53 @@ export function enrichAntigravityModelCatalog(models, registry) {
   });
 }
 
-/** Cache live provider output and collapse concurrent model-directory reads. */
+/** Cache live provider output, persist account-scoped metadata, and collapse concurrent reads. */
 export function createAntigravityCatalogLoader({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
+  home = homedir(),
+  cacheFilePath = env.DOCKYARD_ANTIGRAVITY_CATALOG_CACHE
+    ?? defaultAntigravityCatalogCachePath({ env, home }),
   timeoutMs = 30_000,
   cacheTtlMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
   commandRunner = runCommand,
   registryLoader = null,
 } = {}) {
-  let cached = null;
-  let cachedAt = 0;
-  let pending = null;
-  return async function loadCatalog({ force = false } = {}) {
-    const now = Date.now();
-    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
-    const refresh = () => Promise.resolve(commandRunner(cliPath, ["models"], {
+  const cached = new Map();
+  const pending = new Map();
+  const pendingRefreshes = new Set();
+  let persistentPromise = null;
+  let persistentCache = null;
+  let persistWrite = Promise.resolve();
+
+  const loadPersistent = () => {
+    persistentPromise ??= readAntigravityCatalogCache(cacheFilePath).then((value) => {
+      persistentCache = value;
+      return value;
+    });
+    return persistentPromise;
+  };
+
+  const persist = (scope, value) => {
+    if (!cacheFilePath || !Array.isArray(value?.models) || value.models.length === 0) return Promise.resolve();
+    persistWrite = persistWrite.then(async () => {
+      const cache = await loadPersistent();
+      cache.entries[scope] = {
+        fetchedAt: new Date().toISOString(),
+        value: persistableCatalog(value),
+      };
+      const scopes = Object.keys(cache.entries);
+      if (scopes.length > 8) {
+        for (const staleScope of scopes.slice(0, scopes.length - 8)) delete cache.entries[staleScope];
+      }
+      await writeAntigravityCatalogCache(cacheFilePath, cache);
+    }).catch(() => {});
+    return persistWrite;
+  };
+
+  const refresh = (scope) => {
+    if (pending.has(scope)) return pending.get(scope);
+    const promise = Promise.resolve(commandRunner(cliPath, ["models"], {
       env,
       timeoutMs,
     })).then(async (result) => {
@@ -386,7 +563,7 @@ export function createAntigravityCatalogLoader({
         }
       }
       const liveModels = parseAntigravityModelCatalog(result.output);
-      const models = enrichAntigravityModelCatalog(liveModels, registry);
+      const models = enrichAntigravityModelCatalog(liveModels, mergedAntigravityRegistry(registry));
       const enriched = models.some((model, index) => {
         const original = liveModels[index];
         return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
@@ -395,10 +572,18 @@ export function createAntigravityCatalogLoader({
         models,
         source: enriched ? "official_antigravity_cli+model_registry" : "official_antigravity_cli",
       };
-      cached = value;
-      cachedAt = Date.now();
+      cached.set(scope, { value, cachedAt: Date.now() });
+      await persist(scope, value);
       return value;
     }).catch((error) => {
+      const previous = cached.get(scope)?.value;
+      if (previous?.models?.length) {
+        return {
+          ...previous,
+          source: `${previous.source ?? "official_antigravity_cli"}_stale`,
+          diagnostics: [redactError(error)],
+        };
+      }
       // A missing or unavailable optional CLI must not reject DSH's global
       // model directory. Keep the provider mounted with an empty live
       // catalog; invocation and account scanning can report the actionable
@@ -410,25 +595,51 @@ export function createAntigravityCatalogLoader({
           : "antigravity_cli_unavailable",
         diagnostics: [redactError(error)],
       };
-      cached = unavailable;
-      cachedAt = Date.now();
+      cached.set(scope, { value: unavailable, cachedAt: Date.now() });
       return unavailable;
     }).finally(() => {
-      pending = null;
+      pending.delete(scope);
     });
-
-    // The native DSH model directory can ask for the same provider more than
-    // once during page boot. Once a live catalog exists, serve it immediately
-    // and refresh in the background after TTL expiry. A forced refresh still
-    // waits for the provider so the popup's explicit refresh remains live.
-    if (!force && cached) {
-      if (!pending) pending = refresh();
-      return cached;
-    }
-    if (pending) return pending;
-    pending = refresh();
-    return pending;
+    pendingRefreshes.add(promise);
+    promise.finally(() => pendingRefreshes.delete(promise)).catch(() => {});
+    pending.set(scope, promise);
+    return promise;
   };
+
+  const loadCatalog = async function loadCatalog({ force = false, accounts = [] } = {}) {
+    const scope = catalogScopeKey(accounts);
+    let entry = cached.get(scope);
+    if (!entry) {
+      const persisted = await loadPersistent();
+      const stored = persistentCache?.entries?.[scope] ?? persisted.entries?.[scope];
+      if (stored?.value && Array.isArray(stored.value.models)) {
+        entry = {
+          value: {
+            ...stored.value,
+            source: `${stored.value.source ?? "official_antigravity_cli"}_persistent_cache`,
+          },
+          cachedAt: 0,
+        };
+        cached.set(scope, entry);
+      }
+    }
+
+    const fresh = entry && entry.cachedAt > 0 && Date.now() - entry.cachedAt < cacheTtlMs;
+    if (!force && fresh) return entry.value;
+    if (!force && entry) {
+      void refresh(scope).catch(() => {});
+      return entry.value;
+    }
+    return refresh(scope);
+  };
+  // Background refreshes are intentionally fire-and-forget for the runtime.
+  // Callers that need determinism (tests, shutdown) can await whenIdle() to
+  // settle every in-flight refresh and its persisted catalog write.
+  loadCatalog.whenIdle = async () => {
+    await Promise.allSettled([...pendingRefreshes]);
+    await persistWrite.catch(() => {});
+  };
+  return loadCatalog;
 }
 
 function familyPrefixForModel(model) {
@@ -852,7 +1063,13 @@ export function parseAntigravityNativeQuota(value, now = new Date()) {
   };
 }
 
-function candidate(now, { email = null, session = null, existingAccounts = [] } = {}) {
+function candidate(now, {
+  email = null,
+  session = null,
+  existingAccounts = [],
+  source = "official_antigravity_cli",
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+} = {}) {
   const normalizedEmail = normalizeEmail(email);
   const fingerprint = sessionFingerprint(session);
   const stableAccountId = normalizedEmail
@@ -883,22 +1100,23 @@ function candidate(now, { email = null, session = null, existingAccounts = [] } 
   const value = {
     candidateId: `antigravity:${hash(accountId).slice(0, 20)}`,
     providerId: PROVIDER_ID,
-    source: "official_antigravity_cli",
+    source,
     accountId,
     displayName: identityLabel,
     email: normalizedEmail,
     subscription: { plan: null, status: null, expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: null,
+      accessTokenExpiresAt: session?.expiresAt ?? null,
       nextRefreshAt: null,
-      lastRefreshedAt: null,
-      refreshable: null,
+      lastRefreshedAt: session?.lastRefreshedAt ?? null,
+      refreshable: session?.refreshToken ? true : null,
     },
     imported: false,
     status: "available",
     diagnostic: null,
     credentialRef,
     resources: {
+      ...officialSessionResources({ sourceKind, authSource: source }),
       identitySource,
       identityLabel,
       ...(fingerprint ? { sessionFingerprint: fingerprint } : {}),
@@ -912,9 +1130,12 @@ function candidate(now, { email = null, session = null, existingAccounts = [] } 
   };
   Object.defineProperty(value, CREDENTIAL_SLOT, {
     value: {
-      type: "official_cli_session",
+      type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID,
       ...(session?.token ? { access: session.token } : {}),
+      ...(session?.refreshToken ? { refresh: session.refreshToken } : {}),
+      ...(session?.expiresAt ? { expiresAt: session.expiresAt } : {}),
+      ...(session?.lastRefreshedAt ? { lastRefreshedAt: session.lastRefreshedAt } : {}),
     },
     enumerable: false,
   });
@@ -1155,6 +1376,9 @@ export function createAntigravityOAuthAuthorizer({
     if (!session) throw new Error("验证会话不存在或已结束，请重新点击登录添加账号");
     const code = String(value ?? "").trim();
     if (!code) throw new Error("请输入 Google 验证码或回调地址");
+    if (code.length > 4096 || /[\u0000-\u001f\u007f]/.test(code)) {
+      throw new Error("Google 验证码或回调地址格式无效");
+    }
     if (!session.child || session.exitCode !== null || !session.child.stdin?.writable) {
       throw new Error("agy 验证进程已结束，请重新点击登录添加账号");
     }
@@ -1178,7 +1402,7 @@ export function createAntigravityOAuthAuthorizer({
   return Object.freeze({ begin, poll, cancel, submitAuthorizationCode });
 }
 
-export class AntigravityOfficialCliDriver {
+export class AntigravityOfficialSessionDriver {
   constructor({
     cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
     env = process.env,
@@ -1189,22 +1413,109 @@ export class AntigravityOfficialCliDriver {
     quotaReader = null,
     tokenResolver = resolveAntigravityAccessToken,
     identityFromOfficialCli = true,
+    identityFromOfficialSession = identityFromOfficialCli,
     oauthAuthorizer = null,
+    browserAuthorizer = null,
+    browserOAuth = env.DOCKYARD_ANTIGRAVITY_BROWSER_OAUTH !== "0",
+    authorizationUrl = env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL || ANTIGRAVITY_BROWSER_AUTHORIZATION_URL,
+    tokenUrl = env.DOCKYARD_ANTIGRAVITY_TOKEN_URL || ANTIGRAVITY_BROWSER_TOKEN_URL,
+    userInfoUrl = env.DOCKYARD_ANTIGRAVITY_USERINFO_URL || ANTIGRAVITY_BROWSER_USERINFO_URL,
+    clientId = env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || ANTIGRAVITY_BROWSER_CLIENT_ID,
+    clientSecret = env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || ANTIGRAVITY_BROWSER_CLIENT_SECRET,
+    oauthScope = env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE || ANTIGRAVITY_BROWSER_SCOPES,
+    redirectUri = env.DOCKYARD_ANTIGRAVITY_REDIRECT_URI || ANTIGRAVITY_BROWSER_REDIRECT_URI,
+    fetchImpl = fetch,
     authorizationTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
   } = {}) {
     this.cliPath = cliPath;
     this.env = env;
     this.timeoutMs = timeoutMs;
     this.commandRunner = commandRunner;
+    this.fetchImpl = fetchImpl;
+    this.browserTokenUrl = tokenUrl;
+    this.browserClientId = clientId;
+    this.browserClientSecret = clientSecret;
     this.requestExecutor = requestExecutor;
     this.quotaReader = quotaReader;
     this.tokenResolver = tokenResolver;
-    this.identityFromOfficialCli = identityFromOfficialCli;
-    this.oauthAuthorizer = oauthAuthorizer ?? createAntigravityOAuthAuthorizer({
+    this.identityFromOfficialSession = identityFromOfficialSession;
+    this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
       cliPath,
       environment: env,
       timeoutMs: authorizationTimeoutMs,
     });
+    const browserOAuthConfigured = Boolean(clientId && clientSecret);
+    this.browserAuthorizer = browserAuthorizer ?? (browserOAuth && browserOAuthConfigured
+      ? createBrowserOAuthAuthorizer({
+        providerId: PROVIDER_ID,
+        redirectUri,
+        callbackPath: new URL(redirectUri).pathname,
+        callbackHost: new URL(redirectUri).hostname,
+        callbackPort: Number(new URL(redirectUri).port || 51121),
+        instructions: "请在 Google 官方授权页面选择账号并完成授权；完成后会自动返回 Dockyard DSH。",
+        authorizationUrlBuilder: ({ state, codeChallenge, redirectUri: callback }) => `${authorizationUrl}?${new URLSearchParams({
+          access_type: "offline",
+          client_id: clientId,
+          code_challenge: codeChallenge,
+          code_challenge_method: "S256",
+          prompt: "consent",
+          redirect_uri: callback,
+          response_type: "code",
+          scope: oauthScope,
+          state,
+        })}`,
+        exchangeCode: async ({ code, codeVerifier, redirectUri, context }) => {
+          const response = await this.fetchImpl(tokenUrl, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: clientId,
+              client_secret: clientSecret,
+              code,
+              code_verifier: codeVerifier,
+              grant_type: "authorization_code",
+              redirect_uri: redirectUri,
+            }),
+            ...(context.signal ? { signal: context.signal } : {}),
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok || !body.access_token) {
+            throw new Error(`Antigravity Google token exchange failed (${response.status})`);
+          }
+          return body;
+        },
+        importCredentials: async (tokens, context) => {
+          const access = tokens?.access_token ?? tokens?.accessToken;
+          const refresh = tokens?.refresh_token ?? tokens?.refreshToken;
+          if (!access) throw new Error("Antigravity Google OAuth did not return an access token");
+          let profile = null;
+          try {
+            const response = await this.fetchImpl(userInfoUrl, {
+              headers: { authorization: `Bearer ${access}` },
+              ...(context.signal ? { signal: context.signal } : {}),
+            });
+            if (response.ok) profile = await response.json().catch(() => null);
+          } catch {
+            // Account import can still use the token fingerprint if profile lookup is unavailable.
+          }
+          const now = context.now instanceof Date ? context.now : new Date();
+          const candidateValue = candidate(now, {
+            email: profile?.email,
+            session: {
+               token: access,
+               refreshToken: refresh,
+               expiresAt: tokenExpiresAt(tokens, now),
+               lastRefreshedAt: now.toISOString(),
+             },
+            existingAccounts: context.accounts ?? [],
+            source: "official_antigravity_browser_oauth",
+            sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+          });
+          return [await this.importAccount(candidateValue, context)];
+        },
+      })
+      : null);
+    this.oauthAuthorizer = oauthAuthorizer ?? this.browserAuthorizer ?? this.cliOAuthAuthorizer;
     this.catalogLoader = catalogLoader ?? createAntigravityCatalogLoader({
       cliPath,
       env,
@@ -1223,11 +1534,104 @@ export class AntigravityOfficialCliDriver {
     return { ...result, parsed };
   }
 
+  async #assertActiveSession(account, signal) {
+    if (!isOfficialSessionAuthKind(account?.auth?.kind)) return;
+    if (account.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return;
+    const expectedFingerprint = account.resources?.sessionFingerprint;
+    if (expectedFingerprint) {
+      let current;
+      try {
+        current = await this.tokenResolver({ env: this.env });
+      } catch {
+        throw activeSessionError("Antigravity OAuth session is unavailable; authorize again");
+      }
+      if (!current?.token || sessionFingerprint(current) !== expectedFingerprint) {
+        // A rotated access token legitimately changes the token-based
+        // fingerprint even though the local session belongs to the same
+        // account. When the current session exposes a stable identity, verify
+        // it against the pooled account before rejecting the request.
+        const currentEmail = current?.email;
+        if (currentEmail && account.email && sameEmail(currentEmail, account.email)) return;
+        throw activeSessionError(
+          "Antigravity selected account is not the active local session; authorize it again",
+          { mismatch: true },
+        );
+      }
+      return;
+    }
+    if (account.accountId === "antigravity:active" && !account.email) return;
+
+    let result;
+    try {
+      result = await this.#slash("/quota", signal);
+    } catch {
+      throw activeSessionError("Antigravity active session could not be verified; authorize again");
+    }
+    const email = extractAntigravityAccountEmail(result.parsed, result.output, result.errorOutput);
+    if (account.email && email && sameEmail(account.email, email)) return;
+    throw activeSessionError(
+      "Antigravity selected account is not the active local session; authorize it again",
+      { mismatch: true },
+    );
+  }
+
+  async #refreshBrowserCredential(account, context = {}) {
+    if (account?.resources?.sessionSource !== OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
+    const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+    if (!credentialRef || typeof context.secretStore?.read !== "function") {
+      throw activeSessionError("Antigravity browser OAuth credential is unavailable; authorize again");
+    }
+    const credential = await context.secretStore.read(credentialRef);
+    if (!credential?.access) {
+      throw activeSessionError("Antigravity browser OAuth credential is missing; authorize again");
+    }
+    const now = context.now instanceof Date ? context.now : new Date();
+    if (!tokenNeedsRefresh(credential, now)) return credential;
+    if (!credential.refresh) {
+      throw activeSessionError("Antigravity browser OAuth token expired; authorize again");
+    }
+    let response;
+    try {
+      response = await this.fetchImpl(this.browserTokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: this.browserClientId,
+          client_secret: this.browserClientSecret,
+          grant_type: "refresh_token",
+          refresh_token: credential.refresh,
+        }),
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+    } catch (error) {
+      const wrapped = activeSessionError(`Antigravity Google OAuth refresh failed: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.access_token) {
+      const error = activeSessionError("Antigravity Google OAuth refresh failed; authorize again");
+      error.status = response.status;
+      throw error;
+    }
+    const updated = {
+      ...credential,
+      access: body.access_token,
+      refresh: body.refresh_token ?? credential.refresh,
+      expiresAt: tokenExpiresAt(body, now) ?? credential.expiresAt ?? null,
+      lastRefreshedAt: now.toISOString(),
+    };
+    await context.secretStore.write(credentialRef, updated);
+    return updated;
+  }
+
   async #nativeQuota(account, context, now) {
     if (typeof this.quotaReader !== "function") return null;
     let credential = null;
     const credentialRef = account?.auth?.credentialRef;
-    if (credentialRef && context.secretStore && typeof context.secretStore.read === "function") {
+    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
+      credential = await this.#refreshBrowserCredential(account, context);
+    } else if (credentialRef && context.secretStore && typeof context.secretStore.read === "function") {
       credential = await context.secretStore.read(credentialRef);
     }
     const value = await this.quotaReader({ account, credential, context });
@@ -1260,7 +1664,7 @@ export class AntigravityOfficialCliDriver {
       }
       let result = null;
       let cliIdentityError = null;
-      if (windows.length === 0 || this.identityFromOfficialCli) {
+      if (windows.length === 0 || this.identityFromOfficialSession) {
         try {
           result = await this.#slash("/quota", context.signal);
           const data = result.parsed?.command?.data;
@@ -1282,9 +1686,17 @@ export class AntigravityOfficialCliDriver {
         email,
         session,
         existingAccounts: context.accounts ?? [],
+        source,
+        sourceKind: source === "antigravity_native"
+          ? (session?.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.OAUTH_FILE)
+          : OFFICIAL_SESSION_SOURCE_KINDS.CLI,
       });
       found.status = windows.length ? "available" : "degraded";
-      found.diagnostic = windows.length ? null : "官方 CLI 已启动，但没有返回结构化 quota 窗口";
+      found.diagnostic = windows.length
+        ? null
+        : source === "antigravity_native"
+          ? "官方会话已读取，但没有返回结构化 quota 窗口"
+          : "官方 CLI 已启动，但没有返回结构化 quota 窗口";
       return {
         candidates: [found],
         source,
@@ -1313,41 +1725,87 @@ export class AntigravityOfficialCliDriver {
       credentialRef: value.credentialRef,
       displayName: value.displayName,
       email: value.email ?? null,
-      auth: { kind: "official_cli_session", scopes: [] },
+      auth: { kind: OFFICIAL_SESSION_AUTH_KIND, scopes: [] },
       subscription: { plan: null, status: null, expiresAt: null },
       refresh: {
-        accessTokenExpiresAt: null,
+        accessTokenExpiresAt: session.expiresAt ?? null,
         nextRefreshAt: null,
-        lastRefreshedAt: null,
-        refreshable: null,
+        lastRefreshedAt: session.lastRefreshedAt ?? null,
+        refreshable: session.refresh ? true : null,
       },
       resources: {
+        ...officialSessionResources({
+          sourceKind: value.resources?.sessionSource ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+          authSource: value.source ?? "official_antigravity_cli_session",
+        }),
         transport: "gemini_stream_generate_content_sse",
-        authSource: "official_antigravity_cli_session",
-        quotaSource: "antigravity_cli_status",
+        quotaSource: value.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.DESKTOP_APP
+          ? "official_client_status"
+          : value.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+            ? "antigravity_browser_oauth"
+            : "antigravity_cli_status",
         ...(value.resources ?? {}),
       },
     };
   }
 
+  async getActiveSession(context = {}) {
+    try {
+      const discovered = await this.discover(context);
+      const candidateValue = discovered?.candidates?.[0];
+      if (!candidateValue) return null;
+      const account = await this.importAccount(candidateValue, context);
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID,
+        instructions: "已检测到 Antigravity 官方会话，当前账号已接入 Dockyard DSH。",
+        accounts: [account],
+        diagnostic: null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async startAuthorization(context = {}) {
-    return this.oauthAuthorizer.begin(context);
+    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
+      return this.oauthAuthorizer.begin(context);
+    }
+    const started = await this.browserAuthorizer.begin(context);
+    if (started.status === "failed") return this.cliOAuthAuthorizer.begin(context);
+    return started;
+  }
+
+  #authorizationAuthorizer(sessionId) {
+    if (sessionId?.includes(":browser:")) return this.browserAuthorizer;
+    return this.oauthAuthorizer === this.browserAuthorizer ? this.cliOAuthAuthorizer : this.oauthAuthorizer;
   }
 
   async pollAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.poll(sessionId, context);
+    return this.#authorizationAuthorizer(sessionId).poll(sessionId, context);
   }
 
   async submitAuthorizationCode(sessionId, code, context = {}) {
-    return this.oauthAuthorizer.submitAuthorizationCode(sessionId, code, context);
+    return this.#authorizationAuthorizer(sessionId).submitAuthorizationCode(sessionId, code, context);
   }
 
   async cancelAuthorization(sessionId, context = {}) {
-    return this.oauthAuthorizer.cancel(sessionId, context);
+    return this.#authorizationAuthorizer(sessionId).cancel(sessionId, context);
   }
 
   async refreshAccount(account, context = {}) {
+    await this.#refreshBrowserCredential(account, context);
+    await this.#assertActiveSession(account, context.signal);
     const now = context.now instanceof Date ? context.now : new Date();
+    let session = null;
+    try {
+      session = await this.tokenResolver({ env: this.env });
+    } catch {
+      // The fingerprint below stays absent when the local session cannot be
+      // read; the account keeps its existing fingerprint.
+    }
+    const fingerprint = sessionFingerprint(session);
+    const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
     let nativeError = null;
     try {
       const native = await this.#nativeQuota(account, context, now);
@@ -1361,7 +1819,7 @@ export class AntigravityOfficialCliDriver {
             source: "antigravity_native",
           },
           credits: native.credits,
-          resources: { quotaSource: "antigravity_native" },
+          resources: { quotaSource: "antigravity_native", ...fingerprintResources },
           refresh: {
             accessTokenExpiresAt: null,
             nextRefreshAt: null,
@@ -1401,6 +1859,7 @@ export class AntigravityOfficialCliDriver {
           upgradeUri: stringValue(creditsResult.parsed.command.data.upgrade_uri),
         }
         : null,
+      resources: fingerprintResources,
       refresh: {
         accessTokenExpiresAt: null,
         nextRefreshAt: null,
@@ -1411,6 +1870,7 @@ export class AntigravityOfficialCliDriver {
   }
 
   async getQuota(account, context = {}) {
+    await this.#assertActiveSession(account, context.signal);
     const now = context.now instanceof Date ? context.now : new Date();
     let nativeError = null;
     try {
@@ -1469,10 +1929,15 @@ export class AntigravityOfficialCliDriver {
   }
 
   async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
+    return this.catalogLoader({
+      force: Boolean(context.force),
+      accounts: context.accounts,
+    });
   }
 
   async invoke(request, invocation, context = {}) {
+    await this.#refreshBrowserCredential(invocation?.account, context);
+    await this.#assertActiveSession(invocation?.account, context.signal);
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");
@@ -1485,8 +1950,12 @@ export class AntigravityOfficialCliDriver {
   }
 }
 
+// Backward-compatible export for integrations that used the old CLI-specific
+// class name before official desktop/session sources were supported.
+export const AntigravityOfficialCliDriver = AntigravityOfficialSessionDriver;
+
 export function createAntigravityDriver(options = {}) {
-  return new AntigravityOfficialCliDriver(options);
+  return new AntigravityOfficialSessionDriver(options);
 }
 
 export const antigravityDriverConstants = Object.freeze({ providerId: PROVIDER_ID });

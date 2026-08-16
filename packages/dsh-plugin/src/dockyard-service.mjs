@@ -148,7 +148,7 @@ export class DockyardDshService {
     if (this.autoRefresh) {
       // Do not start a serial all-provider refresh during boot. A provider
       // popup opened immediately after DSH starts must be able to refresh its
-      // own live state without waiting behind every other CLI/account.
+      // own live state without waiting behind every other provider/account.
       this.#refreshTimer = setInterval(() => {
         void this.refresh().catch((error) => this.#warn("scheduled quota refresh failed", error));
       }, this.refreshIntervalMs);
@@ -266,7 +266,7 @@ export class DockyardDshService {
     return this.runtime.removeAccount(providerId, accountId);
   }
 
-  async startAuthorization(providerInput) {
+  async startAuthorization(providerInput, { openBrowser = true } = {}) {
     await this.ready;
     const manifest = manifestFor(this.runtime, providerInput);
     if (!manifest) throw new Error(`未知 provider：${providerInput}`);
@@ -274,16 +274,16 @@ export class DockyardDshService {
       return {
         status: "unsupported",
         providerId: manifest.id,
-        instructions: `${providerName(manifest)} 没有独立的官方 OAuth 登录命令；请先在官方环境登录或切换账号，然后扫描本机登录态，再添加候选。`,
+        instructions: `${providerName(manifest)} 没有独立的官方授权入口；请先在官方客户端或官方环境登录/切换账号，然后扫描本机登录态，再添加候选。`,
       };
     }
 
     // Deduplicate concurrent UI/remote calls before the first runtime session
     // has been registered. Without this guard two same-tick clicks can each
-    // spawn the provider CLI and each open the same OAuth page.
+    // start the provider's official authorization flow.
     const existingStart = this.#authStartPromises.get(manifest.id);
     if (existingStart) return existingStart;
-    const startPromise = this.#startAuthorization(manifest);
+    const startPromise = this.#startAuthorization(manifest, { openBrowser });
     const trackedStart = startPromise.finally(() => {
       if (this.#authStartPromises.get(manifest.id) === trackedStart) {
         this.#authStartPromises.delete(manifest.id);
@@ -293,10 +293,10 @@ export class DockyardDshService {
     return trackedStart;
   }
 
-  async #startAuthorization(manifest) {
+  async #startAuthorization(manifest, { openBrowser = true } = {}) {
     // A second click must attach to the existing provider session. Starting a
-    // new CLI OAuth process here opens a second Google page and can race the
-    // first process while both try to write the same local login state.
+    // second official authorization flow can race the first one while both
+    // try to write the same local login state.
     const existing = this.#activeAuthSession(manifest.id);
     if (existing) {
       let current;
@@ -326,8 +326,9 @@ export class DockyardDshService {
       sessionId: started.sessionId,
       status: started.status,
       authorizationUrl: started.authorizationUrl ?? null,
+      openBrowser,
     });
-    const result = await this.#waitForAuthorizationUrl(manifest.id, started);
+    const result = await this.#waitForAuthorizationUrl(manifest.id, started, openBrowser);
     const tracked = this.#authSessions.get(started.sessionId);
     if (tracked) Object.assign(tracked, {
       status: result.status,
@@ -342,9 +343,9 @@ export class DockyardDshService {
   }
 
   async pollAuthorization(providerId, sessionId) {
-    const result = await this.runtime.pollAuthorization(providerId, sessionId);
-    this.#openAuthorizationUrl(result);
     const tracked = this.#authSessions.get(sessionId);
+    const result = await this.runtime.pollAuthorization(providerId, sessionId);
+    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
     if (tracked) Object.assign(tracked, {
       status: result.status,
       authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null,
@@ -372,9 +373,9 @@ export class DockyardDshService {
   async submitAuthorizationCode(providerInput, sessionId, code) {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput) ?? String(providerInput);
-    const result = await this.runtime.submitAuthorizationCode(providerId, sessionId, code);
-    this.#openAuthorizationUrl(result);
     const tracked = this.#authSessions.get(sessionId);
+    const result = await this.runtime.submitAuthorizationCode(providerId, sessionId, code);
+    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
     if (tracked) Object.assign(tracked, {
       status: result.status,
       authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null,
@@ -396,7 +397,7 @@ export class DockyardDshService {
       "/dockyard status                         查看账号、实时额度和刷新时间",
       "/dockyard scan [provider]                扫描本机官方登录态",
       "/dockyard add [provider] [candidateId]   添加扫描到的 OAuth 账号",
-      "/dockyard login <provider>               打开 provider 官方 OAuth 验证页并登录",
+      "/dockyard login <provider>               启动 provider 官方授权流程并登录",
       "/dockyard refresh [provider]             强制读取实时额度",
       "/dockyard models <provider>              读取 provider 实时模型/档位",
       "/dockyard policy <provider> <policy>     设置 manual/sticky_session/round_robin/failover",
@@ -407,14 +408,14 @@ export class DockyardDshService {
     ].join("\n");
   }
 
-  #openAuthorizationUrl(result) {
-    if (!result?.authorizationUrl || this.#authOpened.has(result.sessionId)) return;
+  #openAuthorizationUrl(result, openBrowser = true) {
+    if (!openBrowser || !result?.authorizationUrl || this.#authOpened.has(result.sessionId)) return;
     this.#authOpened.add(result.sessionId);
-    // Antigravity's official agy process opens its own Google OAuth page.
-    // Opening the captured URL here creates the duplicate-login-tab bug.
-    // The UI's explicit "重新打开验证页" action remains available as a
-    // fallback when the provider browser flow did not surface a page.
-    if (result.browserOpened || result.providerId === "antigravity") return;
+    // Provider-owned CLI sessions may need the host-level browser fallback;
+    // direct GUI OAuth passes openBrowser=false and navigates its synchronous
+    // popup itself. Providers that already opened a browser are never opened
+    // a second time.
+    if (result.browserOpened) return;
     void Promise.resolve(this.openBrowser(result.authorizationUrl)).catch((error) => {
       this.#warn("could not open authorization URL", error);
     });
@@ -427,15 +428,15 @@ export class DockyardDshService {
     )) ?? null;
   }
 
-  async #waitForAuthorizationUrl(providerId, started) {
-    this.#openAuthorizationUrl(started);
+  async #waitForAuthorizationUrl(providerId, started, openBrowser = true) {
+    this.#openAuthorizationUrl(started, openBrowser);
     if (started.authorizationUrl || !["pending", "processing"].includes(started.status)) return started;
     const deadline = Date.now() + AUTH_URL_WAIT_MS;
     let result = started;
     while (Date.now() < deadline && ["pending", "processing"].includes(result.status)) {
       await sleep(100);
       result = await this.runtime.pollAuthorization(providerId, started.sessionId);
-      this.#openAuthorizationUrl(result);
+      this.#openAuthorizationUrl(result, openBrowser);
     }
     return result;
   }

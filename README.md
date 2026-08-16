@@ -10,27 +10,26 @@
 
 ### Dockyard DSH 是什么
 
-Dockyard DSH 把多个官方 OAuth / 官方 CLI 会话接入 DeepSeek Harness，提供一个统一的账号池、模型目录、额度状态和 provider-native 请求入口。它是 DSH 的原生 bundle/plugin，不需要另起一个代理网关，也不把 provider 逻辑塞进 DSH 核心。
+Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harness，提供一个统一的账号池、模型目录、额度状态和 provider-native 请求入口。它是 DSH 的原生 bundle/plugin，不需要另起一个代理网关，也不把 provider 逻辑塞进 DSH 核心。
 
 当前包含的 provider 模块：
 
-- **Codex** — 官方 OAuth 会话和原生 Responses 请求链路。
-- **Antigravity** — 官方本机会话、实时模型目录、额度/credits 和原生 Gemini SSE 请求链路。
-- **Grok** — 官方 OAuth CLI、实时模型目录和 provider-native streaming 请求。
-- **Claude** — `claude` 官方 CLI 的订阅 OAuth 会话与原生请求适配。
-- **Cursor** — `cursor-agent` 或 Cursor.app 的官方 active session 与原生请求适配。
+- **Codex** — 官方浏览器 OAuth、CLI fallback 和原生 Responses 请求链路。
+- **Antigravity** — Google 官方浏览器 OAuth、官方本机会话、实时模型目录、额度/credits 和原生 Gemini SSE 请求链路。
+- **Grok** — xAI 官方浏览器 OAuth、CLI fallback、实时模型目录、官方 Build credits 周期和 provider-native streaming 请求。额度读取使用官方 `/billing?format=credits`（转发 `GetGrokCreditsConfig`）；若上游只返回周期，剩余值保持未知。
+- **Claude** — Claude 官方浏览器 OAuth（支持带 state 的手动回调地址/授权码）、CLI fallback 与原生请求适配。
+- **Cursor** — Cursor 官方浏览器登录轮询、CLI fallback 与原生请求适配。
 
-如果对应的官方 CLI 或桌面端没有安装、没有登录，Dockyard 会返回明确的 unavailable/degraded 状态；不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果。
+如果对应的官方客户端、CLI 或 OAuth 源没有安装、没有登录，Dockyard 会返回明确的 unavailable/degraded 状态；不会用硬编码的账号、模型、版本、套餐或额度伪造可用结果。
 
 ### 主要功能
 
 - 在 DSH 内使用 `/dockyard` 命令管理账号和 provider。
-- 启动 provider 自己的官方 OAuth 登录流程，并将完成的会话安全导入账号池。
-- 扫描本机已有的官方登录态；扫描和新增账号是两个独立操作。
+- 点击“登录添加账号”直接打开 provider 官方浏览器授权页，选择账号并安全导入账号池；provider 不可用时保留 CLI fallback。
+- 扫描本机已有的官方登录态；扫描和新增账号是两个独立操作，已有账号不会被“新增”静默重复导入。
 - 支持手动选择、sticky session、round-robin 和 failover 账号池策略。
 - 读取 provider 返回的实时模型目录、推理档位、套餐和额度窗口。
 - 所有命令、模型选择和 LLM 生成都读取同一个 Dockyard runtime，不维护第二套账号池或额度缓存。
-- 可选的本地可视化页面用于观察状态；正式使用不依赖该页面。
 
 ### 平台支持：当前仅 macOS
 
@@ -39,8 +38,8 @@ Dockyard DSH 把多个官方 OAuth / 官方 CLI 会话接入 DeepSeek Harness，
 原因是当前完整功能依赖 macOS 原生能力和 macOS 官方客户端状态：
 
 - 凭据存储使用 macOS Keychain 和 Swift helper。
-- 本地 OAuth 页面使用 macOS 的 `/usr/bin/open` 打开授权页面。
-- Cursor、Antigravity 等 provider 会读取 macOS 官方桌面端或本机 CLI 的会话状态。
+- 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
+- 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
 - 当前没有 Windows credential-store backend、Windows 原生 OAuth 启动器和 Windows 打包验证。
 
 纯 JavaScript 的部分未来可以继续做跨平台抽象，但本仓库当前不能宣传为 macOS/Windows 通用。如果你使用 Windows，请等待 Windows backend 和真实 E2E 验证完成。
@@ -131,34 +130,23 @@ allowBuilds:
 /dockyard remove <provider> <accountId>
 ```
 
-常见流程是：先 `/dockyard login <provider>` 或 `/dockyard scan <provider>`，再 `/dockyard add <provider>`，最后用 `/dockyard status` 和 `/dockyard models <provider>` 检查实时状态。
+新增账号流程是 `/dockyard login <provider>`（直接打开官方浏览器 OAuth）；如果要导入已有本机登录态，则使用 `/dockyard scan <provider>` 后再 `/dockyard add <provider>`，最后用 `/dockyard status` 和 `/dockyard models <provider>` 检查实时状态。
 
-### 官方 CLI / active session 边界
+### 官方浏览器 OAuth / active session 边界
 
-- **Claude**：使用 `claude auth login --claudeai` 和 `claude auth status --json`。官方没有返回真实额度窗口时，Dockyard 显示未知，不估算百分比。
-- **Cursor**：优先使用 `cursor-agent login`、`cursor-agent status` 和官方 streaming 接口；也可读取 Cursor.app 的 active OAuth session。官方客户端没有提供的模型或额度不会被硬编码。
-- **Antigravity**：从官方本机会话发现账号。若官方 CLI 没有返回邮箱，会使用不可逆本机会话指纹区分候选账号；切换 Google 账号后需要重新扫描。
-- **Grok**：使用官方 `grok login --oauth`、`grok models` 和 streaming JSON；请求使用短生命周期的官方 CLI profile，完成后清理临时文件。
-- **Claude / Cursor 的账号池**：官方 CLI/客户端通常只暴露当前 active session，不提供可离线切换的便携凭据。Dockyard 不会把旧的 session 描述伪装成另一个可用账号；切换账号要先在官方环境重新授权，再扫描和刷新。
+- **Codex、Antigravity、Grok、Claude、Cursor** 的“登录添加账号”默认由 DSH 直接打开官方浏览器授权页，不要求本机先安装 CLI；CLI 仅作为兼容性 fallback。
+- Codex 使用 loopback PKCE；Antigravity 使用 Google loopback OAuth；Grok 使用 xAI loopback OAuth；Cursor 使用官方 `loginDeepControl` + `/auth/poll`；Claude 使用官方网页回调，手动输入时要求粘贴带 `state` 的完整回调地址或 `code#state`。
+- Antigravity 的 Google OAuth client ID/secret 必须通过 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` 和 `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET` 提供，仓库不内置凭据。
+- **扫描**仍可读取本机已有的官方客户端/CLI 会话；扫描和浏览器新增账号不会互相替代。
+- provider 的 OAuth endpoint、token response 或授权范围变化时，Dockyard 会显示 unavailable/degraded，不猜测未验证的字段。
 
 ### 凭据和安全边界
 
 - 原始 OAuth/token 不写入 Git、账号池快照或页面状态；运行时只传递 opaque credential reference。
+- 浏览器 OAuth 的 refresh token 持久化在安全凭据存储中；支持 refresh 的 provider 会在重启后自动刷新短期 access token，只有 provider 撤销 refresh token 或改变协议时才需要重新授权。
 - macOS 默认使用 Keychain；非 macOS 默认 credential store 会 fail closed，不会静默退回不安全的内存存储。
-- 本地页面默认只监听 `127.0.0.1`。远程绑定必须显式设置 `DOCKYARD_DSH_ALLOW_REMOTE=1` 和 `DOCKYARD_DSH_REMOTE_TOKEN`，并使用 `Authorization: Bearer ...`。
 - 额度、模型、套餐、账号身份和过期时间都来自 provider 的实时结果；provider 不返回时保持 `unknown`/`null`。
 - 发布和提 issue 前请阅读 [`SECURITY.md`](SECURITY.md)，不要提交 token、OAuth 文件、Keychain 值或包含敏感信息的日志。
-
-### 可选的本地可视化页面
-
-本地页面只是调试/观察界面，不是 DSH plugin 的运行前提：
-
-```sh
-npm run dev
-open http://127.0.0.1:8787/
-```
-
-页面和 DSH 命令读取同一个 runtime；它不会创建第二套账号池、模型目录或额度数据源。
 
 ### 开发与验证
 
@@ -189,7 +177,6 @@ packages/runtime/           一个共享的 Dockyard runtime
 packages/dsh-plugin/        DSH bundle、LLM adapter、命令和 client UI
 packages/vault/             macOS Keychain backend
 modules/provider-*/         各 provider 自己的 OAuth、目录、额度和 native transport
-apps/local-page/            可选的 loopback 调试页面
 tests/                      安全、生命周期、provider 和 runtime 测试
 ```
 
@@ -199,34 +186,33 @@ tests/                      安全、生命周期、provider 和 runtime 测试
 
 - DSH 本身仍处于 developer preview，上游可能发生 breaking changes。
 - provider 的官方 CLI、客户端路径、OAuth 返回字段和额度接口都可能变化；Dockyard 对缺失字段保持未知。
-- Claude 和 Cursor 的“多账号”能力受官方 active session API 限制，不等同于可以离线保存任意数量的完整凭据。
+- 浏览器 OAuth 多账号依赖 provider 官方授权页和 token response；如果 provider 暂停或改变该流程，必须重新验证 endpoint，而不是猜测协议。
 - Windows 当前不支持；请勿把本版本用于 Windows 生产环境。
 
 ## English
 
 ### What it is
 
-Dockyard DSH is a native DeepSeek Harness bundle/plugin that connects official OAuth and official CLI sessions to one shared account pool, model catalog, quota view, and provider-native request path. It does not require a second proxy gateway and it does not put provider-specific branches into the DSH core.
+Dockyard DSH is a native DeepSeek Harness bundle/plugin that connects official OAuth and official client sessions to one shared account pool, model catalog, quota view, and provider-native request path. It does not require a second proxy gateway and it does not put provider-specific branches into the DSH core.
 
 Current provider modules:
 
-- **Codex** — official OAuth session and native Responses transport.
-- **Antigravity** — official local session, live model catalog, quota/credits, and native Gemini SSE transport.
-- **Grok** — official OAuth CLI, live model catalog, and provider-native streaming.
-- **Claude** — subscription OAuth session and native request adapter through the official `claude` CLI.
-- **Cursor** — official active session from `cursor-agent` or Cursor.app.
+- **Codex** — official browser OAuth, CLI fallback, and native Responses transport.
+- **Antigravity** — Google browser OAuth, official local session, live model catalog, quota/credits, and native Gemini SSE transport.
+- **Grok** — xAI browser OAuth, CLI fallback, live model catalog, official Build credits periods, and provider-native streaming. Quota uses the official `/billing?format=credits` surface (forwarding `GetGrokCreditsConfig`); if the upstream only returns a period, the remaining value stays unknown.
+- **Claude** — official browser OAuth (including manual authorization-code entry), CLI fallback, and native request adapter.
+- **Cursor** — official browser login polling, CLI fallback, and native request adapter.
 
-When an official CLI or desktop client is missing or not signed in, Dockyard reports an explicit unavailable/degraded state. It does not invent accounts, models, versions, plans, or quota values.
+When an official client, CLI, or OAuth source is missing or not signed in, Dockyard reports an explicit unavailable/degraded state. It does not invent accounts, models, versions, plans, or quota values.
 
 ### Features
 
 - Manage providers and accounts from DSH's `/dockyard` command surface.
-- Start provider-owned OAuth flows and securely import completed sessions into the account pool.
-- Scan existing official login states separately from adding a new account.
+- Open each provider's official browser authorization page from “login/add account” and securely import the completed session; retain CLI fallback for compatibility.
+- Scan existing official login states separately from adding a new account; an existing account is never silently re-imported by Add.
 - Select accounts manually or with sticky-session, round-robin, or failover policies.
 - Read live provider model catalogs, reasoning tiers, plans, and quota windows.
 - Keep commands, model selection, and generation on the same Dockyard runtime and source of truth.
-- Use an optional local visual page for diagnostics; the page is not required for normal DSH operation.
 
 ### Platform support: macOS only
 
@@ -235,8 +221,8 @@ When an official CLI or desktop client is missing or not signed in, Dockyard rep
 The complete integration currently depends on macOS-specific behavior:
 
 - Credentials use the macOS Keychain and a Swift helper.
-- The local OAuth page opens authorization URLs through macOS `/usr/bin/open`.
-- Cursor and Antigravity integrations read macOS desktop or local CLI session state.
+- Browser OAuth is opened by the DSH GUI and uses PKCE, state validation, loopback callbacks, or manual-code entry; the official CLI is only a fallback.
+- Scan mode still reads macOS desktop or local CLI session state for providers that expose it.
 - There is no Windows credential-store backend, Windows-native OAuth launcher, or Windows packaging/E2E validation in this release.
 
 Some pure JavaScript layers can be abstracted for other platforms later, but this repository must currently be treated as a macOS-only plugin.
@@ -317,30 +303,22 @@ If you want to avoid that prompt, clone the repository and run `npm install` ins
 /dockyard remove <provider> <accountId>
 ```
 
-A typical flow is `/dockyard login <provider>` or `/dockyard scan <provider>`, then `/dockyard add <provider>`, followed by `/dockyard status` and `/dockyard models <provider>`.
+For a new account, use `/dockyard login <provider>` to open official browser OAuth. To import an existing local session, use `/dockyard scan <provider>` followed by `/dockyard add <provider>`, then inspect `/dockyard status` and `/dockyard models <provider>`.
 
-### Official CLI and active-session boundaries
+### Official browser OAuth and active-session boundaries
 
-Claude uses `claude auth login --claudeai` and `claude auth status --json`. Cursor prefers `cursor-agent login`, `cursor-agent status`, and its official streaming interface, with Cursor.app active-session discovery as a fallback. Antigravity discovers the official local session and uses an irreversible local session fingerprint when the official CLI does not return an email. Grok uses `grok login --oauth`, `grok models`, and streaming JSON with a short-lived official CLI profile.
-
-Claude and Cursor generally expose only the current official active session rather than a portable multi-account credential API. Dockyard does not pretend that a stale session descriptor is another usable account; re-authorize the desired account in the official environment, then scan and refresh it.
+- **Codex, Antigravity, Grok, Claude, and Cursor** open the provider's official browser authorization page directly when Login/Add is clicked; a local CLI is not required. The CLI remains a compatibility fallback.
+- Codex uses loopback PKCE; Antigravity uses Google loopback OAuth; Grok uses xAI loopback OAuth; Cursor uses the official `loginDeepControl` + `/auth/poll` flow; Claude uses the official hosted callback and supports manual authorization-code entry.
+- **Scan** can still read an existing official desktop/CLI session. Scan and browser account addition are separate operations.
+- If a provider changes an OAuth endpoint, token response, or scope, Dockyard reports unavailable/degraded rather than guessing undocumented fields.
 
 ### Credentials and security
 
 - Raw OAuth/token values are not stored in Git, account-pool snapshots, or page state; the runtime uses opaque credential references.
+- Browser OAuth refresh tokens persist in secure credential storage; providers with refresh support renew short-lived access tokens after restart, while provider revocation or protocol changes still require reauthorization.
 - macOS uses Keychain by default. Non-macOS defaults fail closed instead of silently falling back to an unsafe in-memory store.
-- The local page binds to `127.0.0.1` by default. Remote binding requires both `DOCKYARD_DSH_ALLOW_REMOTE=1` and `DOCKYARD_DSH_REMOTE_TOKEN`, plus `Authorization: Bearer ...` on remote API calls.
 - Provider models, plans, quotas, identities, and expiry values come from live provider responses; missing values remain `unknown`/`null`.
 - Read [`SECURITY.md`](SECURITY.md) before filing issues. Never commit tokens, OAuth files, Keychain values, or sensitive logs.
-
-### Optional local visual page
-
-```sh
-npm run dev
-open http://127.0.0.1:8787/
-```
-
-This page is an optional diagnostic surface. It reads the same runtime as the DSH commands and is not a second account, model, or quota data source.
 
 ### Development and verification
 
@@ -371,7 +349,6 @@ packages/runtime/           the shared Dockyard runtime
 packages/dsh-plugin/        DSH bundle, LLM adapter, commands, and client UI
 packages/vault/             macOS Keychain backend
 modules/provider-*/         provider OAuth, catalog, quota, and native transport
-apps/local-page/            optional loopback diagnostic page
 tests/                      security, lifecycle, provider, and runtime tests
 ```
 
@@ -381,5 +358,5 @@ The core rule is simple: provider-specific logic stays in provider modules, acco
 
 - DeepSeek Harness is still a developer preview and may introduce breaking changes.
 - Official provider CLIs, desktop paths, OAuth fields, and quota APIs can change; missing fields remain unknown.
-- Claude and Cursor account-pool behavior is constrained by official active-session APIs and is not equivalent to offline storage of arbitrary credentials.
+- Browser account-pool behavior depends on each provider's official OAuth page and token response; endpoint changes require re-verification rather than guessed protocol fields.
 - Windows is not supported in this release.

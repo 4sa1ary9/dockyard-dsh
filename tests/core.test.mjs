@@ -87,6 +87,23 @@ test("account pool retains live quota and refresh metadata", () => {
   assert.equal(updated.health.status, "healthy");
 });
 
+test("round robin rotates session requests while sticky sessions remain pinned", () => {
+  const roundRobin = new AccountPool({ providerId: "round-robin", policy: ACCOUNT_SELECTION_POLICY.ROUND_ROBIN, clock: fixedNow });
+  addAccount(roundRobin, "account-a", { remaining: 1, limit: 2, unit: "requests" });
+  addAccount(roundRobin, "account-b", { remaining: 1, limit: 2, unit: "requests" });
+  assert.deepEqual([
+    roundRobin.select({ sessionId: "session-1" }).accountId,
+    roundRobin.select({ sessionId: "session-1" }).accountId,
+    roundRobin.select({ sessionId: "session-1" }).accountId,
+  ], ["account-a", "account-b", "account-a"]);
+
+  const sticky = new AccountPool({ providerId: "sticky", policy: ACCOUNT_SELECTION_POLICY.STICKY_SESSION, clock: fixedNow });
+  addAccount(sticky, "account-a", { remaining: 1, limit: 2, unit: "requests" });
+  addAccount(sticky, "account-b", { remaining: 1, limit: 2, unit: "requests" });
+  assert.equal(sticky.select({ sessionId: "session-1" }).accountId, "account-a");
+  assert.equal(sticky.select({ sessionId: "session-1" }).accountId, "account-a");
+});
+
 test("account pool clears the default account when it is removed", () => {
   const pool = new AccountPool({ providerId: "openai-codex", policy: ACCOUNT_SELECTION_POLICY.MANUAL, clock: fixedNow });
   addAccount(pool, "account-a", { remaining: 1, limit: 2, unit: "requests" });
@@ -120,6 +137,17 @@ test("account pool excludes a provider account after quota exhaustion", () => {
 
   assert.equal(pool.get("account-exhausted").health.status, "exhausted");
   assert.throws(() => pool.select(), /No eligible accounts/);
+});
+
+test("reauthorizing an expired account resets its selection health", () => {
+  const pool = new AccountPool({ providerId: "claude", policy: ACCOUNT_SELECTION_POLICY.MANUAL, clock: fixedNow });
+  addAccount(pool, "account-expired", { remaining: 1, limit: 2, unit: "requests" });
+  pool.report("account-expired", { status: "auth_expired", message: "old token expired" });
+  assert.throws(() => pool.select({ accountId: "account-expired" }), /No eligible accounts|not eligible/);
+
+  pool.upsert({ accountId: "account-expired", credentialRef: "keychain://dockyard/claude/account-expired" }, { resetHealth: true });
+  assert.equal(pool.get("account-expired").health.status, "unknown");
+  assert.equal(pool.select({ accountId: "account-expired" }).accountId, "account-expired");
 });
 
 test("manual policy automatically uses the only eligible account", () => {
@@ -212,6 +240,73 @@ test("provider route fails over a rate-limited account before exposing a partial
   ]);
   assert.equal(pool.get("account-a").health.status, "degraded");
   assert.equal(pool.get("account-b").health.status, "healthy");
+});
+
+test("provider route rejects an empty successful stream instead of yielding a blank finish", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.MANUAL,
+    clock: fixedNow,
+  });
+  addAccount(pool, "account-empty", { remaining: 1, limit: 2, unit: "requests" });
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async *stream() {
+      yield { type: "block-start", index: 0, blockType: "text" };
+      yield { type: "block-end", index: 0, block: {} };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+  await assert.rejects(
+    (async () => {
+      for await (const _chunk of route.stream({ model: "test-model" })) {}
+    })(),
+    (error) => {
+      assert.equal(error.code, "EMPTY_STREAM_OUTPUT");
+      assert.equal(error.emptyOutput, true);
+      return true;
+    },
+  );
+  assert.equal(pool.get("account-empty").health.status, "degraded");
+});
+
+test("provider route fails over an empty stream before exposing a blank response", async () => {
+  const pool = new AccountPool({
+    providerId: "test-provider",
+    policy: ACCOUNT_SELECTION_POLICY.FAILOVER,
+    clock: fixedNow,
+  });
+  addAccount(pool, "account-empty", { remaining: 1, limit: 2, unit: "requests" });
+  addAccount(pool, "account-good", { remaining: 1, limit: 2, unit: "requests" });
+  const attempts = [];
+  const providerModule = {
+    manifest: { id: "test-provider" },
+    async *stream(_request, { account }) {
+      attempts.push(account.accountId);
+      yield { type: "block-start", index: 0, blockType: "text" };
+      if (account.accountId === "account-empty") {
+        yield { type: "block-end", index: 0, block: {} };
+        yield { type: "finish", reason: { kind: "stop" } };
+        return;
+      }
+      yield { type: "text-delta", index: 0, text: "ok" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    },
+  };
+  const route = createProviderRoute({ providerModule, accountPool: pool });
+  const chunks = [];
+  for await (const chunk of route.stream({ model: "test-model" }, { requestId: "empty-failover" })) {
+    chunks.push(chunk);
+  }
+  assert.deepEqual(attempts, ["account-empty", "account-good"]);
+  assert.deepEqual(chunks, [
+    { type: "block-start", index: 0, blockType: "text" },
+    { type: "text-delta", index: 0, text: "ok" },
+    { type: "finish", reason: { kind: "stop" } },
+  ]);
+  assert.equal(pool.get("account-empty").health.status, "degraded");
+  assert.equal(pool.get("account-good").health.status, "healthy");
 });
 
 test("DSH LLM adapter delegates provider-neutral streaming to the selected route", async () => {
@@ -337,7 +432,7 @@ test("DSH Cordis plugin registers the modular provider set", () => {
   assert.equal(registrations[0].adapter.providerInfo("antigravity").name, "Antigravity");
 });
 
-function createCommandRuntime() {
+function createCommandRuntime({ browserSession = false } = {}) {
   const account = {
     providerId: "live-provider",
     accountId: "account-a",
@@ -443,9 +538,11 @@ function createCommandRuntime() {
     },
     async startAuthorization() {
       state.authorizationStarts += 1;
-      const sessionId = state.authorizationStarts === 1
-        ? "live-provider:session-a"
-        : `live-provider:session-${state.authorizationStarts}`;
+      const sessionId = browserSession
+        ? `live-provider:browser:session-${state.authorizationStarts}`
+        : state.authorizationStarts === 1
+          ? "live-provider:session-a"
+          : `live-provider:session-${state.authorizationStarts}`;
       await new Promise((resolve) => setTimeout(resolve, 10));
       return {
         sessionId,
@@ -505,6 +602,17 @@ test("DSH native service exposes live account, quota, model, and OAuth commands"
   assert.match(duplicate.instructions, /已有登录验证进行中/);
   assert.deepEqual(opened, ["https://provider.test/oauth"]);
 
+  await service.dispose();
+});
+
+test("DSH service does not duplicate a direct browser OAuth tab", async () => {
+  const runtime = createCommandRuntime({ browserSession: true });
+  const opened = [];
+  const service = new DockyardDshService({ runtime, autoRefresh: false, openBrowser: (url) => opened.push(url) });
+
+  const started = await service.startAuthorization("live-provider", { openBrowser: false });
+  assert.equal(started.sessionId, "live-provider:browser:session-1");
+  assert.deepEqual(opened, []);
   await service.dispose();
 });
 

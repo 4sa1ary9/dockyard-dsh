@@ -9,7 +9,7 @@ function selectionContext(context, excludedIds) {
 function shouldFailover(error, accountPool, context) {
   return accountPool.policy === ACCOUNT_SELECTION_POLICY.FAILOVER
     && !context.accountId
-    && (error?.rateLimited || error?.quotaExhausted || error?.authExpired);
+    && (error?.rateLimited || error?.quotaExhausted || error?.authExpired || error?.emptyOutput);
 }
 
 function quotaResetAt(account) {
@@ -135,7 +135,10 @@ export function createProviderRoute({ providerModule, accountPool }) {
               yield chunk;
             }
             if (!hasOutput) {
-              for (const buffered of pending) yield buffered;
+              const error = new Error("Provider stream ended without substantive output");
+              error.code = "EMPTY_STREAM_OUTPUT";
+              error.emptyOutput = true;
+              throw error;
             }
             accountPool.report(account.accountId, { status: "success" });
             return;

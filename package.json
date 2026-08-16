@@ -27,8 +27,6 @@
     "packages/dsh-plugin/src/dockyard-typert.host.mjs"
   ],
   "scripts": {
-    "dev": "node apps/local-page/server.mjs",
-    "start": "node apps/local-page/server.mjs",
     "build": "node scripts/build.mjs && node packages/dsh-plugin/scripts/build-package.mjs",
     "build:plugin": "node packages/dsh-plugin/scripts/build-package.mjs",
     "prepare": "node packages/dsh-plugin/scripts/build-package.mjs",

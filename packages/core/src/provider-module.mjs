@@ -48,6 +48,15 @@ export function defineProviderModule({
         : missingDriver(id, "oauth_source_import")(source, context);
     },
 
+    // A provider may expose an already authenticated official CLI, desktop
+    // client, browser, or OAuth-file session. Returning null keeps the normal
+    // provider-owned authorization flow unchanged.
+    async getActiveSession(context) {
+      return typeof driver.getActiveSession === "function"
+        ? driver.getActiveSession(context)
+        : null;
+    },
+
     async startAuthorization(context) {
       return driver.startAuthorization
         ? driver.startAuthorization(context)

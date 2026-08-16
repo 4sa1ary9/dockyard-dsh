@@ -20,6 +20,7 @@ export function createAntigravityModule({ driver = {} } = {}) {
 
 export {
   AntigravityOfficialCliDriver,
+  AntigravityOfficialSessionDriver,
   antigravityRequestPrompt,
   createAntigravityCliExecutor,
   createAntigravityCatalogLoader,

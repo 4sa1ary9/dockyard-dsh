@@ -138,6 +138,72 @@ test("native API-key pool preserves the direct DeepSeek connection resolver", as
   host.dispose();
 });
 
+test("failover keeps the primary Key for healthy requests", async () => {
+  const values = new Map([
+    ["DEEPSEEK_KEY_A", "secret-a"],
+    ["DEEPSEEK_KEY_B", "secret-b"],
+  ]);
+  const { ctx, llm, stateStore } = createMemoryHost({
+    providerId: "deepseek-official",
+    profile: { apiKeyEnv: "DEEPSEEK_KEY_A" },
+    adapterConfig: {
+      options: () => ({ apiKeyEnv: "DEEPSEEK_KEY_A" }),
+      resolveUserId: () => "test-user",
+      async resolveApiKey(connection) {
+        return values.get(connection.apiKeyEnv);
+      },
+    },
+    values,
+  });
+  const host = new NativeKeyPoolHost(ctx, { stateStore });
+  await host.start();
+  await host.register("deepseek-official", "DEEPSEEK_KEY_B", "备用 Key");
+  await host.setPolicy("deepseek-official", "failover");
+
+  const wrapped = llm.adapters.get("deepseek-official").adapter.config.resolveApiKey;
+  // Failover must pin healthy requests to the primary Key instead of rotating
+  // through the pool on every call (round_robin behaviour).
+  assert.equal(await wrapped({ apiKeyEnv: "DEEPSEEK_KEY_A" }), "secret-a");
+  assert.equal(await wrapped({ apiKeyEnv: "DEEPSEEK_KEY_A" }), "secret-a");
+  assert.equal(await wrapped({ apiKeyEnv: "DEEPSEEK_KEY_A" }), "secret-a");
+  host.dispose();
+});
+
+test("failover retries a retryable stream exception before visible output", async () => {
+  const values = new Map([
+    ["DEEPSEEK_KEY_A", "secret-a"],
+    ["DEEPSEEK_KEY_B", "secret-b"],
+  ]);
+  const { ctx, stateStore } = createMemoryHost({
+    providerId: "deepseek",
+    profile: { apiKeyEnv: "DEEPSEEK_KEY_A" },
+    adapterConfig: { async resolveApiKey(_provider, profile) { return values.get(profile.apiKeyEnv); } },
+    values,
+  });
+  const host = new NativeKeyPoolHost(ctx, { stateStore });
+  await host.start();
+  await host.register("deepseek", "DEEPSEEK_KEY_B", "备用 Key");
+  await host.setPolicy("deepseek", "failover");
+
+  let calls = 0;
+  const chunks = [];
+  for await (const chunk of host.stream({ provider: "deepseek" }, () => (async function* () {
+    calls += 1;
+    if (calls === 1) {
+      const error = new Error("quota exhausted");
+      error.rateLimited = true;
+      throw error;
+    }
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "text-delta", index: 0, text: "ok" };
+    yield { type: "finish", reason: { kind: "stop" } };
+  })())) chunks.push(chunk);
+
+  assert.equal(calls, 2);
+  assert.equal(chunks.find((chunk) => chunk.type === "text-delta")?.text, "ok");
+  host.dispose();
+});
+
 test("failover drops a failed partial stream before trying the next Key", async () => {
   const values = new Map([
     ["DEEPSEEK_KEY_A", "secret-a"],

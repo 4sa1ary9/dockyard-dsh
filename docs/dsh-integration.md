@@ -9,7 +9,7 @@ DSH GenerateOptions
   -> Dockyard DSH adapter
   -> AccountPool policy
   -> provider module
-  -> provider-native OAuth transport
+  -> provider-native request transport (after browser OAuth import)
 ```
 
 The native command surface is:
@@ -25,13 +25,13 @@ The native command surface is:
 /dockyard use <provider> <accountId>
 ```
 
-`/dockyard login` runs the provider-owned official OAuth command. Codex uses an isolated temporary profile; Grok uses the official CLI's real `GROK_HOME` profile so the CLI's completed OAuth state is imported from its normal `auth.json`; Claude uses `claude auth login --claudeai`; Cursor uses `cursor-agent login` when that CLI is installed, or reads the active OAuth session from the official Cursor.app when it is not. Completed states are imported into macOS Keychain or the provider's official session store and the account pool automatically. Antigravity has no independent official OAuth command in the installed CLI, so it is discovered from the official local session and must be logged in or switched through that official client first. The Dockyard popup then scans the current identity, shows the returned email when available, and otherwise shows a non-reversible session fingerprint before adding it to the pool.
+`/dockyard login` opens the provider's official browser authorization page and imports the completed account into the pool without requiring a local CLI. Codex, Antigravity, Grok, Claude, and Cursor use provider-verified browser flows; CLI/desktop/OAuth-file sources remain compatibility or scan fallbacks. Claude can request a manual authorization-code paste when its official hosted callback does not return to localhost. The GUI Login/Add action always starts a new browser flow, even when accounts already exist, instead of silently re-importing the active account. Use `/dockyard scan` plus `/dockyard add` only when importing an existing local session. Completed credentials are written to macOS Keychain and only opaque references reach the account pool or page state.
 
 `/dockyard status` reports `quota.updatedAt` for quota freshness and separately reports OAuth token refresh fields. The background refresh interval is configurable with `DOCKYARD_DSH_REFRESH_INTERVAL_MS`.
 
-The Codex module uses the locally imported OAuth account and the native Codex Responses transport when the DSH pi-ai dependencies are present. Antigravity exposes official CLI discovery, quota, credits, and live model catalog, while generation uses the provider's native Gemini `streamGenerateContent?alt=sse` transport. Claude, Cursor, and Grok use their provider-native streaming adapters. Claude/Cursor quota is only shown when their status output contains real windows; Grok's public CLI currently has no dependable subscription quota JSON, so Dockyard leaves that field unknown.
+The Codex module uses the locally imported OAuth account and the native Codex Responses transport when the DSH pi-ai dependencies are present. Antigravity exposes official session discovery, quota, credits, and live model catalog, while generation uses the provider's native Gemini `streamGenerateContent?alt=sse` transport. Claude, Cursor, and Grok use their provider-native streaming adapters. Cursor browser accounts resolve identity through Cursor's official AuthService and load the account model catalog through its official AvailableModels RPC; the CLI remains a compatibility fallback. Claude/Cursor quota is only shown when their official session status contains real windows; Grok's public provider surface currently has no dependable subscription quota JSON, so Dockyard leaves that field unknown.
 
-Claude and Cursor account records are deliberately marked as active official sessions: their official CLIs or desktop clients expose the current keychain/session, not a portable multi-account credential import API. The runtime therefore refuses to send a stored stale descriptor as if it were another account. Re-authorize the desired account in the official environment, then use `/dockyard scan <provider>` and `/dockyard add <provider>`.
+Browser-imported accounts are stored as provider-owned official OAuth sessions with opaque credential references. Refresh tokens remain in secure storage so providers with refresh support can renew short-lived access tokens after a DSH/computer restart; provider revocation or protocol changes still require reauthorization. Scanning an existing desktop/CLI session is separate from browser Add, and an existing account never causes Add to re-import the current active session. Provider changes to OAuth endpoints or token fields are treated as unavailable/degraded until verified.
 
 ## Isolated local profile test
 
@@ -43,14 +43,3 @@ DSH_HOME=/tmp/dockyard-dsh-home dsh --profile dockyard-test
 ```
 
 The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.0` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.
-
-The local visual host is optional and independent:
-
-```sh
-cd "/Users/aitabby/projects/Dockyard DSH"
-DOCKYARD_DSH_OPEN=1 npm run dev
-```
-
-Open `http://127.0.0.1:8787/` only when a visual diagnostic surface is useful. It calls the same Dockyard runtime and is not required for adding accounts, switching accounts, refreshing quotas, or selecting models.
-
-The local page binds to loopback by default. Non-loopback binding is refused unless both `DOCKYARD_DSH_ALLOW_REMOTE=1` and `DOCKYARD_DSH_REMOTE_TOKEN` are set; remote API calls must send `Authorization: Bearer <token>`. Put remote access behind HTTPS or a trusted tunnel because the built-in page server is HTTP-only.

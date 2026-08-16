@@ -125,11 +125,14 @@ export async function buildGrokRequest(request = {}, context = {}) {
 
 async function* streamGrokResponse(response) {
   let text = "";
-  let textClosed = false;
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
   let usage = null;
   let stop = "stop";
+  let reasoning = null;
   const tools = new Map();
-  yield { type: "block-start", index: 0, blockType: "text" };
+  yield { type: "block-start", index: textIndex, blockType: "text" };
 
   for await (const event of readSseEvents(response)) {
     const payload = event.data;
@@ -147,20 +150,46 @@ async function* streamGrokResponse(response) {
     const delta = choice.delta ?? {};
     const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
     if (content) {
+      if (reasoning) {
+        yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+        reasoning = null;
+      }
+      if (!textOpen) {
+        textIndex = nextIndex++;
+        text = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+      }
       text += content;
-      yield { type: "text-delta", index: 0, text: content };
+      yield { type: "text-delta", index: textIndex, text: content };
     }
-    const reasoning = delta.reasoning_content ?? delta.reasoningContent;
-    if (reasoning) yield { type: "reasoning-delta", index: 1, text: String(reasoning) };
+    const reasoningDelta = delta.reasoning_content ?? delta.reasoningContent;
+    if (reasoningDelta) {
+      if (textOpen) {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+        textOpen = false;
+      }
+      if (!reasoning) {
+        reasoning = { index: nextIndex++, text: "" };
+        yield { type: "block-start", index: reasoning.index, blockType: "reasoning" };
+      }
+      const value = String(reasoningDelta);
+      reasoning.text += value;
+      yield { type: "reasoning-delta", index: reasoning.index, text: value };
+    }
     for (const call of Array.isArray(delta.tool_calls) ? delta.tool_calls : []) {
       const key = Number(call.index ?? tools.size);
       if (!tools.has(key)) {
-        if (!textClosed) {
-          yield { type: "block-end", index: 0, block: { type: "text", text } };
-          textClosed = true;
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text } };
+          textOpen = false;
         }
         const state = {
-          index: key + 1,
+          index: nextIndex++,
           id: firstString(call.id, `tool-${key}`),
           name: firstString(call.function?.name, call.name, "tool"),
           arguments: "",
@@ -178,7 +207,8 @@ async function* streamGrokResponse(response) {
       }
     }
   }
-  if (!textClosed) yield { type: "block-end", index: 0, block: { type: "text", text } };
+  if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text } };
   for (const state of tools.values()) {
     yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" } };
   }

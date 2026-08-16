@@ -10,7 +10,11 @@ import { createClaudeNativeExecutor } from "../modules/provider-claude/src/index
 import { createGrokNativeExecutor } from "../modules/provider-grok/src/index.mjs";
 import { createCursorNativeExecutor } from "../modules/provider-cursor/src/index.mjs";
 import { bytesField, frameConnectMessage, stringField } from "../modules/provider-cursor/src/native-protocol.mjs";
-import { validateNativeEndpoint } from "../packages/providers/src/native-transport.mjs";
+import {
+  fetchNativeResponse,
+  readSseEvents,
+  validateNativeEndpoint,
+} from "../packages/providers/src/native-transport.mjs";
 
 function responseFor(events) {
   const payload = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
@@ -30,7 +34,7 @@ async function collect(stream) {
 }
 
 test("native transports reject plaintext remote endpoints before attaching credentials", () => {
-  assert.equal(validateNativeEndpoint("http://127.0.0.1:8787", { providerId: "test" }), "http://127.0.0.1:8787/");
+  assert.equal(validateNativeEndpoint("http://127.0.0.1:3000", { providerId: "test" }), "http://127.0.0.1:3000/");
   assert.throws(
     () => validateNativeEndpoint("http://provider.test/v1", { providerId: "test" }),
     /must use HTTPS/,
@@ -42,6 +46,47 @@ test("native transports reject plaintext remote endpoints before attaching crede
   assert.throws(
     () => createGrokNativeExecutor({ endpoint: "http://provider.test/v1/chat/completions" }),
     /must use HTTPS/,
+  );
+});
+
+test("native SSE timeout remains active while the response body is stalled", async () => {
+  let signal;
+  const response = await fetchNativeResponse("https://provider.test/stream", {
+    method: "GET",
+  }, {
+    providerId: "test-provider",
+    timeoutMs: 15,
+    fetchImpl: async (_url, init) => {
+      signal = init.signal;
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader() {
+            return {
+              read() {
+                return new Promise((_, reject) => {
+                  signal.addEventListener("abort", () => {
+                    const error = new Error("aborted");
+                    error.name = "AbortError";
+                    reject(error);
+                  }, { once: true });
+                });
+              },
+              releaseLock() {},
+            };
+          },
+        },
+      };
+    },
+  });
+  await assert.rejects(
+    (async () => {
+      for await (const _event of readSseEvents(response)) {
+        // The stalled body should be aborted by the native deadline.
+      }
+    })(),
+    (error) => error.code === "ETIMEDOUT",
   );
 });
 
@@ -71,6 +116,49 @@ test("Claude native transport posts Anthropic Messages and streams the first tex
   assert.deepEqual(chunks.find((chunk) => chunk.type === "usage")?.usage, { inputTokens: 2, outputTokens: 3 });
 });
 
+test("native transports frame reasoning blocks with matching start and end events", async () => {
+  const claude = createClaudeNativeExecutor({
+    endpoint: "https://anthropic.test/v1/messages",
+    tokenResolver: async () => ({ token: "oauth-token", kind: "oauth" }),
+    fetchImpl: async () => responseFor([
+      { type: "content_block_start", index: 0, content_block: { type: "thinking" } },
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "think" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "content_block_start", index: 1, content_block: { type: "text" } },
+      { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "answer" } },
+    ]),
+  });
+  const claudeChunks = await collect(await claude({ request: { model: "claude", messages: [{ role: "user", content: "hi" }] } }));
+  const claudeReasoning = claudeChunks.filter((chunk) => chunk.index === 1 && ["block-start", "reasoning-delta", "block-end"].includes(chunk.type));
+  assert.deepEqual(claudeReasoning.map((chunk) => chunk.type), ["block-start", "reasoning-delta", "block-end"]);
+
+  const grok = createGrokNativeExecutor({
+    endpoint: "https://grok.test/v1/chat/completions",
+    fetchImpl: async () => responseFor([
+      { choices: [{ delta: { reasoning_content: "think" } }] },
+      { choices: [{ delta: { content: "answer" }, finish_reason: "stop" }] },
+       { usage: { prompt_tokens: 4, completion_tokens: 5, total_tokens: 9 } },
+    ]),
+  });
+  const grokChunks = await collect(await grok({ request: { model: "grok", messages: [{ role: "user", content: "hi" }] }, credential: { access: "token" } }));
+  const grokReasoning = grokChunks.filter((chunk) => chunk.index === 1 && ["block-start", "reasoning-delta", "block-end"].includes(chunk.type));
+  assert.deepEqual(grokReasoning.map((chunk) => chunk.type), ["block-start", "reasoning-delta", "block-end"]);
+  assert.deepEqual(grokChunks.find((chunk) => chunk.type === "usage")?.usage, { inputTokens: 4, outputTokens: 5, totalTokens: 9 });
+
+  const antigravity = createAntigravityNativeExecutor({
+    endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
+    tokenResolver: () => ({ token: "token" }),
+    fetchImpl: async () => responseFor([
+      { candidates: [{ content: { parts: [{ text: "think", thought: true }] } }] },
+      { candidates: [{ content: { parts: [{ text: "answer" }] }, finishReason: "STOP" }] },
+       { usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 5, totalTokenCount: 17, cachedContentTokenCount: 3 } },
+    ]),
+  });
+  const antigravityChunks = await collect(await antigravity({ request: { model: "gemini", messages: [{ role: "user", content: "hi" }] } }));
+  const antigravityReasoning = antigravityChunks.filter((chunk) => chunk.index === 1 && ["block-start", "reasoning-delta", "block-end"].includes(chunk.type));
+  assert.deepEqual(antigravityReasoning.map((chunk) => chunk.type), ["block-start", "reasoning-delta", "block-end"]);
+});
+
 test("Antigravity native transport uses streamGenerateContent SSE", async () => {
   let call;
   const executor = createAntigravityNativeExecutor({
@@ -78,7 +166,10 @@ test("Antigravity native transport uses streamGenerateContent SSE", async () => 
     tokenResolver: () => ({ token: "google-token", kind: "oauth" }),
     fetchImpl: async (url, init) => {
       call = { url, init };
-      return responseFor([{ candidates: [{ content: { parts: [{ text: "fast" }] } }] }]);
+      return responseFor([
+        { candidates: [{ content: { parts: [{ text: "fast" }] } }] },
+        { usageMetadata: { promptTokenCount: 12, candidatesTokenCount: 5, totalTokenCount: 17, cachedContentTokenCount: 3 } },
+      ]);
     },
   });
   const chunks = await collect(await executor({
@@ -94,6 +185,12 @@ test("Antigravity native transport uses streamGenerateContent SSE", async () => 
   assert.deepEqual(body.request.generationConfig, { temperature: 0.7, maxOutputTokens: 4096 });
   assert.equal(body.request.generationConfig.thinkingConfig, undefined);
   assert.equal(chunks.find((chunk) => chunk.type === "text-delta")?.text, "fast");
+  assert.deepEqual(chunks.find((chunk) => chunk.type === "usage")?.usage, {
+    inputTokens: 12,
+    outputTokens: 5,
+    totalTokens: 17,
+    cacheReadTokens: 3,
+  });
 });
 
 test("Antigravity native transport resolves a Code Assist project per selected account", async () => {
@@ -234,6 +331,7 @@ test("Cursor native transport opens AgentService over HTTP/2 Connect frames", as
             stream.emit("response", { ":status": 200 });
             const interactionUpdate = bytesField(1, stringField(1, "cursor"));
             stream.emit("data", Buffer.from(frameConnectMessage(bytesField(1, interactionUpdate))));
+             stream.emit("data", Buffer.from(frameConnectMessage(new Uint8Array(), 0x02)));
             stream.emit("end");
           });
         };
@@ -253,4 +351,132 @@ test("Cursor native transport opens AgentService over HTTP/2 Connect frames", as
   assert.ok(written);
   assert.equal(chunks.find((chunk) => chunk.type === "text-delta")?.text, "cursor");
   assert.equal(chunks.at(-1).type, "finish");
+});
+
+test("Cursor native transport preserves text across split Connect frames", async () => {
+  const textFrame = frameConnectMessage(bytesField(1, bytesField(1, stringField(1, "split"))));
+  const completeFrame = frameConnectMessage(new Uint8Array(), 0x02);
+  const bytes = Buffer.concat([Buffer.from(textFrame), Buffer.from(completeFrame)]);
+  const fakeHttp2 = {
+    constants: { NGHTTP2_CANCEL: 8 },
+    connect() {
+      const session = new EventEmitter();
+      session.closed = false;
+      session.destroyed = false;
+      session.close = () => { session.closed = true; };
+      session.request = () => {
+        const stream = new EventEmitter();
+        stream.destroyed = false;
+        stream.closed = false;
+        stream.write = () => {
+          setImmediate(() => {
+            stream.emit("response", { ":status": 200 });
+            for (let index = 0; index < bytes.length; index += 1) {
+              stream.emit("data", bytes.subarray(index, index + 1));
+            }
+            stream.emit("end");
+          });
+        };
+        stream.close = () => { stream.closed = true; };
+        return stream;
+      };
+      return session;
+    },
+  };
+  const executor = createCursorNativeExecutor({
+    tokenResolver: () => ({ token: "cursor-oauth", kind: "oauth" }),
+    http2Module: fakeHttp2,
+  });
+  const chunks = await collect(await executor({
+    request: { model: "composer-2.5", requestId: "request-split", messages: [{ role: "user", content: "Hi" }] },
+  }));
+  assert.equal(chunks.find((chunk) => chunk.type === "text-delta")?.text, "split");
+  assert.equal(chunks.at(-1).type, "finish");
+});
+
+test("Cursor native transport rejects a truncated Connect frame", async () => {
+  const frame = frameConnectMessage(bytesField(1, bytesField(1, stringField(1, "truncated"))));
+  const truncated = frame.slice(0, frame.length - 1);
+  const fakeHttp2 = {
+    constants: { NGHTTP2_CANCEL: 8 },
+    connect() {
+      const session = new EventEmitter();
+      session.closed = false;
+      session.destroyed = false;
+      session.close = () => { session.closed = true; };
+      session.request = () => {
+        const stream = new EventEmitter();
+        stream.destroyed = false;
+        stream.closed = false;
+        stream.write = () => {
+          setImmediate(() => {
+            stream.emit("response", { ":status": 200 });
+            stream.emit("data", Buffer.from(truncated));
+            stream.emit("end");
+          });
+        };
+        stream.close = () => { stream.closed = true; };
+        return stream;
+      };
+      return session;
+    },
+  };
+  const executor = createCursorNativeExecutor({
+    tokenResolver: () => ({ token: "cursor-oauth", kind: "oauth" }),
+    http2Module: fakeHttp2,
+  });
+  await assert.rejects(
+    collect(await executor({
+      request: { model: "composer-2.5", requestId: "request-truncated", messages: [{ role: "user", content: "Hi" }] },
+    })),
+    (error) => {
+      assert.equal(error.code, "CURSOR_INCOMPLETE_RESPONSE");
+      assert.equal(error.cursorDiagnostics.at(-1).incomplete, true);
+      return true;
+    },
+  );
+});
+
+test("Cursor native transport rejects a completed turn with no assistant text", async () => {
+  const fakeHttp2 = {
+    constants: { NGHTTP2_CANCEL: 8 },
+    connect() {
+      const session = new EventEmitter();
+      session.closed = false;
+      session.destroyed = false;
+      session.close = () => { session.closed = true; };
+      session.request = () => {
+        const stream = new EventEmitter();
+        stream.destroyed = false;
+        stream.closed = false;
+        stream.write = () => {
+          setImmediate(() => {
+            stream.emit("response", { ":status": 200 });
+            stream.emit("data", Buffer.from(frameConnectMessage(bytesField(2, stringField(1, "ignored")))));
+            stream.emit("data", Buffer.from(frameConnectMessage(new Uint8Array(), 0x02)));
+            stream.emit("end");
+          });
+        };
+        stream.close = () => { stream.closed = true; };
+        return stream;
+      };
+      return session;
+    },
+  };
+  const executor = createCursorNativeExecutor({
+    tokenResolver: () => ({ token: "cursor-oauth", kind: "oauth" }),
+    http2Module: fakeHttp2,
+  });
+  await assert.rejects(
+    collect(await executor({
+      request: { model: "composer-2.5", requestId: "request-empty", messages: [{ role: "user", content: "Hi" }] },
+    })),
+    (error) => {
+      assert.equal(error.code, "CURSOR_EMPTY_RESPONSE");
+      assert.match(error.message, /completed without assistant text/);
+      assert.deepEqual(error.cursorDiagnostics[0].fieldPaths.map((field) => field.path), ["2", "2.1"]);
+      assert.equal(error.cursorDiagnostics[0].flags, 0);
+      return true;
+    },
+  );
 });

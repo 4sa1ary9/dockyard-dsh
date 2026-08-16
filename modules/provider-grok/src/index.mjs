@@ -25,6 +25,7 @@ export {
   createGrokDriver,
   grokRequestPromptBlocks,
   parseGrokAuth,
+  parseGrokCreditsConfig,
   parseGrokModelCatalog,
   summarizeGrokCandidate,
 } from "./driver.mjs";
