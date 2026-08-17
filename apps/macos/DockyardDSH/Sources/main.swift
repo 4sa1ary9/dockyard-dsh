@@ -33,6 +33,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: """
+            (() => {
+              document.addEventListener(\"mousedown\", (event) => {
+                const element = event.target instanceof Element ? event.target.closest('[role=\"menuitem\"], [role=\"menuitemradio\"]') : null;
+                if (element) event.preventDefault();
+              }, true);
+            })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -94,11 +106,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         if webView === oauthWebView,
            let url = navigationAction.request.url,
            url.scheme?.lowercased() == "http" || url.scheme?.lowercased() == "https" {
-            openAuthorizationURL(url)
-            oauthWindow?.close()
+            let popupWindow = oauthWindow
             oauthWindow = nil
             oauthWebView = nil
             decisionHandler(.cancel)
+            DispatchQueue.main.async { [weak self] in
+                self?.openAuthorizationURL(url)
+                popupWindow?.close()
+            }
             return
         }
         decisionHandler(.allow)
