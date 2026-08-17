@@ -1,10 +1,10 @@
 # Dockyard DSH
 
-**A macOS-only account-pool and native provider plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).**
+**A native account-pool and provider plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`).**
 
 [中文](#中文) · [English](#english)
 
-> **Current status / 当前状态:** Developer preview · **macOS DMG available** · Windows EXE is in active development and is not released or verified yet.
+> **Current status / 当前状态:** Developer preview · **macOS DMG available** · **Windows EXE built; upload in progress.**
 
 ## 中文
 
@@ -31,9 +31,9 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - 读取 provider 返回的实时模型目录、推理档位、套餐和额度窗口。
 - 所有命令、模型选择和 LLM 生成都读取同一个 Dockyard runtime，不维护第二套账号池或额度缓存。
 
-### 平台支持：macOS 已发布，Windows 开发中
+### 平台支持：macOS 已发布，Windows 构建完成
 
-**当前发布版本支持 macOS；Windows EXE 正在制作中，尚未发布或完成完整验证。**
+**当前发布版本已提供 macOS DMG；Windows EXE 已完成构建，正在上传到 v0.1.1 Release。**
 
 macOS 完整功能依赖以下原生能力：
 
@@ -41,7 +41,7 @@ macOS 完整功能依赖以下原生能力：
 - 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
 - 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
 
-Windows 版本正在补齐 credential store、原生 OAuth 启动器、EXE 打包和真实 E2E 验证。
+Windows 版本已完成 EXE 构建，当前正在上传到 v0.1.1 Release；上传完成后再进行发布页下载验证。
 
 ### macOS 独立应用与 DMG
 
@@ -196,7 +196,7 @@ tests/                      安全、生命周期、provider 和 runtime 测试
 - DSH 本身仍处于 developer preview，上游可能发生 breaking changes。
 - provider 的官方 CLI、客户端路径、OAuth 返回字段和额度接口都可能变化；Dockyard 对缺失字段保持未知。
 - 浏览器 OAuth 多账号依赖 provider 官方授权页和 token response；如果 provider 暂停或改变该流程，必须重新验证 endpoint，而不是猜测协议。
-- Windows 当前不支持；请勿把本版本用于 Windows 生产环境。
+- Windows EXE 已完成构建但仍在上传和验证中；在发布页出现并完成验证前，请勿用于 Windows 生产环境。
 
 ## English
 
@@ -223,9 +223,9 @@ When an official client, CLI, or OAuth source is missing or not signed in, Docky
 - Read live provider model catalogs, reasoning tiers, plans, and quota windows.
 - Keep commands, model selection, and generation on the same Dockyard runtime and source of truth.
 
-### Platform support: macOS released, Windows in development
+### Platform support: macOS released, Windows build complete
 
-**The current release supports macOS. A Windows EXE is in active development and is not released or fully verified yet.**
+**The current release includes the macOS DMG. The Windows EXE is built and is being uploaded to the v0.1.1 release.**
 
 The macOS integration depends on native behavior:
 
@@ -233,7 +233,7 @@ The macOS integration depends on native behavior:
 - Browser OAuth is opened by the DSH GUI and uses PKCE, state validation, loopback callbacks, or manual-code entry; the official CLI is only a fallback.
 - Scan mode still reads macOS desktop or local CLI session state for providers that expose it.
 
-The Windows version is being completed with a credential store, native OAuth launcher, EXE packaging, and real E2E validation.
+The Windows EXE build is complete and is currently being uploaded to the v0.1.1 release; download verification will follow after the upload finishes.
 
 ### Standalone macOS app and DMG
 
@@ -382,4 +382,4 @@ The core rule is simple: provider-specific logic stays in provider modules, acco
 - DeepSeek Harness is still a developer preview and may introduce breaking changes.
 - Official provider CLIs, desktop paths, OAuth fields, and quota APIs can change; missing fields remain unknown.
 - Browser account-pool behavior depends on each provider's official OAuth page and token response; endpoint changes require re-verification rather than guessed protocol fields.
-- Windows is not supported in this release.
+- The Windows EXE is built but is still being uploaded and verified; do not use it for production until the release asset is available and verified.
