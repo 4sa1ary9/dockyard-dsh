@@ -3460,14 +3460,29 @@ function hash2(value) {
 var EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 function normalizeEmail(value) {
   const email = String(value ?? "").trim();
-  return EMAIL_PATTERN.test(email) ? email : null;
+  return email.match(EMAIL_PATTERN)?.[0] ?? null;
+}
+function findEmailField(value, depth = 0, seen = /* @__PURE__ */ new Set()) {
+  if (!value || typeof value !== "object" || depth > 6 || seen.has(value)) return null;
+  seen.add(value);
+  for (const [key, nested] of Object.entries(value)) {
+    if (/email/i.test(key)) {
+      const direct = normalizeEmail(nested);
+      if (direct) return direct;
+    }
+    const child = findEmailField(nested, depth + 1, seen);
+    if (child) return child;
+  }
+  return null;
 }
 function extractAntigravityAccountEmail(...values) {
   for (const value of values) {
     const direct = normalizeEmail(
-      value?.email ?? value?.account?.email ?? value?.user?.email ?? value?.identity?.email ?? value?.command?.data?.email
+      value?.email ?? value?.account?.email ?? value?.user?.email ?? value?.identity?.email ?? value?.accountEmail ?? value?.userEmail ?? value?.email_address ?? value?.command?.data?.email ?? value?.command?.data?.email_address
     );
     if (direct) return direct;
+    const nested = findEmailField(value);
+    if (nested) return nested;
     const text2 = typeof value === "string" ? value : "";
     const explicit = text2.match(
       /(?:applyAuthResult:\s*)?email\s*=\s*([^\s,;]+)|authenticated\s+successfully\s+as\s+([^\s,;]+)/i
@@ -3511,10 +3526,18 @@ function cliFailure2(code, signal, output, errorOutput) {
   error.detail = String(errorOutput || structuredDetail || "").replace(/\s+/g, " ").trim().slice(0, 300);
   return error;
 }
-function runCommand(command, args, { env = process.env, timeoutMs = 3e4, signal } = {}) {
+function runCommand(command, args, {
+  env = process.env,
+  timeoutMs = 3e4,
+  signal,
+  includeAccountInfo = false
+} = {}) {
   return new Promise((resolve2, reject) => {
+    const childEnv = { ...env };
+    if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
+    else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
     const child = spawn4(command, args, {
-      env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: env.AGY_CLI_HIDE_ACCOUNT_INFO ?? "1" },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       ...signal ? { signal } : {}
@@ -3891,7 +3914,8 @@ function candidate(now, {
   sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI
 } = {}) {
   const normalizedEmail = normalizeEmail(email);
-  const fingerprint = sessionFingerprint(session);
+  const capturedSession = normalizedEmail && session && !session.email ? { ...session, email: normalizedEmail } : session;
+  const fingerprint = sessionFingerprint(capturedSession);
   const stableAccountId = normalizedEmail ? `antigravity:google:${hash2(`email:${normalizedEmail.toLowerCase()}`).slice(0, 20)}` : fingerprint ? `antigravity:session:${hash2(`fingerprint:${fingerprint}`).slice(0, 20)}` : "antigravity:active";
   const known = existingAccounts.find((account) => fingerprint && account?.resources?.sessionFingerprint === fingerprint || sameEmail(account?.email, normalizedEmail));
   const legacy = existingAccounts.find((account) => account?.accountId === "antigravity:active");
@@ -3908,10 +3932,10 @@ function candidate(now, {
     email: normalizedEmail,
     subscription: { plan: null, status: null, expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: session?.expiresAt ?? null,
+      accessTokenExpiresAt: capturedSession?.expiresAt ?? null,
       nextRefreshAt: null,
-      lastRefreshedAt: session?.lastRefreshedAt ?? null,
-      refreshable: session?.refreshToken ? true : null
+      lastRefreshedAt: capturedSession?.lastRefreshedAt ?? null,
+      refreshable: capturedSession?.refreshToken ? true : null
     },
     imported: false,
     status: "available",
@@ -3923,17 +3947,18 @@ function candidate(now, {
       identityLabel,
       ...fingerprint ? { sessionFingerprint: fingerprint } : {},
       identityNote: normalizedEmail ? "\u8D26\u53F7\u90AE\u7BB1\u6765\u81EA\u5B98\u65B9 Antigravity \u767B\u5F55\u6001" : fingerprint ? "\u5B98\u65B9\u767B\u5F55\u6001\u672A\u8FD4\u56DE\u90AE\u7BB1\uFF1B\u4F7F\u7528\u4F1A\u8BDD\u6307\u7EB9\u533A\u5206\u8D26\u53F7" : "\u5B98\u65B9\u53EA\u8FD4\u56DE\u5F53\u524D\u4F1A\u8BDD\uFF1B\u5207\u6362\u8D26\u53F7\u540E\u8BF7\u91CD\u65B0\u626B\u63CF",
-      sessionPersistence: session?.token ? "captured" : "active"
+      sessionPersistence: capturedSession?.token ? "captured" : "active"
     }
   };
   Object.defineProperty(value, CREDENTIAL_SLOT2, {
     value: {
       type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID3,
-      ...session?.token ? { access: session.token } : {},
-      ...session?.refreshToken ? { refresh: session.refreshToken } : {},
-      ...session?.expiresAt ? { expiresAt: session.expiresAt } : {},
-      ...session?.lastRefreshedAt ? { lastRefreshedAt: session.lastRefreshedAt } : {}
+      ...capturedSession?.token ? { access: capturedSession.token } : {},
+      ...capturedSession?.refreshToken ? { refresh: capturedSession.refreshToken } : {},
+      ...normalizedEmail ? { email: normalizedEmail } : {},
+      ...capturedSession?.expiresAt ? { expiresAt: capturedSession.expiresAt } : {},
+      ...capturedSession?.lastRefreshedAt ? { lastRefreshedAt: capturedSession.lastRefreshedAt } : {}
     },
     enumerable: false
   });
@@ -4195,6 +4220,7 @@ var AntigravityOfficialSessionDriver = class {
     this.commandRunner = commandRunner;
     this.fetchImpl = fetchImpl;
     this.browserTokenUrl = tokenUrl;
+    this.browserUserInfoUrl = userInfoUrl;
     this.browserClientId = clientId;
     this.browserClientSecret = clientSecret;
     this.requestExecutor = requestExecutor;
@@ -4286,12 +4312,28 @@ var AntigravityOfficialSessionDriver = class {
     const result = await this.commandRunner(this.cliPath, ["-p", command, "--output-format", "json"], {
       env: this.env,
       timeoutMs: this.timeoutMs,
+      includeAccountInfo: true,
       ...signal ? { signal } : {}
     });
     const parsed = parseJsonOutput2(result.output);
     return { ...result, parsed };
   }
-  async #assertActiveSession(account, signal) {
+  async #resolveSessionEmail(session, context = {}) {
+    const direct = extractAntigravityAccountEmail(session);
+    if (direct) return direct;
+    if (!session?.token || typeof this.fetchImpl !== "function" || !this.browserUserInfoUrl) return null;
+    try {
+      const response = await this.fetchImpl(this.browserUserInfoUrl, {
+        headers: { authorization: `Bearer ${session.token}` },
+        ...context.signal ? { signal: context.signal } : {}
+      });
+      if (!response?.ok) return null;
+      return extractAntigravityAccountEmail(await response.json().catch(() => null));
+    } catch {
+      return null;
+    }
+  }
+  async #assertActiveSession(account, context = {}) {
     if (!isOfficialSessionAuthKind(account?.auth?.kind)) return;
     if (account.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return;
     const expectedFingerprint = account.resources?.sessionFingerprint;
@@ -4303,7 +4345,7 @@ var AntigravityOfficialSessionDriver = class {
         throw activeSessionError("Antigravity OAuth session is unavailable; authorize again");
       }
       if (!current?.token || sessionFingerprint(current) !== expectedFingerprint) {
-        const currentEmail = current?.email;
+        const currentEmail = await this.#resolveSessionEmail(current, context);
         if (currentEmail && account.email && sameEmail(currentEmail, account.email)) return;
         throw activeSessionError(
           "Antigravity selected account is not the active local session; authorize it again",
@@ -4315,7 +4357,7 @@ var AntigravityOfficialSessionDriver = class {
     if (account.accountId === "antigravity:active" && !account.email) return;
     let result;
     try {
-      result = await this.#slash("/quota", signal);
+      result = await this.#slash("/quota", context.signal);
     } catch {
       throw activeSessionError("Antigravity active session could not be verified; authorize again");
     }
@@ -4424,7 +4466,7 @@ var AntigravityOfficialSessionDriver = class {
         result?.parsed,
         result?.output,
         result?.errorOutput
-      );
+      ) ?? await this.#resolveSessionEmail(session, context);
       const found = candidate(now, {
         email,
         session,
@@ -4520,21 +4562,24 @@ var AntigravityOfficialSessionDriver = class {
   }
   async refreshAccount(account, context = {}) {
     await this.#refreshBrowserCredential(account, context);
-    await this.#assertActiveSession(account, context.signal);
+    await this.#assertActiveSession(account, context);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     let session = null;
     try {
       session = await this.tokenResolver({ env: this.env });
     } catch {
     }
-    const fingerprint = sessionFingerprint(session);
+    const sessionEmail = await this.#resolveSessionEmail(session, context);
+    const fingerprint = sessionFingerprint(sessionEmail && session && !session.email ? { ...session, email: sessionEmail } : session);
     const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
+    const identityPatch = sessionEmail ? { email: sessionEmail } : {};
     let nativeError = null;
     try {
       const native = await this.#nativeQuota(account, context, now);
       if (native) {
         const primary2 = selectPrimaryQuotaWindow(native.windows);
         return {
+          ...identityPatch,
           quota: {
             ...primary2,
             windows: native.windows,
@@ -4568,6 +4613,7 @@ var AntigravityOfficialSessionDriver = class {
     const fallbackWindows = windows.length ? windows : parseQuotaText(result.parsed?.response ?? "", now);
     const primary = selectPrimaryQuotaWindow(fallbackWindows);
     return {
+      ...identityPatch,
       quota: {
         ...primary,
         windows: fallbackWindows,
@@ -4588,7 +4634,7 @@ var AntigravityOfficialSessionDriver = class {
     };
   }
   async getQuota(account, context = {}) {
-    await this.#assertActiveSession(account, context.signal);
+    await this.#assertActiveSession(account, context);
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     let nativeError = null;
     try {
@@ -4651,7 +4697,7 @@ var AntigravityOfficialSessionDriver = class {
   }
   async invoke(request, invocation, context = {}) {
     await this.#refreshBrowserCredential(invocation?.account, context);
-    await this.#assertActiveSession(invocation?.account, context.signal);
+    await this.#assertActiveSession(invocation?.account, context);
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");
@@ -5132,6 +5178,8 @@ var GrokOAuthDriver = class {
       access: tokens.access,
       refresh: tokens.refresh,
       accountId: tokens.accountId,
+      email: tokens.email,
+      displayName: tokens.displayName,
       expiresAt: tokens.expiresAt,
       issuer: tokens.issuer,
       clientId: tokens.clientId,
@@ -5226,7 +5274,7 @@ var GrokOAuthDriver = class {
         key: credential.access,
         ...credential.refresh ? { refresh_token: credential.refresh } : {},
         user_id: credential.accountId ?? account.accountId,
-        ...account.email ? { email: account.email } : {},
+        ...credential.email ?? account.email ? { email: credential.email ?? account.email } : {},
         ...account.subscription?.plan ? { subscription_level: account.subscription.plan } : {},
         ...credential.expiresAt ? { expires_at: credential.expiresAt } : {}
       }
@@ -5244,6 +5292,8 @@ var GrokOAuthDriver = class {
           ...prepared.credential,
           access: updated.access,
           ...updated.refresh ? { refresh: updated.refresh } : {},
+          ...updated.email ? { email: updated.email } : prepared.credential.email ? { email: prepared.credential.email } : {},
+          ...updated.displayName ? { displayName: updated.displayName } : prepared.credential.displayName ? { displayName: prepared.credential.displayName } : {},
           ...updated.expiresAt ? { expiresAt: updated.expiresAt } : {},
           accountId: updated.accountId,
           lastRefreshedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -5282,6 +5332,8 @@ var GrokOAuthDriver = class {
     if (finishError) throw finishError;
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     return {
+      ...updated?.email ? { email: updated.email } : {},
+      ...updated?.displayName ? { displayName: updated.displayName } : {},
       refresh: {
         accessTokenExpiresAt: updated?.expiresAt ?? account.refresh?.accessTokenExpiresAt ?? null,
         nextRefreshAt: null,
@@ -5309,7 +5361,7 @@ var GrokOAuthDriver = class {
     if (!response.ok) {
       const error = new Error(`Grok credits request failed (${response.status})`);
       error.status = response.status;
-      error.authExpired = response.status === 401 || response.status === 403;
+      error.quotaUnavailable = response.status === 401 || response.status === 403;
       throw error;
     }
     const parsed = parseGrokCreditsConfig(body, { now });
@@ -8447,6 +8499,7 @@ function providerAccount2(pool, accountId) {
   };
 }
 function providerErrorStatus(error) {
+  if (error?.quotaUnavailable) return "error";
   if (error?.authExpired || error?.accountMismatch) return "auth_expired";
   if (error?.authForbidden) return "error";
   if (error?.quotaExhausted) return "quota_exhausted";
@@ -8566,6 +8619,15 @@ var DockyardRuntime = class {
           try {
             const captured = await entry.module.importAccount(candidate2, providerContext(this));
             entry.pool.upsert(captured, { resetHealth: true });
+            changedProviderIds.add(currentProviderId);
+          } catch {
+          }
+        }
+        const shouldRepairGrokCredential = currentProviderId === "grok" && typeof entry.module.importAccount === "function" && (candidate2.email && !existing.email || candidate2.source && candidate2.source !== existingIdentity.authSource);
+        if (shouldRepairGrokCredential) {
+          try {
+            const repaired = await entry.module.importAccount(candidate2, providerContext(this));
+            entry.pool.upsert(repaired, { resetHealth: true });
             changedProviderIds.add(currentProviderId);
           } catch {
           }

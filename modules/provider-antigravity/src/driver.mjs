@@ -139,7 +139,21 @@ const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 
 function normalizeEmail(value) {
   const email = String(value ?? "").trim();
-  return EMAIL_PATTERN.test(email) ? email : null;
+  return email.match(EMAIL_PATTERN)?.[0] ?? null;
+}
+
+function findEmailField(value, depth = 0, seen = new Set()) {
+  if (!value || typeof value !== "object" || depth > 6 || seen.has(value)) return null;
+  seen.add(value);
+  for (const [key, nested] of Object.entries(value)) {
+    if (/email/i.test(key)) {
+      const direct = normalizeEmail(nested);
+      if (direct) return direct;
+    }
+    const child = findEmailField(nested, depth + 1, seen);
+    if (child) return child;
+  }
+  return null;
 }
 
 /**
@@ -154,9 +168,15 @@ export function extractAntigravityAccountEmail(...values) {
         ?? value?.account?.email
         ?? value?.user?.email
         ?? value?.identity?.email
-        ?? value?.command?.data?.email,
+        ?? value?.accountEmail
+        ?? value?.userEmail
+        ?? value?.email_address
+        ?? value?.command?.data?.email
+        ?? value?.command?.data?.email_address,
     );
     if (direct) return direct;
+    const nested = findEmailField(value);
+    if (nested) return nested;
     const text = typeof value === "string" ? value : "";
     const explicit = text.match(
       /(?:applyAuthResult:\s*)?email\s*=\s*([^\s,;]+)|authenticated\s+successfully\s+as\s+([^\s,;]+)/i,
@@ -221,10 +241,18 @@ function cliFailure(code, signal, output, errorOutput) {
   return error;
 }
 
-function runCommand(command, args, { env = process.env, timeoutMs = 30_000, signal } = {}) {
+function runCommand(command, args, {
+  env = process.env,
+  timeoutMs = 30_000,
+  signal,
+  includeAccountInfo = false,
+} = {}) {
   return new Promise((resolve, reject) => {
+    const childEnv = { ...env };
+    if (includeAccountInfo) delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
+    else childEnv.AGY_CLI_HIDE_ACCOUNT_INFO ??= "1";
     const child = spawn(command, args, {
-      env: { ...env, AGY_CLI_HIDE_ACCOUNT_INFO: env.AGY_CLI_HIDE_ACCOUNT_INFO ?? "1" },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       ...(signal ? { signal } : {}),
@@ -1071,7 +1099,10 @@ function candidate(now, {
   sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI,
 } = {}) {
   const normalizedEmail = normalizeEmail(email);
-  const fingerprint = sessionFingerprint(session);
+  const capturedSession = normalizedEmail && session && !session.email
+    ? { ...session, email: normalizedEmail }
+    : session;
+  const fingerprint = sessionFingerprint(capturedSession);
   const stableAccountId = normalizedEmail
     ? `antigravity:google:${hash(`email:${normalizedEmail.toLowerCase()}`).slice(0, 20)}`
     : fingerprint
@@ -1106,10 +1137,10 @@ function candidate(now, {
     email: normalizedEmail,
     subscription: { plan: null, status: null, expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: session?.expiresAt ?? null,
+      accessTokenExpiresAt: capturedSession?.expiresAt ?? null,
       nextRefreshAt: null,
-      lastRefreshedAt: session?.lastRefreshedAt ?? null,
-      refreshable: session?.refreshToken ? true : null,
+      lastRefreshedAt: capturedSession?.lastRefreshedAt ?? null,
+      refreshable: capturedSession?.refreshToken ? true : null,
     },
     imported: false,
     status: "available",
@@ -1125,17 +1156,18 @@ function candidate(now, {
         : fingerprint
           ? "官方登录态未返回邮箱；使用会话指纹区分账号"
           : "官方只返回当前会话；切换账号后请重新扫描",
-      sessionPersistence: session?.token ? "captured" : "active",
+      sessionPersistence: capturedSession?.token ? "captured" : "active",
     },
   };
   Object.defineProperty(value, CREDENTIAL_SLOT, {
     value: {
       type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID,
-      ...(session?.token ? { access: session.token } : {}),
-      ...(session?.refreshToken ? { refresh: session.refreshToken } : {}),
-      ...(session?.expiresAt ? { expiresAt: session.expiresAt } : {}),
-      ...(session?.lastRefreshedAt ? { lastRefreshedAt: session.lastRefreshedAt } : {}),
+      ...(capturedSession?.token ? { access: capturedSession.token } : {}),
+      ...(capturedSession?.refreshToken ? { refresh: capturedSession.refreshToken } : {}),
+      ...(normalizedEmail ? { email: normalizedEmail } : {}),
+      ...(capturedSession?.expiresAt ? { expiresAt: capturedSession.expiresAt } : {}),
+      ...(capturedSession?.lastRefreshedAt ? { lastRefreshedAt: capturedSession.lastRefreshedAt } : {}),
     },
     enumerable: false,
   });
@@ -1439,6 +1471,7 @@ export class AntigravityOfficialSessionDriver {
     this.commandRunner = commandRunner;
     this.fetchImpl = fetchImpl;
     this.browserTokenUrl = tokenUrl;
+    this.browserUserInfoUrl = userInfoUrl;
     this.browserClientId = clientId;
     this.browserClientSecret = clientSecret;
     this.requestExecutor = requestExecutor;
@@ -1534,13 +1567,30 @@ export class AntigravityOfficialSessionDriver {
     const result = await this.commandRunner(this.cliPath, ["-p", command, "--output-format", "json"], {
       env: this.env,
       timeoutMs: this.timeoutMs,
+      includeAccountInfo: true,
       ...(signal ? { signal } : {}),
     });
     const parsed = parseJsonOutput(result.output);
     return { ...result, parsed };
   }
 
-  async #assertActiveSession(account, signal) {
+  async #resolveSessionEmail(session, context = {}) {
+    const direct = extractAntigravityAccountEmail(session);
+    if (direct) return direct;
+    if (!session?.token || typeof this.fetchImpl !== "function" || !this.browserUserInfoUrl) return null;
+    try {
+      const response = await this.fetchImpl(this.browserUserInfoUrl, {
+        headers: { authorization: `Bearer ${session.token}` },
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+      if (!response?.ok) return null;
+      return extractAntigravityAccountEmail(await response.json().catch(() => null));
+    } catch {
+      return null;
+    }
+  }
+
+  async #assertActiveSession(account, context = {}) {
     if (!isOfficialSessionAuthKind(account?.auth?.kind)) return;
     if (account.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return;
     const expectedFingerprint = account.resources?.sessionFingerprint;
@@ -1556,7 +1606,7 @@ export class AntigravityOfficialSessionDriver {
         // fingerprint even though the local session belongs to the same
         // account. When the current session exposes a stable identity, verify
         // it against the pooled account before rejecting the request.
-        const currentEmail = current?.email;
+        const currentEmail = await this.#resolveSessionEmail(current, context);
         if (currentEmail && account.email && sameEmail(currentEmail, account.email)) return;
         throw activeSessionError(
           "Antigravity selected account is not the active local session; authorize it again",
@@ -1569,7 +1619,7 @@ export class AntigravityOfficialSessionDriver {
 
     let result;
     try {
-      result = await this.#slash("/quota", signal);
+      result = await this.#slash("/quota", context.signal);
     } catch {
       throw activeSessionError("Antigravity active session could not be verified; authorize again");
     }
@@ -1687,7 +1737,7 @@ export class AntigravityOfficialSessionDriver {
         result?.parsed,
         result?.output,
         result?.errorOutput,
-      );
+      ) ?? await this.#resolveSessionEmail(session, context);
       const found = candidate(now, {
         email,
         session,
@@ -1801,7 +1851,7 @@ export class AntigravityOfficialSessionDriver {
 
   async refreshAccount(account, context = {}) {
     await this.#refreshBrowserCredential(account, context);
-    await this.#assertActiveSession(account, context.signal);
+    await this.#assertActiveSession(account, context);
     const now = context.now instanceof Date ? context.now : new Date();
     let session = null;
     try {
@@ -1810,14 +1860,19 @@ export class AntigravityOfficialSessionDriver {
       // The fingerprint below stays absent when the local session cannot be
       // read; the account keeps its existing fingerprint.
     }
-    const fingerprint = sessionFingerprint(session);
+    const sessionEmail = await this.#resolveSessionEmail(session, context);
+    const fingerprint = sessionFingerprint(sessionEmail && session && !session.email
+      ? { ...session, email: sessionEmail }
+      : session);
     const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
+    const identityPatch = sessionEmail ? { email: sessionEmail } : {};
     let nativeError = null;
     try {
       const native = await this.#nativeQuota(account, context, now);
       if (native) {
         const primary = selectPrimaryQuotaWindow(native.windows);
         return {
+          ...identityPatch,
           quota: {
             ...primary,
             windows: native.windows,
@@ -1853,6 +1908,7 @@ export class AntigravityOfficialSessionDriver {
     const fallbackWindows = windows.length ? windows : parseQuotaText(result.parsed?.response ?? "", now);
     const primary = selectPrimaryQuotaWindow(fallbackWindows);
     return {
+      ...identityPatch,
       quota: {
         ...primary,
         windows: fallbackWindows,
@@ -1876,7 +1932,7 @@ export class AntigravityOfficialSessionDriver {
   }
 
   async getQuota(account, context = {}) {
-    await this.#assertActiveSession(account, context.signal);
+    await this.#assertActiveSession(account, context);
     const now = context.now instanceof Date ? context.now : new Date();
     let nativeError = null;
     try {
@@ -1943,7 +1999,7 @@ export class AntigravityOfficialSessionDriver {
 
   async invoke(request, invocation, context = {}) {
     await this.#refreshBrowserCredential(invocation?.account, context);
-    await this.#assertActiveSession(invocation?.account, context.signal);
+    await this.#assertActiveSession(invocation?.account, context);
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");

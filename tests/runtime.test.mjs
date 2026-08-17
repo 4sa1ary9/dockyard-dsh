@@ -157,6 +157,76 @@ test("runtime upgrades a legacy discovered session without exposing its credenti
   }
 });
 
+test("runtime repairs a Grok account from the durable local OAuth source", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-grok-repair-"));
+  const secretStore = new MemorySecretStore();
+  let imports = 0;
+  try {
+    const stateStore = new JsonStateStore({ home });
+    await stateStore.save({
+      pools: {
+        grok: {
+          accounts: [{
+            providerId: "grok",
+            accountId: "grok-account",
+            auth: { kind: "oauth", credentialRef: "keychain://grok-account", scopes: [] },
+            displayName: "grok-account",
+            email: null,
+            resources: { authSource: "official_grok_browser_oauth", sessionSource: "browser" },
+          }],
+        },
+      },
+    });
+    const module = {
+      manifest: { id: "grok", kind: "provider", displayName: "Grok" },
+      async activate(context) { context.registerService("provider:grok", this); },
+      async discover() {
+        return {
+          candidates: [{
+            providerId: "grok",
+            candidateId: "grok:candidate",
+            source: "official_grok_oauth",
+            accountId: "grok-account",
+            displayName: "grok@example.test",
+            email: "grok@example.test",
+            resources: { authSource: "official_grok_oauth", sessionSource: "oauth_file" },
+          }],
+        };
+      },
+      async importAccount(candidate, context) {
+        imports += 1;
+        await context.secretStore.write("keychain://grok-account", { access: "fresh-grok-token", email: candidate.email });
+        return {
+          providerId: "grok",
+          accountId: candidate.accountId,
+          credentialRef: "keychain://grok-account",
+          displayName: candidate.displayName,
+          email: candidate.email,
+          resources: candidate.resources,
+        };
+      },
+      async refreshAccount() { return {}; },
+      async getQuota() { return {}; },
+      async getCatalog() { return { models: [] }; },
+      async invoke() { return {}; },
+    };
+    const runtime = new DockyardRuntime({
+      providers: [{ module }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore,
+    });
+    await runtime.scan("grok");
+    const account = runtime.snapshot().providers[0].accounts[0];
+    assert.equal(imports, 1);
+    assert.equal(account.email, "grok@example.test");
+    assert.equal(account.resources.authSource, "official_grok_oauth");
+    assert.equal((await secretStore.read("keychain://grok-account")).access, "fresh-grok-token");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("runtime passes only the opaque credential reference to provider operations", async () => {
   const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-provider-"));
   const seen = [];
@@ -365,6 +435,50 @@ test("runtime does not infer account health from a separate credits field", asyn
     assert.equal(account.resources.credits.remaining, 0);
     assert.equal(account.health.status, "healthy");
     assert.equal(account.health.lastError, null);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("runtime keeps OAuth usable when an optional quota surface rejects auth", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-quota-surface-"));
+  try {
+    const stateStore = new JsonStateStore({ home });
+    await stateStore.save({
+      pools: {
+        "test-provider": {
+          accounts: [{
+            providerId: "test-provider",
+            accountId: "account-a",
+            auth: { kind: "oauth", credentialRef: "keychain://account-a", scopes: [] },
+          }],
+        },
+      },
+    });
+    const module = {
+      manifest: { id: "test-provider", kind: "provider", displayName: "Test provider" },
+      async activate(context) { context.registerService("provider:test-provider", this); },
+      async refreshAccount() { return {}; },
+      async getQuota() {
+        const error = new Error("optional quota surface rejected the request");
+        error.quotaUnavailable = true;
+        throw error;
+      },
+      async discover() { return { candidates: [] }; },
+      async importAccount() { throw new Error("not used"); },
+      async getCatalog() { return { models: [] }; },
+      async invoke() { return {}; },
+    };
+    const runtime = new DockyardRuntime({
+      providers: [{ module }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore: new MemorySecretStore(),
+    });
+    await assert.rejects(() => runtime.refreshAccount("test-provider", "account-a"));
+    const account = runtime.snapshot().providers[0].accounts[0];
+    assert.equal(account.health.status, "degraded");
+    assert.equal(account.health.lastError, "刷新实时额度失败：optional quota surface rejected the request");
   } finally {
     await rm(home, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 {
   "name": "@dockyard-dsh/plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A macOS-only native account-pool and provider plugin for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",

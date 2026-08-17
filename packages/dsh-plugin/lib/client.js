@@ -7681,8 +7681,8 @@ function ko_default() {
 }
 
 // packages/dsh-plugin/node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/locales/lt.js
-var capitalizeFirstCharacter = (text) => {
-  return text.charAt(0).toUpperCase() + text.slice(1);
+var capitalizeFirstCharacter = (text2) => {
+  return text2.charAt(0).toUpperCase() + text2.slice(1);
 };
 function getUnitTypeFromNumber(number4) {
   const abs = Math.abs(number4);
@@ -14676,6 +14676,374 @@ var TYPERT_REMOTE = {
   descriptors: TYPERT_DESCRIPTORS
 };
 
+// packages/dsh-plugin/src/dockyard-locale.mjs
+var DOCKYARD_LOCALE_NS = "dockyard";
+var DOCKYARD_LOCALES = Object.freeze({
+  zh: Object.freeze({
+    "policy.manual": "\u624B\u52A8\u9009\u62E9",
+    "policy.sticky_session": "\u4F1A\u8BDD\u7C98\u6EDE",
+    "policy.round_robin": "\u8D26\u53F7\u8F6E\u8BE2",
+    "policy.failover": "\u5931\u8D25\u8F6C\u79FB",
+    "nativePolicy.manual": "\u624B\u52A8\u9009\u62E9 Key",
+    "nativePolicy.round_robin": "\u591A Key \u8F6E\u8BE2",
+    "nativePolicy.failover": "\u5931\u8D25\u8F6C\u79FB",
+    "eyebrow.keyProvider": "DOCKYARD KEY PROVIDER",
+    "eyebrow.subscriptions": "DOCKYARD SUBSCRIPTIONS",
+    "eyebrow.subscription": "DOCKYARD SUBSCRIPTION",
+    "title.subscriptionManagement": "\u8BA2\u9605\u7BA1\u7406",
+    "subtitle.subscriptionManagement": "\u9009\u62E9\u4E00\u4E2A\u5382\u5546\uFF0C\u8FDB\u5165\u767B\u5F55\u3001\u8D26\u53F7\u548C\u989D\u5EA6\u914D\u7F6E",
+    "title.noModel": "\u672A\u9009\u62E9\u6A21\u578B",
+    "title.key": "Key",
+    "status.noConnectedAccounts": "\u6CA1\u6709\u5DF2\u8FDE\u63A5\u8D26\u53F7\u9700\u8981\u5237\u65B0\u3002",
+    "status.refreshedAccounts": "\u5DF2\u5237\u65B0 {count} \u4E2A\u8D26\u53F7\uFF0C\u989D\u5EA6\u6765\u81EA provider \u6700\u65B0\u8FD4\u56DE\u3002",
+    "status.refreshPartial": "\u5DF2\u8FD4\u56DE {success}/{total} \u4E2A\u8D26\u53F7\uFF1B{failures} \u4E2A\u5237\u65B0\u8D85\u65F6\u6216\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u5176\u4E0A\u6B21\u989D\u5EA6\u3002",
+    "status.oauthCompleted": "\u5B98\u65B9 OAuth \u5DF2\u5B8C\u6210\uFF0C\u8D26\u53F7\u6C60\u5DF2\u66F4\u65B0\u3002",
+    "status.oauthFailed": "\u5B98\u65B9 OAuth \u9A8C\u8BC1\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743\u3002",
+    "status.oauthInProgress": "\u5DF2\u6709\u767B\u5F55\u9A8C\u8BC1\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u4F7F\u7528\u5F53\u524D\u5B98\u65B9\u6388\u6743\u9875\u9762\uFF1B\u4E0D\u4F1A\u91CD\u590D\u6253\u5F00\u3002",
+    "status.oauthCodeSubmitted": "\u6388\u6743\u7801\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7B49\u5F85\u5B98\u65B9\u9A8C\u8BC1\u7ED3\u679C\u2026",
+    "status.oauthCancelled": "\u672C\u6B21\u767B\u5F55\u9A8C\u8BC1\u5DF2\u53D6\u6D88\u3002",
+    "status.accountSelected": "\u5DF2\u5207\u6362\u4E3A\u624B\u52A8\u8D26\u53F7\u3002",
+    "status.accountAdded": "\u5DF2\u6DFB\u52A0 {count} \u4E2A\u8D26\u53F7\u3002",
+    "status.noNewOAuthCandidates": "\u6CA1\u6709\u65B0\u7684 OAuth \u5019\u9009\u3002",
+    "status.discoveryRefreshFailed": "\u53D1\u73B0\u767B\u9646\u6001\u5237\u65B0\u5931\u8D25\uFF1A{error}",
+    "status.accountRemoved": "\u8D26\u53F7\u5DF2\u79FB\u9664{details}{scanNotice}\uFF1B{reentry}",
+    "status.policyUpdated": "\u8D26\u53F7\u7B56\u7565\u5DF2\u8BBE\u7F6E\u4E3A{policy}\u3002",
+    "status.readingProvider": "\u6B63\u5728\u8BFB\u53D6 provider \u5B9E\u65F6\u72B6\u6001\u2026",
+    "status.providerOAuthQuota": "\u72B6\u6001\u6765\u81EA\u5F53\u524D provider \u7684 OAuth \u4E0E\u989D\u5EA6\u6570\u636E",
+    "status.readingNative": "\u6B63\u5728\u8BFB\u53D6 DSH provider \u72B6\u6001\u2026",
+    "status.nativeSource": "\u72B6\u6001\u6765\u81EA DSH \u539F\u751F provider \u914D\u7F6E\u4E0E Credentials",
+    "status.readingSubscriptions": "\u6B63\u5728\u8BFB\u53D6\u8BA2\u9605\u5382\u5546\u2026",
+    "status.subscriptionReady": "\u63A5\u5165\u8D26\u53F7\u540E\uFF0C\u6A21\u578B\u4F1A\u81EA\u52A8\u51FA\u73B0\u5728\u6A21\u578B\u9009\u62E9\u5668\u4E2D\u3002",
+    "status.reading": "\u8BFB\u53D6\u4E2D\u2026",
+    "status.refreshing": "\u5237\u65B0\u4E2D\u2026",
+    "status.scanning": "\u626B\u63CF\u4E2D\u2026",
+    "status.waitingVerification": "\u7B49\u5F85\u9A8C\u8BC1\u2026",
+    "status.readingInstructions": "\u8BFB\u53D6\u8BF4\u660E\u2026",
+    "status.verificationInProgress": "\u9A8C\u8BC1\u8FDB\u884C\u4E2D\u2026",
+    "status.canceling": "\u53D6\u6D88\u4E2D\u2026",
+    "status.reentryOAuth": "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u70B9\u51FB\u91CD\u65B0\u6388\u6743\u3002",
+    "status.reentryScan": "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u3002",
+    "error.unknown": "\u672A\u77E5\u9519\u8BEF",
+    "ui.close": "\u5173\u95ED",
+    "error.remoteNotMounted": "Dockyard Remote \u5C1A\u672A\u6302\u8F7D\uFF1A{method}",
+    "value.notReturned": "\u672A\u8FD4\u56DE",
+    "value.unknown": "\u672A\u77E5",
+    "value.quota": "\u989D\u5EA6",
+    "value.provider": "provider",
+    "summary.notConnected": "\u672A\u63A5\u5165 \xB7 \u70B9\u51FB\u914D\u7F6E",
+    "summary.connected": "\u5DF2\u8FDE\u63A5",
+    "summary.accountCount": "{count} \u4E2A\u8D26\u53F7",
+    "summary.accounts": "{count} \u4E2A\u8D26\u53F7 \xB7 {summary}",
+    "summary.keyCount": "{count} Key",
+    "identity.cursorBrowser": "\u5B98\u65B9\u6D4F\u89C8\u5668 OAuth \xB7 \u90AE\u7BB1\u5DF2\u8BC6\u522B",
+    "identity.officialLogin": "\u5B98\u65B9\u767B\u5F55\u6001 \xB7 \u90AE\u7BB1\u5DF2\u8BC6\u522B",
+    "identity.sessionFingerprint": "\u5B98\u65B9\u4F1A\u8BDD\u6307\u7EB9 \xB7 {fingerprint}",
+    "health.healthy": "\u6B63\u5E38",
+    "health.degraded": "\u5F02\u5E38",
+    "health.cooldown": "\u51B7\u5374",
+    "health.expired": "\u9700\u91CD\u65B0\u6388\u6743",
+    "health.exhausted": "\u989D\u5EA6\u8017\u5C3D",
+    "health.unknown": "\u5F85\u68C0\u67E5",
+    "account.planMissing": "\u8BA2\u9605\u672A\u8FD4\u56DE",
+    "account.current": "\u5F53\u524D\u8D26\u53F7",
+    "account.manualUse": "\u624B\u52A8\u4F7F\u7528",
+    "account.remove": "\u79FB\u9664",
+    "account.confirmRemove": "\u786E\u8BA4\u79FB\u9664\u8D26\u53F7 {account}\uFF1F\u8FD9\u4F1A\u4ECE Dockyard DSH \u8D26\u53F7\u6C60\u548C\u672C\u673A Keychain \u5F15\u7528\u4E2D\u5220\u9664\u3002",
+    "quota.noWindow": "provider \u5C1A\u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3",
+    "quota.openUsage": "\u6253\u5F00\u5B98\u65B9\u7528\u91CF\u9875\u9762",
+    "quota.readFailed": "\u989D\u5EA6\u8BFB\u53D6\u5931\u8D25\uFF1A{error}",
+    "quota.keyUnconfigured": "\u8BE5 Key \u5C1A\u672A\u914D\u7F6E",
+    "quota.currentNoWindow": "\u5F53\u524D provider \u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3\uFF1B\u8FD9\u91CC\u4E0D\u4F1A\u731C\u6D4B\u6216\u663E\u793A\u4F2A\u9020\u767E\u5206\u6BD4\u3002",
+    "quota.resetUpdated": "\u91CD\u7F6E\uFF1A{reset} \xB7 \u66F4\u65B0\uFF1A{updated}",
+    "auth.providerSubscription": "\u5B98\u65B9\u8BA2\u9605",
+    "auth.browserTitle": "{provider} \u6D4F\u89C8\u5668\u6388\u6743",
+    "auth.intro": "DSH \u5DF2\u6253\u5F00\u5B98\u65B9\u6388\u6743\u9875\u9762\uFF0C\u8BF7\u9009\u62E9\u8981\u6DFB\u52A0\u7684\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1A",
+    "auth.step1": "\u5728\u5B98\u65B9\u9875\u9762\u9009\u62E9\u8981\u6DFB\u52A0\u7684\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\u3002",
+    "auth.step2": "\u6388\u6743\u5B8C\u6210\u540E\u56DE\u5230\u8FD9\u91CC\uFF0CDSH \u4F1A\u81EA\u52A8\u63A5\u5165\u8D26\u53F7\uFF0C\u5E76\u663E\u793A\u5B98\u65B9\u8FD4\u56DE\u7684\u53EF\u7528\u6027\u6216\u989D\u5EA6\u4FE1\u606F\u3002",
+    "auth.step3": "\u5982\u679C\u9875\u9762\u8FD4\u56DE\u6388\u6743\u7801\uFF0C\u8BF7\u7C98\u8D34\u5305\u542B state \u7684\u5B8C\u6574\u56DE\u8C03\u5730\u5740\uFF0C\u6216\u4F7F\u7528 code#state \u683C\u5F0F\u3002",
+    "auth.callbackPlaceholder": "\u5B8C\u6574\u56DE\u8C03\u5730\u5740\u6216 code#state",
+    "auth.callbackAria": "\u5B98\u65B9\u6388\u6743\u7801\u6216\u56DE\u8C03\u5730\u5740",
+    "auth.submit": "\u63D0\u4EA4\u9A8C\u8BC1",
+    "auth.reopen": "\u91CD\u65B0\u6253\u5F00\u9A8C\u8BC1\u9875",
+    "auth.cancel": "\u53D6\u6D88\u672C\u6B21\u767B\u5F55",
+    "auth.openPage": "\u6253\u5F00\u5B98\u65B9\u6388\u6743\u9875\u9762",
+    "auth.authorize": "\u6388\u6743",
+    "auth.reauthorize": "\u21BB \u91CD\u65B0\u6388\u6743",
+    "auth.loginAdd": "\uFF0B \u767B\u5F55\u6DFB\u52A0\u8D26\u53F7",
+    "auth.officialInstructions": "\u5B98\u65B9\u767B\u5F55\u8BF4\u660E",
+    "auth.scanLocal": "\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001",
+    "candidate.noNew": "\u6CA1\u6709\u53D1\u73B0\u65B0\u7684\u672C\u673A OAuth \u767B\u5F55\u6001",
+    "candidate.add": "\u6DFB\u52A0",
+    "subscription.all": "\u5168\u90E8\u8BA2\u9605",
+    "subscription.refreshAll": "\u21BB \u5237\u65B0\u5168\u90E8\u989D\u5EA6",
+    "subscription.providers": "\u8BA2\u9605\u5382\u5546",
+    "subscription.providerCount": "{count} \u4E2A",
+    "subscription.modelCount": "{count} \u4E2A\u6A21\u578B",
+    "subscription.modelPending": "\u6A21\u578B\u76EE\u5F55\u5F85\u52A0\u8F7D",
+    "subscription.none": "\u6682\u672A\u53D1\u73B0\u53EF\u7528\u7684\u8BA2\u9605\u5382\u5546\u3002",
+    "subscription.configure": "\u914D\u7F6E{provider}",
+    "subscription.aria": "\u8BA2\u9605\u7BA1\u7406",
+    "subscription.noAccountsOAuth": "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u70B9\u51FB\u201C\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u201D\u540E\u4F1A\u6253\u5F00 provider \u5B98\u65B9\u9A8C\u8BC1\u9875\u3002",
+    "subscription.noAccountsScan": "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u5E76\u6DFB\u52A0\u5019\u9009\u3002",
+    "subscription.localCandidates": "\u672C\u673A OAuth \u5019\u9009",
+    "subscription.accountStrategy": "\u8D26\u53F7\u7B56\u7565",
+    "subscription.currentModelTier": "\u5F53\u524D\u6A21\u578B\u6863\u4F4D",
+    "subscription.liveCatalog": "\u6765\u81EA\u5B9E\u65F6 catalog",
+    "subscription.connectedAccounts": "\u5DF2\u8FDE\u63A5\u8D26\u53F7",
+    "subscription.quotaWindow": "\u989D\u5EA6\u7A97\u53E3",
+    "subscription.providerRealtime": "provider \u5B9E\u65F6\u8FD4\u56DE",
+    "subscription.antigravityNote": "\u6DFB\u52A0\u8D26\u53F7\u65F6\uFF0CDSH \u4F1A\u63A5\u5165 Google \u5B98\u65B9\u4F1A\u8BDD\u5E76\u8BFB\u53D6\u5B9E\u65F6\u989D\u5EA6\uFF1B\u8BF7\u6309\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u6388\u6743\u9875\u63D0\u793A\u5B8C\u6210\u767B\u5F55\u3002",
+    "subscription.antigravityLogin": "Antigravity",
+    "subscription.addTitle": "\u6DFB\u52A0\u8BA2\u9605",
+    "subscription.addAria": "\u6DFB\u52A0\u8BA2\u9605",
+    "native.notice.requestPool": "API Key \u53EA\u901A\u8FC7 DSH Credentials \u4FDD\u5B58\uFF0C\u4E0D\u4F1A\u56DE\u663E\uFF0C\u4E5F\u4E0D\u4F1A\u5199\u5165\u6D4F\u89C8\u5668\u5B58\u50A8\u3002\u5F53\u524D\u5DF2\u63A5\u5165\u8BF7\u6C42\u7EA7 Key \u6C60\uFF1A\u624B\u52A8\u3001\u8F6E\u8BE2\u548C\u5931\u8D25\u8F6C\u79FB\u4E0D\u4F1A\u6539\u5199 provider \u7684\u6FC0\u6D3B\u914D\u7F6E\u3002",
+    "native.notice.manual": "API Key \u53EA\u901A\u8FC7 DSH Credentials \u4FDD\u5B58\uFF0C\u4E0D\u4F1A\u56DE\u663E\uFF0C\u4E5F\u4E0D\u4F1A\u5199\u5165\u6D4F\u89C8\u5668\u5B58\u50A8\u3002\u5F53\u524D DSH \u9002\u914D\u5668\u672A\u66B4\u9732\u8BF7\u6C42\u7EA7 Key \u6C60\uFF0C\u6682\u53EA\u80FD\u624B\u52A8\u5207\u6362\u6FC0\u6D3B Key\u3002",
+    "native.keyStrategy": "Key \u7B56\u7565",
+    "native.addKeyTitle": "\u6DFB\u52A0\u65B0\u7684 API Key",
+    "native.credentialsWrite": "\u5199\u5165 DSH Credentials",
+    "native.pasteApiKey": "\u7C98\u8D34 API Key",
+    "native.optionalName": "\u540D\u79F0\uFF08\u53EF\u9009\uFF0C\u4F8B\u5982\u5DE5\u4F5C Key\uFF09",
+    "native.save": "\u6DFB\u52A0\u5E76\u542F\u7528",
+    "native.saving": "\u4FDD\u5B58\u4E2D\u2026",
+    "native.refresh": "\u21BB \u5B9E\u65F6\u5237\u65B0",
+    "native.currentModelTier": "\u5F53\u524D\u6A21\u578B\u6863\u4F4D",
+    "native.configuredKeys": "\u5DF2\u914D\u7F6E Key",
+    "native.noKeys": "\u5F53\u524D provider \u8FD8\u6CA1\u6709\u914D\u7F6E API Key\u3002",
+    "native.currentKey": "\u5F53\u524D Key",
+    "native.manualUse": "\u624B\u52A8\u4F7F\u7528",
+    "native.remove": "\u79FB\u9664",
+    "native.unlinkReference": "\u89E3\u9664\u5F15\u7528",
+    "native.removeTitle": "\u4ECE DSH Credentials \u79FB\u9664",
+    "native.unlinkTitle": "\u4EC5\u89E3\u9664 provider \u5F15\u7528\uFF0C\u4E0D\u5220\u9664\u539F\u59CB\u6587\u4EF6\u51ED\u8BC1",
+    "native.removeConfirm": "\u786E\u8BA4{action}\uFF1A{label}\uFF1F",
+    "native.configured": "\u5DF2\u914D\u7F6E",
+    "native.unconfigured": "\u672A\u914D\u7F6E",
+    "native.source": "\u6765\u6E90\uFF1A{source}",
+    "native.fromProviderConfig": "\u6765\u81EA\u5F53\u524D provider \u914D\u7F6E",
+    "native.currentDshKey": "\u5F53\u524D DSH Key",
+    "native.quotaWindow": "\u989D\u5EA6\u7A97\u53E3",
+    "native.providerRealtime": "provider \u5B9E\u65F6\u8FD4\u56DE",
+    "native.keyAria": "{title} Key \u4E0E\u989D\u5EA6\u7BA1\u7406",
+    "native.operationFailed": "{operation} \u5931\u8D25",
+    "native.operation.readProviderCatalog": "\u8BFB\u53D6 provider \u76EE\u5F55",
+    "native.operation.readProviderConfig": "\u8BFB\u53D6 provider \u914D\u7F6E",
+    "native.operation.readKeyStatus": "\u8BFB\u53D6 Key \u72B6\u6001",
+    "native.operation.readKeyPool": "\u8BFB\u53D6 Dockyard Key \u6C60",
+    "native.operation.refreshQuota": "\u5237\u65B0 provider \u5B9E\u65F6\u989D\u5EA6",
+    "native.operation.updateProviderKey": "\u66F4\u65B0 provider Key \u914D\u7F6E",
+    "native.operation.saveApiKey": "\u4FDD\u5B58 API Key",
+    "native.operation.registerKey": "\u767B\u8BB0 Dockyard Key",
+    "native.operation.setManualKey": "\u5207\u6362\u4E3A\u624B\u52A8 Key",
+    "native.operation.removeApiKey": "\u79FB\u9664 API Key",
+    "native.operation.removeDockyardKey": "\u79FB\u9664 Dockyard Key",
+    "native.operation.updatePolicy": "\u66F4\u65B0 Key \u7B56\u7565",
+    "native.error.noWritableConfig": "DSH \u6CA1\u6709\u8FD4\u56DE\u8BE5 provider \u7684\u53EF\u5199\u914D\u7F6E",
+    "native.error.enterApiKey": "\u8BF7\u8F93\u5165 API Key",
+    "native.error.notNativeProvider": "\u5F53\u524D\u6A21\u578B\u4E0D\u662F DSH \u539F\u751F API Key provider",
+    "native.error.keyNotIndexed": "\u627E\u4E0D\u5230\u8FD9\u4E2A Key \u7684\u672C\u5730\u7D22\u5F15",
+    "native.error.keyNotConfigured": "\u8FD9\u4E2A Key \u5728 DSH Credentials \u4E2D\u5C1A\u672A\u914D\u7F6E",
+    "native.message.keySaved": "Key \u5DF2\u5199\u5165 DSH Credentials\uFF0C\u5E76\u5DF2\u8BBE\u4E3A\u5F53\u524D Key\u3002",
+    "native.message.keySelected": "\u5DF2\u5207\u6362\u5230{label}\u3002",
+    "native.message.keyRemoved": "\u5DF2\u79FB\u9664{label}\u3002",
+    "native.message.referenceRemoved": "\u5DF2\u89E3\u9664{label}\u7684 provider \u5F15\u7528\uFF1B\u539F\u59CB\u6587\u4EF6\u51ED\u8BC1\u672A\u5220\u9664\u3002",
+    "native.message.policyManual": "\u5DF2\u8BBE\u4E3A\u624B\u52A8\u9009\u62E9 Key\u3002",
+    "native.message.policyRoundRobin": "\u5DF2\u542F\u7528\u8BF7\u6C42\u7EA7\u591A Key \u8F6E\u8BE2\u3002",
+    "native.message.policyFailover": "\u5DF2\u542F\u7528\u5931\u8D25\u8F6C\u79FB\uFF1A\u5F53\u524D Key \u5931\u8D25\u65F6\u81EA\u52A8\u5C1D\u8BD5\u4E0B\u4E00\u4E2A Key\u3002",
+    "trigger.subscriptionManagement": "\u8BA2\u9605\u7BA1\u7406",
+    "trigger.addSubscription": "\uFF0B \u6DFB\u52A0\u8BA2\u9605",
+    "trigger.accountQuota": "\u8D26\u53F7\u4E0E\u989D\u5EA6\u7BA1\u7406",
+    "trigger.keyQuota": "Key \u4E0E\u989D\u5EA6\u7BA1\u7406",
+    "trigger.providerModel": "{provider} \xB7 {model}",
+    "trigger.providerSummary": "{provider} {summary}",
+    "trigger.addTitle": "\u6DFB\u52A0\u8BA2\u9605",
+    "model.expand": "\u5C55\u5F00\u6A21\u578B",
+    "model.collapse": "\u6298\u53E0\u6A21\u578B"
+  }),
+  en: Object.freeze({
+    "policy.manual": "Manual selection",
+    "policy.sticky_session": "Sticky session",
+    "policy.round_robin": "Round robin",
+    "policy.failover": "Failover",
+    "nativePolicy.manual": "Manual Key",
+    "nativePolicy.round_robin": "Key round robin",
+    "nativePolicy.failover": "Failover",
+    "eyebrow.keyProvider": "DOCKYARD KEY PROVIDER",
+    "eyebrow.subscriptions": "DOCKYARD SUBSCRIPTIONS",
+    "eyebrow.subscription": "DOCKYARD SUBSCRIPTION",
+    "title.subscriptionManagement": "Subscription management",
+    "subtitle.subscriptionManagement": "Choose a provider to sign in and configure accounts and quotas",
+    "title.noModel": "No model selected",
+    "title.key": "Key",
+    "status.noConnectedAccounts": "No connected accounts need refreshing.",
+    "status.refreshedAccounts": "Refreshed {count} accounts; quota comes from the provider's latest response.",
+    "status.refreshPartial": "Returned {success}/{total} accounts; {failures} refreshes timed out or failed, so their previous quotas were kept.",
+    "status.oauthCompleted": "Official OAuth completed; the account pool was updated.",
+    "status.oauthFailed": "Official OAuth verification failed. Please authorize again.",
+    "status.oauthInProgress": "A login verification is already in progress. Use the current official authorization page; it will not open another one.",
+    "status.oauthCodeSubmitted": "The authorization code was submitted. Waiting for the official verification result\u2026",
+    "status.oauthCancelled": "This login verification was cancelled.",
+    "status.accountSelected": "Switched to manual account selection.",
+    "status.accountAdded": "Added {count} accounts.",
+    "status.noNewOAuthCandidates": "No new OAuth candidates.",
+    "status.discoveryRefreshFailed": "Failed to refresh discovered login state: {error}",
+    "status.accountRemoved": "Account removed{details}{scanNotice}; {reentry}",
+    "status.policyUpdated": "Account policy set to {policy}.",
+    "status.readingProvider": "Reading live provider status\u2026",
+    "status.providerOAuthQuota": "Status comes from the current provider's OAuth and quota data",
+    "status.readingNative": "Reading DSH provider status\u2026",
+    "status.nativeSource": "Status comes from DSH's native provider configuration and Credentials",
+    "status.readingSubscriptions": "Reading subscription providers\u2026",
+    "status.subscriptionReady": "Connected accounts will appear automatically in the model selector.",
+    "status.reading": "Reading\u2026",
+    "status.refreshing": "Refreshing\u2026",
+    "status.scanning": "Scanning\u2026",
+    "status.waitingVerification": "Waiting for verification\u2026",
+    "status.readingInstructions": "Reading instructions\u2026",
+    "status.verificationInProgress": "Verification in progress\u2026",
+    "status.canceling": "Cancelling\u2026",
+    "status.reentryOAuth": "Click reauthorize to connect it again.",
+    "status.reentryScan": "Sign in through the official client or environment, then scan local login state to connect it again.",
+    "error.unknown": "Unknown error",
+    "ui.close": "Close",
+    "error.remoteNotMounted": "Dockyard Remote is not mounted: {method}",
+    "value.notReturned": "Not returned",
+    "value.unknown": "Unknown",
+    "value.quota": "Quota",
+    "value.provider": "provider",
+    "summary.notConnected": "Not connected \xB7 Click to configure",
+    "summary.connected": "Connected",
+    "summary.accountCount": "{count} accounts",
+    "summary.accounts": "{count} accounts \xB7 {summary}",
+    "summary.keyCount": "{count} Key",
+    "identity.cursorBrowser": "Official browser OAuth \xB7 email recognized",
+    "identity.officialLogin": "Official login state \xB7 email recognized",
+    "identity.sessionFingerprint": "Official session fingerprint \xB7 {fingerprint}",
+    "health.healthy": "Healthy",
+    "health.degraded": "Degraded",
+    "health.cooldown": "Cooling down",
+    "health.expired": "Reauthorization required",
+    "health.exhausted": "Quota exhausted",
+    "health.unknown": "Needs checking",
+    "account.planMissing": "Subscription not returned",
+    "account.current": "Current account",
+    "account.manualUse": "Use manually",
+    "account.remove": "Remove",
+    "account.confirmRemove": "Remove account {account}? This removes it from the Dockyard DSH account pool and its local Keychain reference.",
+    "quota.noWindow": "The provider has not returned a quota window",
+    "quota.openUsage": "Open official usage page",
+    "quota.readFailed": "Failed to read quota: {error}",
+    "quota.keyUnconfigured": "This Key is not configured",
+    "quota.currentNoWindow": "The current provider returned no quota window; no percentage is guessed or fabricated here.",
+    "quota.resetUpdated": "Reset: {reset} \xB7 Updated: {updated}",
+    "auth.providerSubscription": "official subscription",
+    "auth.browserTitle": "{provider} browser authorization",
+    "auth.intro": "DSH opened the official authorization page. Choose the account to add and complete authorization:",
+    "auth.step1": "Choose the account to add on the official page and complete authorization.",
+    "auth.step2": "Return here after authorization. DSH will import the account and show the availability or quota information returned by the provider.",
+    "auth.step3": "If the page returns an authorization code, paste the complete callback URL containing state, or use the code#state format.",
+    "auth.callbackPlaceholder": "Complete callback URL or code#state",
+    "auth.callbackAria": "Official authorization code or callback URL",
+    "auth.submit": "Submit verification",
+    "auth.reopen": "Reopen authorization page",
+    "auth.cancel": "Cancel this login",
+    "auth.openPage": "Open official authorization page",
+    "auth.authorize": "Authorize",
+    "auth.reauthorize": "\u21BB Reauthorize",
+    "auth.loginAdd": "\uFF0B Log in to add an account",
+    "auth.officialInstructions": "Official login instructions",
+    "auth.scanLocal": "Scan local login state",
+    "candidate.noNew": "No new local OAuth login state found",
+    "candidate.add": "Add",
+    "subscription.all": "All subscriptions",
+    "subscription.refreshAll": "\u21BB Refresh all quotas",
+    "subscription.providers": "Subscription providers",
+    "subscription.providerCount": "{count}",
+    "subscription.modelCount": "{count} models",
+    "subscription.modelPending": "Model catalog loading",
+    "subscription.none": "No subscription providers are currently available.",
+    "subscription.configure": "Configure {provider}",
+    "subscription.aria": "Subscription management",
+    "subscription.noAccountsOAuth": "No accounts yet. Click \u201CLog in to add an account\u201D to open the provider's official verification page.",
+    "subscription.noAccountsScan": "No accounts yet. Sign in through the official client or environment, then scan local login state and add a candidate.",
+    "subscription.localCandidates": "Local OAuth candidates",
+    "subscription.accountStrategy": "Account policy",
+    "subscription.currentModelTier": "Current model tier",
+    "subscription.liveCatalog": "From live catalog",
+    "subscription.connectedAccounts": "Connected accounts",
+    "subscription.quotaWindow": "Quota window",
+    "subscription.providerRealtime": "Returned by provider",
+    "subscription.antigravityNote": "When adding an account, DSH connects to the official Google session and reads live quota. Follow the official client or authorization page prompts to sign in.",
+    "subscription.antigravityLogin": "Antigravity",
+    "subscription.addTitle": "Add subscription",
+    "subscription.addAria": "Add subscription",
+    "native.notice.requestPool": "API Keys are stored only through DSH Credentials, never echoed or written to browser storage. The request-level Key pool is active: manual, round-robin, and failover policies do not rewrite the provider's active configuration.",
+    "native.notice.manual": "API Keys are stored only through DSH Credentials, never echoed or written to browser storage. The DSH adapter does not expose a request-level Key pool yet, so only the active Key can be switched manually.",
+    "native.keyStrategy": "Key policy",
+    "native.addKeyTitle": "Add a new API Key",
+    "native.credentialsWrite": "Writes to DSH Credentials",
+    "native.pasteApiKey": "Paste API Key",
+    "native.optionalName": "Name (optional, e.g. Work Key)",
+    "native.save": "Add and enable",
+    "native.saving": "Saving\u2026",
+    "native.refresh": "\u21BB Refresh live",
+    "native.currentModelTier": "Current model tier",
+    "native.configuredKeys": "Configured Keys",
+    "native.noKeys": "This provider has no configured API Keys.",
+    "native.currentKey": "Current Key",
+    "native.manualUse": "Use manually",
+    "native.remove": "Remove",
+    "native.unlinkReference": "Unlink",
+    "native.removeTitle": "Remove from DSH Credentials",
+    "native.unlinkTitle": "Only unlink the provider reference; keep the original file credential",
+    "native.removeConfirm": "{action}: {label}?",
+    "native.configured": "Configured",
+    "native.unconfigured": "Not configured",
+    "native.source": "Source: {source}",
+    "native.fromProviderConfig": "From current provider configuration",
+    "native.currentDshKey": "Current DSH Key",
+    "native.quotaWindow": "Quota window",
+    "native.providerRealtime": "Returned by provider",
+    "native.keyAria": "{title} Key and quota management",
+    "native.operationFailed": "{operation} failed",
+    "native.operation.readProviderCatalog": "Read provider catalog",
+    "native.operation.readProviderConfig": "Read provider configuration",
+    "native.operation.readKeyStatus": "Read Key status",
+    "native.operation.readKeyPool": "Read Dockyard Key pool",
+    "native.operation.refreshQuota": "Refresh live provider quota",
+    "native.operation.updateProviderKey": "Update provider Key configuration",
+    "native.operation.saveApiKey": "Save API Key",
+    "native.operation.registerKey": "Register Dockyard Key",
+    "native.operation.setManualKey": "Switch to manual Key",
+    "native.operation.removeApiKey": "Remove API Key",
+    "native.operation.removeDockyardKey": "Remove Dockyard Key",
+    "native.operation.updatePolicy": "Update Key policy",
+    "native.error.noWritableConfig": "DSH did not return writable configuration for this provider",
+    "native.error.enterApiKey": "Enter an API Key",
+    "native.error.notNativeProvider": "The current model is not a native DSH API Key provider",
+    "native.error.keyNotIndexed": "This Key is missing from the local index",
+    "native.error.keyNotConfigured": "This Key is not configured in DSH Credentials",
+    "native.message.keySaved": "The Key was written to DSH Credentials and set as the current Key.",
+    "native.message.keySelected": "Switched to {label}.",
+    "native.message.keyRemoved": "Removed {label}.",
+    "native.message.referenceRemoved": "Unlinked {label} from the provider; the original file credential was kept.",
+    "native.message.policyManual": "Manual Key selection enabled.",
+    "native.message.policyRoundRobin": "Request-level Key round robin enabled.",
+    "native.message.policyFailover": "Failover enabled: the next Key is tried automatically when the current Key fails.",
+    "trigger.subscriptionManagement": "Subscription management",
+    "trigger.addSubscription": "\uFF0B Add subscription",
+    "trigger.accountQuota": "Account and quota management",
+    "trigger.keyQuota": "Key and quota management",
+    "trigger.providerModel": "{provider} \xB7 {model}",
+    "trigger.providerSummary": "{provider} {summary}",
+    "trigger.addTitle": "Add subscription",
+    "model.expand": "Expand model",
+    "model.collapse": "Collapse model"
+  })
+});
+function translate(t, key, params) {
+  return typeof t === "function" ? t(key, params) : key;
+}
+
 // packages/dsh-plugin/src/native-key-pool.mjs
 var import_client = require("@deepseek-ai/dsh-client-runtime/client");
 var STORAGE_PREFIX = "dockyard-dsh.native-key-pool";
@@ -14687,11 +15055,11 @@ var NATIVE_KEY_POLICY_LABELS = Object.freeze({
 function resultValue(response, operation) {
   const result = response?.result;
   if (result?.ok === false) {
-    throw new Error(result.error?.message ?? result.error?.code ?? `${operation} \u5931\u8D25`);
+    throw new Error(result.error?.message ?? result.error?.code ?? `${operation} failed`);
   }
   if (result?.ok === true) return result.value;
   if (response?.ok === false) {
-    throw new Error(response.error?.message ?? response.error?.code ?? `${operation} \u5931\u8D25`);
+    throw new Error(response.error?.message ?? response.error?.code ?? `${operation} failed`);
   }
   return response?.value ?? response;
 }
@@ -14753,8 +15121,8 @@ function makeKeyRef(providerId) {
   const random = typeof globalThis.crypto?.randomUUID === "function" ? globalThis.crypto.randomUUID().slice(0, 8).toUpperCase() : Math.random().toString(36).slice(2, 10).toUpperCase();
   return `${base}_DOCKYARD_${Date.now().toString(36).toUpperCase()}_${random}`;
 }
-function errorMessage(error51) {
-  return error51 instanceof Error ? error51.message : String(error51 ?? "\u672A\u77E5\u9519\u8BEF");
+function errorMessage(error51, t) {
+  return error51 instanceof Error ? error51.message : String(error51 ?? t?.("error.unknown") ?? "Unknown error");
 }
 function nativeEntry(providerRows, providerId) {
   return providerRows.find((entry) => entry?.provider === providerId) ?? null;
@@ -14762,7 +15130,7 @@ function nativeEntry(providerRows, providerId) {
 function isApiKeyEntry(entry, profile) {
   return Boolean(entry && (entry.settingsNs === "llm-pi-ai" || typeof profile?.apiKeyEnv === "string"));
 }
-function keyRows(metadata, credentials, activeRef) {
+function keyRows(metadata, credentials, activeRef, t) {
   const rows = metadata.keys.map((entry) => ({
     ...entry,
     active: entry.ref === activeRef,
@@ -14772,7 +15140,7 @@ function keyRows(metadata, credentials, activeRef) {
   if (activeRef && !rows.some((entry) => entry.ref === activeRef)) {
     rows.unshift({
       ref: activeRef,
-      label: "\u5F53\u524D DSH Key",
+      label: t?.("native.currentDshKey") ?? "Current DSH Key",
       createdAt: null,
       active: true,
       configured: credentials[activeRef]?.configured === true,
@@ -14783,7 +15151,7 @@ function keyRows(metadata, credentials, activeRef) {
   return rows;
 }
 var NativeKeyPoolController = class {
-  constructor(api, remote = null) {
+  constructor(api, remote = null, t = null) {
     __publicField(this, "api");
     __publicField(this, "store", (0, import_client.createSnapshotStore)({
       status: "idle",
@@ -14806,6 +15174,10 @@ var NativeKeyPoolController = class {
     __publicField(this, "generation", 0);
     this.api = api;
     this.remote = remote;
+    this.t = t;
+  }
+  operation(key, fallback) {
+    return typeof this.t === "function" ? this.t(key) : fallback;
   }
   setState(next) {
     this.store.update((state) => Object.assign(state, next));
@@ -14851,8 +15223,8 @@ var NativeKeyPoolController = class {
         this.api.llm.providers({}),
         this.api.settings.describe({})
       ]);
-      const providers = resultValue(providersResponse, "\u8BFB\u53D6 provider \u76EE\u5F55").providers ?? [];
-      const settings = resultValue(settingsResponse, "\u8BFB\u53D6 provider \u914D\u7F6E");
+      const providers = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog")).providers ?? [];
+      const settings = resultValue(settingsResponse, this.operation("native.operation.readProviderConfig", "Read provider configuration"));
       const entry = nativeEntry(providers, providerId);
       const namespace = settings.namespaces?.find((view) => view.ns === entry?.settingsNs) ?? null;
       const settingsPath = Array.isArray(entry?.settingsPath) ? entry.settingsPath : [];
@@ -14884,12 +15256,12 @@ var NativeKeyPoolController = class {
       ])];
       let credentials = {};
       if (refs.length > 0 && this.api.credentials?.describe) {
-        credentials = resultValue(await this.api.credentials.describe({ refs }), "\u8BFB\u53D6 Key \u72B6\u6001").credentials ?? {};
+        credentials = resultValue(await this.api.credentials.describe({ refs }), this.operation("native.operation.readKeyStatus", "Read Key status")).credentials ?? {};
       }
-      const keys = keyRows(metadata, credentials, activeRef);
+      const keys = keyRows(metadata, credentials, activeRef, this.t);
       let hostStatus = null;
       try {
-        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, "\u8BFB\u53D6 Dockyard Key \u6C60");
+        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, this.operation("native.operation.readKeyPool", "Read Dockyard Key pool"));
       } catch {
       }
       if (generation !== this.generation) return null;
@@ -14917,7 +15289,7 @@ var NativeKeyPoolController = class {
         status: "error",
         action: null,
         providerId,
-        error: errorMessage(error51)
+        error: errorMessage(error51, this.t)
       });
       return null;
     }
@@ -14931,13 +15303,13 @@ var NativeKeyPoolController = class {
     const state = await this.load(providerId);
     if (!state) return null;
     try {
-      const refreshed = await this.remoteCall("nativeKeyRefresh", { providerId }, "\u5237\u65B0 provider \u5B9E\u65F6\u989D\u5EA6");
+      const refreshed = await this.remoteCall("nativeKeyRefresh", { providerId }, this.operation("native.operation.refreshQuota", "Refresh live provider quota"));
       if (refreshed) {
         this.applyHostStatus(refreshed);
         this.setState({ action: null, status: "ready", error: null });
       }
     } catch (error51) {
-      this.setState({ action: null, status: "ready", error: errorMessage(error51) });
+      this.setState({ action: null, status: "ready", error: errorMessage(error51, this.t) });
     }
     return this.store.getSnapshot();
   }
@@ -14945,7 +15317,7 @@ var NativeKeyPoolController = class {
     const state = this.store.getSnapshot();
     if (state.providerId !== providerId || !state.namespace) await this.load(providerId);
     const current = this.store.getSnapshot();
-    if (!current.namespace) throw new Error("DSH \u6CA1\u6709\u8FD4\u56DE\u8BE5 provider \u7684\u53EF\u5199\u914D\u7F6E");
+    if (!current.namespace) throw new Error(this.t?.("native.error.noWritableConfig") ?? "DSH did not return writable configuration for this provider");
     const profile = getPath(current.namespace.value, current.settingsPath);
     const path = [...current.settingsPath, "apiKeyEnv"];
     const ops = clear ? [{ op: "unset", path }] : profile === void 0 && current.settingsPath.length > 0 ? [{ op: "set", path: current.settingsPath, value: { apiKeyEnv: ref } }] : [{ op: "set", path, value: ref }];
@@ -14954,18 +15326,18 @@ var NativeKeyPoolController = class {
       ops,
       expectedRevision: current.namespace.revision
     });
-    resultValue(response, "\u66F4\u65B0 provider Key \u914D\u7F6E");
+    resultValue(response, this.operation("native.operation.updateProviderKey", "Update provider Key configuration"));
   }
   async addKey(providerId, value, label = "") {
     const key = String(value ?? "").trim();
-    if (!key) throw new Error("\u8BF7\u8F93\u5165 API Key");
+    if (!key) throw new Error(this.t?.("native.error.enterApiKey") ?? "Enter an API Key");
     this.setState({ action: "add", status: "loading", providerId, error: null, message: null });
     try {
       await this.ensure(providerId);
       const current = this.store.getSnapshot();
-      if (!current.native) throw new Error("\u5F53\u524D\u6A21\u578B\u4E0D\u662F DSH \u539F\u751F API Key provider");
+      if (!current.native) throw new Error(this.t?.("native.error.notNativeProvider") ?? "The current model is not a native DSH API Key provider");
       const ref = makeKeyRef(providerId);
-      resultValue(await this.api.credentials.set({ ref, value: key }), "\u4FDD\u5B58 API Key");
+      resultValue(await this.api.credentials.set({ ref, value: key }), this.operation("native.operation.saveApiKey", "Save API Key"));
       await this.mutateProfile(providerId, ref);
       const metadata = readMetadata(providerId);
       metadata.keys = [...metadata.keys.filter((entry) => entry.ref !== ref), {
@@ -14974,12 +15346,12 @@ var NativeKeyPoolController = class {
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       }];
       writeMetadata(providerId, metadata);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, "\u767B\u8BB0 Dockyard Key");
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
       await this.load(providerId);
-      this.setState({ message: "Key \u5DF2\u5199\u5165 DSH Credentials\uFF0C\u5E76\u5DF2\u8BBE\u4E3A\u5F53\u524D Key\u3002", action: null, status: "ready" });
+      this.setState({ message: this.t?.("native.message.keySaved") ?? "The Key was written to DSH Credentials and set as the current Key.", action: null, status: "ready" });
       return this.store.getSnapshot();
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorMessage(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorMessage(error51, this.t) });
       return null;
     }
   }
@@ -14990,19 +15362,19 @@ var NativeKeyPoolController = class {
       await this.ensure(providerId);
       const current = this.store.getSnapshot();
       const key = current.keys.find((entry) => entry.ref === ref);
-      if (!key) throw new Error("\u627E\u4E0D\u5230\u8FD9\u4E2A Key \u7684\u672C\u5730\u7D22\u5F15");
-      if (!key.configured) throw new Error("\u8FD9\u4E2A Key \u5728 DSH Credentials \u4E2D\u5C1A\u672A\u914D\u7F6E");
+      if (!key) throw new Error(this.t?.("native.error.keyNotIndexed") ?? "This Key is missing from the local index");
+      if (!key.configured) throw new Error(this.t?.("native.error.keyNotConfigured") ?? "This Key is not configured in DSH Credentials");
       await this.mutateProfile(providerId, ref);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, "\u767B\u8BB0 Dockyard Key");
-      await this.remoteCall("nativeKeySetPolicy", { providerId, policy: "manual" }, "\u5207\u6362\u4E3A\u624B\u52A8 Key");
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
+      await this.remoteCall("nativeKeySetPolicy", { providerId, policy: "manual" }, this.operation("native.operation.setManualKey", "Switch to manual Key"));
       const metadata = readMetadata(providerId);
       metadata.policy = "manual";
       writeMetadata(providerId, metadata);
       await this.load(providerId);
-      this.setState({ message: `\u5DF2\u5207\u6362\u5230${key.label}\u3002`, action: null, status: "ready" });
+      this.setState({ message: this.t?.("native.message.keySelected", { label: key.label }) ?? `Switched to ${key.label}.`, action: null, status: "ready" });
       return this.store.getSnapshot();
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorMessage(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorMessage(error51, this.t) });
       return null;
     }
   }
@@ -15013,41 +15385,45 @@ var NativeKeyPoolController = class {
       await this.ensure(providerId);
       const current = this.store.getSnapshot();
       const key = current.keys.find((entry) => entry.ref === ref);
-      if (!key) throw new Error("\u627E\u4E0D\u5230\u8FD9\u4E2A Key \u7684\u672C\u5730\u7D22\u5F15");
+      if (!key) throw new Error(this.t?.("native.error.keyNotIndexed") ?? "This Key is missing from the local index");
       const remaining = current.keys.filter((entry) => entry.ref !== ref && entry.configured);
       if (current.apiKeyRef === ref) {
         if (remaining[0]) await this.mutateProfile(providerId, remaining[0].ref);
         else await this.mutateProfile(providerId, null, { clear: true });
       }
       const writable = key.credential?.writable !== false;
-      if (writable) resultValue(await this.api.credentials.unset({ ref }), "\u79FB\u9664 API Key");
+      if (writable) resultValue(await this.api.credentials.unset({ ref }), this.operation("native.operation.removeApiKey", "Remove API Key"));
       const metadata = readMetadata(providerId);
       metadata.keys = metadata.keys.filter((entry) => entry.ref !== ref);
       writeMetadata(providerId, metadata);
       try {
-        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, "\u79FB\u9664 Dockyard Key");
+        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, this.operation("native.operation.removeDockyardKey", "Remove Dockyard Key"));
       } catch {
       }
       await this.load(providerId);
-      this.setState({ message: writable ? `\u5DF2\u79FB\u9664${key.label}\u3002` : `\u5DF2\u89E3\u9664${key.label}\u7684 provider \u5F15\u7528\uFF1B\u539F\u59CB\u6587\u4EF6\u51ED\u8BC1\u672A\u5220\u9664\u3002`, action: null, status: "ready" });
+      this.setState({
+        message: writable ? this.t?.("native.message.keyRemoved", { label: key.label }) ?? `Removed ${key.label}.` : this.t?.("native.message.referenceRemoved", { label: key.label }) ?? `Unlinked ${key.label} from the provider; the original file credential was kept.`,
+        action: null,
+        status: "ready"
+      });
       return this.store.getSnapshot();
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorMessage(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorMessage(error51, this.t) });
       return null;
     }
   }
   async setPolicy(providerId, policy) {
     if (!Object.hasOwn(NATIVE_KEY_POLICY_LABELS, policy)) return;
     try {
-      await this.remoteCall("nativeKeySetPolicy", { providerId, policy }, "\u66F4\u65B0 Key \u7B56\u7565");
+      await this.remoteCall("nativeKeySetPolicy", { providerId, policy }, this.operation("native.operation.updatePolicy", "Update Key policy"));
     } catch (error51) {
-      this.setState({ error: errorMessage(error51) });
+      this.setState({ error: errorMessage(error51, this.t) });
       return null;
     }
     const metadata = readMetadata(providerId);
     metadata.policy = policy;
     writeMetadata(providerId, metadata);
-    this.setState({ policy, runtimeMode: "request-key-pool", message: policy === "manual" ? "\u5DF2\u8BBE\u4E3A\u624B\u52A8\u9009\u62E9 Key\u3002" : policy === "round_robin" ? "\u5DF2\u542F\u7528\u8BF7\u6C42\u7EA7\u591A Key \u8F6E\u8BE2\u3002" : "\u5DF2\u542F\u7528\u5931\u8D25\u8F6C\u79FB\uFF1A\u5F53\u524D Key \u5931\u8D25\u65F6\u81EA\u52A8\u5C1D\u8BD5\u4E0B\u4E00\u4E2A Key\u3002" });
+    this.setState({ policy, runtimeMode: "request-key-pool", message: policy === "manual" ? this.t?.("native.message.policyManual") ?? "Manual Key selection enabled." : policy === "round_robin" ? this.t?.("native.message.policyRoundRobin") ?? "Request-level Key round robin enabled." : this.t?.("native.message.policyFailover") ?? "Failover enabled: the next Key is tried automatically when the current Key fails." });
     return this.store.getSnapshot();
   }
 };
@@ -15061,12 +15437,18 @@ var {
   useSyncExternalStore
 } = React;
 var STYLE_ID = "dockyard-dsh-account-control";
-var POLICY_LABELS = Object.freeze({
-  manual: "\u624B\u52A8\u9009\u62E9",
-  sticky_session: "\u4F1A\u8BDD\u7C98\u6EDE",
-  round_robin: "\u8D26\u53F7\u8F6E\u8BE2",
-  failover: "\u5931\u8D25\u8F6C\u79FB"
+var POLICY_KEYS = Object.freeze({
+  manual: "policy.manual",
+  sticky_session: "policy.sticky_session",
+  round_robin: "policy.round_robin",
+  failover: "policy.failover"
 });
+function text(t, key, params) {
+  return translate(t, key, params);
+}
+function policyLabel(t, policy) {
+  return text(t, POLICY_KEYS[policy] ?? "policy.manual");
+}
 var DOCKYARD_CHEVRON_PATH = "M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z";
 var CSS = `
 .dockyard-dsh-anchor{position:relative;display:inline-flex;align-items:center;min-width:0;z-index:25}
@@ -15077,7 +15459,7 @@ button[role="menuitemradio"] [class$="_description"]{display:none!important}
 .dockyard-dsh-model-group-toggle:hover,.dockyard-dsh-model-group-toggle:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-model-group-toggle .dockyard-dsh-model-group-chevron{margin-left:auto}
 section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{display:none!important}
-.dockyard-dsh-trigger{display:inline-flex;align-items:center;gap:5px;max-width:160px;height:28px;padding:0 8px;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#c7ccd5);background:transparent;cursor:pointer;font:500 13px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
+.dockyard-dsh-trigger{display:inline-flex;align-items:center;gap:8px;max-width:260px;height:28px;padding:0 10px;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#c7ccd5);background:transparent;cursor:pointer;font:500 13px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
 .dockyard-dsh-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-trigger:focus-visible{outline:2px solid var(--dsw-alias-border-l3,#8fa3c7);outline-offset:1px}
 .dockyard-dsh-trigger[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
@@ -15088,7 +15470,7 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-dot[data-live=true]{background:#79d6c8;box-shadow:0 0 8px rgba(121,214,200,.8)}
 .dockyard-dsh-dot[data-loading=true]{background:#cbb7ff;animation:dockyard-dsh-pulse 1s ease-in-out infinite}
 .dockyard-dsh-label{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.dockyard-dsh-summary{color:var(--dsw-alias-label-caption,#8b93a1);font-weight:400;overflow:hidden;text-overflow:ellipsis}
+.dockyard-dsh-summary{min-width:0;margin-left:4px;color:var(--dsw-alias-label-caption,#8b93a1);font-size:12px;font-weight:400;line-height:18px;overflow:hidden;text-overflow:ellipsis}
 .dockyard-dsh-chevron{display:inline-flex;width:14px;height:14px;flex:none;align-items:center;justify-content:center;color:var(--dsw-alias-label-caption,#8b93a1);transition:transform 140ms ease;transform-origin:center}
 .dockyard-dsh-chevron[data-open=true]{transform:rotate(180deg)}
 .dockyard-dsh-chevron svg{display:block;width:14px;height:14px}
@@ -15108,12 +15490,13 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-title{margin-top:2px;font-size:16px;font-weight:650;line-height:22px}
 .dockyard-dsh-model{margin-top:2px;overflow:hidden;color:var(--dsw-alias-label-tertiary,#a9b0ba);text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-model-context{margin-top:2px;color:var(--dsw-alias-label-caption,#8b93a1);font-size:10px;line-height:15px;text-align:left}
-.dockyard-dsh-close{width:26px;height:26px;flex:none;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary,#a9b0ba);cursor:pointer;font-size:20px;line-height:24px}
+.dockyard-dsh-close{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex:none;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary,#a9b0ba);cursor:pointer;font-size:0;line-height:0}
+.dockyard-dsh-close::before{content:"\xD7";display:block;font:600 18px/18px Inter,var(--dsw-font-family,sans-serif);transform:translateY(-0.5px)}
 .dockyard-dsh-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
-.dockyard-dsh-status{display:flex;align-items:center;gap:7px;min-height:28px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform,rgba(255,255,255,.06));color:var(--dsw-alias-label-tertiary,#a9b0ba)}
+.dockyard-dsh-status{display:flex;align-items:center;gap:0;min-height:28px;padding:6px 0;border-radius:8px;background:var(--dsw-alias-bg-module-platform,rgba(255,255,255,.06));color:var(--dsw-alias-label-tertiary,#a9b0ba)}
 .dockyard-dsh-status[data-error=true]{background:rgba(255,104,104,.11);color:var(--dsw-alias-state-error-primary,#ff7a7a)}
-.dockyard-dsh-status[data-success=true]{color:#9ce5dc}
-.dockyard-dsh-status-copy{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.dockyard-dsh-status[data-success=true]{background:rgba(156,229,220,.08);color:#9ce5dc}
+.dockyard-dsh-status-copy{display:block;align-self:center;min-width:0;flex:1;overflow-wrap:anywhere;white-space:normal;text-align:left}
 .dockyard-dsh-auth-status{align-items:flex-start}
 .dockyard-dsh-auth-status .dockyard-dsh-status-copy{white-space:normal;overflow-wrap:anywhere;line-height:18px}
 .dockyard-dsh-auth-status .dockyard-dsh-auth-diagnostic{flex-basis:100%;color:var(--dsw-alias-state-error-primary,#ff7a7a)}
@@ -15216,6 +15599,7 @@ function syncModelGroupChevron(title, open) {
   icon.dataset.open = String(open);
 }
 function syncModelMenuGroups(menu) {
+  const english = menu.getAttribute("aria-label") === "Model and reasoning effort";
   for (const section of modelMenuSections(menu)) {
     const labelledBy = section.getAttribute("aria-labelledby");
     const title = [...section.children].find((child) => child.id === labelledBy) ?? section.querySelector(".dockyard-dsh-model-group-toggle");
@@ -15231,7 +15615,7 @@ function syncModelMenuGroups(menu) {
     title.setAttribute("role", "button");
     title.setAttribute("tabindex", "0");
     title.setAttribute("aria-expanded", String(!collapsed));
-    title.setAttribute("title", collapsed ? "\u5C55\u5F00\u6A21\u578B" : "\u6298\u53E0\u6A21\u578B");
+    title.setAttribute("title", collapsed ? english ? "Expand model" : "\u5C55\u5F00\u6A21\u578B" : english ? "Collapse model" : "\u6298\u53E0\u6A21\u578B");
     syncModelGroupChevron(title, !collapsed);
   }
 }
@@ -15254,7 +15638,9 @@ function installModelMenuFolding() {
     syncModelMenuGroups(menu);
   };
   const sync = () => {
-    for (const menu of document.querySelectorAll('[role="menu"][aria-label="\u6A21\u578B\u4E0E\u63A8\u7406\u7B49\u7EA7"]')) {
+    for (const menu of document.querySelectorAll('[role="menu"]')) {
+      const label = menu.getAttribute("aria-label") ?? "";
+      if (label !== "\u6A21\u578B\u4E0E\u63A8\u7406\u7B49\u7EA7" && label !== "Model and reasoning effort") continue;
       if (!boundMenus.has(menu)) {
         menu.addEventListener("click", toggle);
         menu.addEventListener("keydown", toggle);
@@ -15278,21 +15664,25 @@ function installModelMenuFolding() {
 function useSnapshot(store) {
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
 }
-function errorText(error51) {
+function errorText(error51, t) {
   if (error51 instanceof Error) return error51.message;
-  return String(error51 ?? "\u672A\u77E5\u9519\u8BEF");
+  return String(error51 ?? text(t, "error.unknown"));
 }
-function refreshResultMessage(result) {
+function refreshResultMessage(result, t) {
   if (!Array.isArray(result)) return null;
   const failures = result.reduce((count, entry) => count + (Array.isArray(entry?.diagnostics) && entry.diagnostics.length > 0 ? 1 : 0), 0);
-  if (result.length === 0) return "\u6CA1\u6709\u5DF2\u8FDE\u63A5\u8D26\u53F7\u9700\u8981\u5237\u65B0\u3002";
-  if (failures === 0) return `\u5DF2\u5237\u65B0 ${result.length} \u4E2A\u8D26\u53F7\uFF0C\u989D\u5EA6\u6765\u81EA provider \u6700\u65B0\u8FD4\u56DE\u3002`;
-  return `\u5DF2\u8FD4\u56DE ${result.length - failures}/${result.length} \u4E2A\u8D26\u53F7\uFF1B${failures} \u4E2A\u5237\u65B0\u8D85\u65F6\u6216\u5931\u8D25\uFF0C\u5DF2\u4FDD\u7559\u5176\u4E0A\u6B21\u989D\u5EA6\u3002`;
+  if (result.length === 0) return text(t, "status.noConnectedAccounts");
+  if (failures === 0) return text(t, "status.refreshedAccounts", { count: result.length });
+  return text(t, "status.refreshPartial", {
+    success: result.length - failures,
+    total: result.length,
+    failures
+  });
 }
-function unwrapRemote(response) {
+function unwrapRemote(response, t) {
   if (response?.ok === true) return response.value;
   if (response?.ok === false) {
-    const detail = response.error?.message ?? response.error?.code ?? "\u8FDC\u7A0B\u64CD\u4F5C\u5931\u8D25";
+    const detail = response.error?.message ?? response.error?.code ?? text(t, "error.remoteNotMounted", { method: "remote operation" });
     throw new Error(detail);
   }
   return response;
@@ -15300,12 +15690,12 @@ function unwrapRemote(response) {
 function providerFromSnapshot(snapshot, providerId) {
   return snapshot?.providers?.find((provider) => provider.providerId === providerId) ?? null;
 }
-function providerDisplayName(providerId, manifest) {
+function providerDisplayName(providerId, manifest, t) {
   if (providerId === "antigravity") return "Antigravity";
   if (providerId === "minimax" || providerId === "minimax-cn") return "MiniMax";
   if (providerId === "deepseek" || providerId === "deepseek-official") return "DeepSeek";
   if (providerId === "openrouter") return "OpenRouter";
-  return manifest?.displayName ?? providerId ?? "provider";
+  return manifest?.displayName ?? providerId ?? text(t, "value.provider");
 }
 function displayModelId(providerId, modelId) {
   const value = String(modelId ?? "");
@@ -15319,21 +15709,21 @@ function connectedAccountSignature(snapshot) {
     ...Array.isArray(provider.accounts) ? provider.accounts.map((account) => account?.accountId).filter(Boolean).sort() : []
   ].join(":")).join("|");
 }
-function formatDate(value) {
-  if (!value) return "\u672A\u8FD4\u56DE";
+function formatDate(value, t) {
+  if (!value) return text(t, "value.notReturned");
   const date5 = new Date(value);
   return Number.isNaN(date5.getTime()) ? String(value) : date5.toLocaleString();
 }
-function formatNumber(value) {
-  if (value === null || value === void 0) return "\u672A\u77E5";
+function formatNumber(value, t) {
+  if (value === null || value === void 0) return text(t, "value.unknown");
   return typeof value === "number" ? new Intl.NumberFormat().format(value) : String(value);
 }
-function quotaWindowRows(quota) {
+function quotaWindowRows(quota, t) {
   if (!quota || typeof quota !== "object") return [];
   if (Array.isArray(quota.windows) && quota.windows.length > 0) return quota.windows;
   if (quota.remaining !== null || quota.limit !== null || quota.resetAt) return [{
     id: "quota",
-    name: quota.unit ?? "\u989D\u5EA6",
+    name: quota.unit ?? text(t, "value.quota"),
     remaining: quota.remaining,
     limit: quota.limit,
     unit: quota.unit,
@@ -15342,24 +15732,24 @@ function quotaWindowRows(quota) {
   }];
   return [];
 }
-function quotaRowsForAccount(account) {
-  return quotaWindowRows(account?.quota);
+function quotaRowsForAccount(account, t) {
+  return quotaWindowRows(account?.quota, t);
 }
 function quotaPercent(window2) {
   if (typeof window2?.remaining !== "number" || typeof window2?.limit !== "number" || window2.limit <= 0) return null;
   return Math.max(0, Math.min(100, Math.round(window2.remaining / window2.limit * 100)));
 }
-function quotaSummary(account) {
+function quotaSummary(account, t) {
   const health = account?.health?.status;
-  if (health === "expired") return "\u9700\u91CD\u65B0\u6388\u6743";
-  if (health === "exhausted") return "\u989D\u5EA6\u8017\u5C3D";
-  if (health === "degraded" && account?.health?.lastError) return "\u8BF7\u6C42\u5931\u8D25";
-  const first = quotaRowsForAccount(account)[0];
+  if (health === "expired") return text(t, "health.expired");
+  if (health === "exhausted") return text(t, "health.exhausted");
+  if (health === "degraded" && account?.health?.lastError) return text(t, "health.degraded");
+  const first = quotaRowsForAccount(account, t)[0];
   const percent = quotaPercent(first);
   if (percent !== null) return `${percent}%`;
-  if (first?.remaining !== null && first?.remaining !== void 0) return formatNumber(first.remaining);
-  if (account?.resources?.quotaDiagnostic) return "\u989D\u5EA6\u672A\u77E5";
-  return account ? "\u5DF2\u8FDE\u63A5" : "\u672A\u6DFB\u52A0";
+  if (first?.remaining !== null && first?.remaining !== void 0) return formatNumber(first.remaining, t);
+  if (account?.resources?.quotaDiagnostic) return text(t, "value.quota");
+  return account ? text(t, "summary.connected") : text(t, "summary.notConnected");
 }
 function providerAccount(provider) {
   if (provider?.defaultAccountId) {
@@ -15367,35 +15757,28 @@ function providerAccount(provider) {
   }
   return provider?.accounts?.length === 1 ? provider.accounts[0] : null;
 }
-function providerOverviewSummary(provider) {
+function providerOverviewSummary(provider, t) {
   const accounts = provider?.accounts ?? [];
-  if (accounts.length === 0) return "\u672A\u63A5\u5165 \xB7 \u70B9\u51FB\u914D\u7F6E";
+  if (accounts.length === 0) return text(t, "summary.notConnected");
   const selected = providerAccount(provider);
-  const summary = selected ? quotaSummary(selected) : "\u5DF2\u8FDE\u63A5";
-  return `${accounts.length} \u4E2A\u8D26\u53F7 \xB7 ${summary}`;
+  const summary = selected ? quotaSummary(selected, t) : text(t, "summary.connected");
+  return text(t, "summary.accounts", { count: accounts.length, summary });
 }
-function accountName(account) {
-  return account?.email ?? account?.displayName ?? account?.accountId ?? "\u672A\u77E5\u8D26\u53F7";
+function accountName(account, t) {
+  return account?.email ?? account?.displayName ?? account?.accountId ?? text(t, "value.unknown");
 }
-function accountIdentityLine(account) {
+function accountIdentityLine(account, t) {
   const identitySource = account?.resources?.identitySource;
-  if (account?.email && account?.resources?.authSource === "official_cursor_browser_oauth") return "\u5B98\u65B9\u6D4F\u89C8\u5668 OAuth \xB7 \u90AE\u7BB1\u5DF2\u8BC6\u522B";
-  if (["official_cli_auth_status", "official_client_auth_status"].includes(identitySource)) return "\u5B98\u65B9\u767B\u5F55\u6001 \xB7 \u90AE\u7BB1\u5DF2\u8BC6\u522B";
-  if (account?.resources?.sessionFingerprint) return `\u5B98\u65B9\u4F1A\u8BDD\u6307\u7EB9 \xB7 ${account.resources.sessionFingerprint}`;
-  return account?.accountId ?? "\u672A\u77E5\u8D26\u53F7";
+  if (account?.email && account?.resources?.authSource === "official_cursor_browser_oauth") return text(t, "identity.cursorBrowser");
+  if (["official_cli_auth_status", "official_client_auth_status"].includes(identitySource)) return text(t, "identity.officialLogin");
+  if (account?.resources?.sessionFingerprint) return text(t, "identity.sessionFingerprint", { fingerprint: account.resources.sessionFingerprint });
+  return account?.accountId ?? text(t, "value.unknown");
 }
-function healthLabel(status) {
-  return {
-    healthy: "\u6B63\u5E38",
-    degraded: "\u5F02\u5E38",
-    cooldown: "\u51B7\u5374",
-    expired: "\u9700\u91CD\u65B0\u6388\u6743",
-    exhausted: "\u989D\u5EA6\u8017\u5C3D",
-    unknown: "\u5F85\u68C0\u67E5"
-  }[status] ?? status ?? "\u5F85\u68C0\u67E5";
+function healthLabel(status, t) {
+  return status === "healthy" ? text(t, "health.healthy") : status === "degraded" ? text(t, "health.degraded") : status === "cooldown" ? text(t, "health.cooldown") : status === "expired" ? text(t, "health.expired") : status === "exhausted" ? text(t, "health.exhausted") : status ?? text(t, "health.unknown");
 }
 var DockyardClientController = class {
-  constructor(remote) {
+  constructor(remote, t) {
     __publicField(this, "remote");
     __publicField(this, "store", (0, import_client2.createSnapshotStore)({
       snapshot: null,
@@ -15411,6 +15794,7 @@ var DockyardClientController = class {
     __publicField(this, "refreshPromises", /* @__PURE__ */ new Map());
     __publicField(this, "authTimers", /* @__PURE__ */ new Map());
     this.remote = remote;
+    this.t = t;
   }
   setState(next) {
     this.store.update((state) => Object.assign(state, next));
@@ -15451,9 +15835,9 @@ var DockyardClientController = class {
       };
       if (result.diagnostic) next.message = result.diagnostic;
       else if (result.instructions && result.status !== "opened") next.message = result.instructions;
-      else if (result.status === "completed") next.message = "\u5B98\u65B9 OAuth \u5DF2\u5B8C\u6210\uFF0C\u8D26\u53F7\u6C60\u5DF2\u66F4\u65B0\u3002";
+      else if (result.status === "completed") next.message = text(this.t, "status.oauthCompleted");
       else if (["failed", "error"].includes(result.status)) {
-        next.error = result.diagnostic ?? result.instructions ?? "\u5B98\u65B9 OAuth \u9A8C\u8BC1\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743\u3002";
+        next.error = result.diagnostic ?? result.instructions ?? text(this.t, "status.oauthFailed");
       }
     }
     if (result?.providers) next.scan = result;
@@ -15463,8 +15847,8 @@ var DockyardClientController = class {
   }
   async call(method, ...args) {
     const fn = this.remote?.[method];
-    if (typeof fn !== "function") throw new Error(`Dockyard Remote \u5C1A\u672A\u6302\u8F7D\uFF1A${method}`);
-    return unwrapRemote(await fn(...args));
+    if (typeof fn !== "function") throw new Error(text(this.t, "error.remoteNotMounted", { method }));
+    return unwrapRemote(await fn(...args), this.t);
   }
   async ensureSnapshot() {
     const current = this.store.getSnapshot().snapshot;
@@ -15476,7 +15860,7 @@ var DockyardClientController = class {
       this.setState({ status: "ready", error: null });
       return snapshot;
     }).catch((error51) => {
-      this.setState({ status: "error", error: errorText(error51) });
+      this.setState({ status: "error", error: errorText(error51, this.t) });
       throw error51;
     }).finally(() => {
       this.snapshotPromise = null;
@@ -15495,10 +15879,10 @@ var DockyardClientController = class {
       try {
         const value = await this.call("refresh", { providerId });
         const result = this.applyValue(value, providerId);
-        this.setState({ message: refreshResultMessage(result) });
+        this.setState({ message: refreshResultMessage(result, this.t) });
         return result;
       } catch (error51) {
-        this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+        this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
         return null;
       }
     })();
@@ -15517,10 +15901,10 @@ var DockyardClientController = class {
       try {
         const value = await this.call("refresh", {});
         const result = this.applyValue(value);
-        this.setState({ message: refreshResultMessage(result) });
+        this.setState({ message: refreshResultMessage(result, this.t) });
         return result;
       } catch (error51) {
-        this.setState({ action: null, status: "error", providerId: null, error: errorText(error51) });
+        this.setState({ action: null, status: "error", providerId: null, error: errorText(error51, this.t) });
         return null;
       }
     })();
@@ -15539,7 +15923,7 @@ var DockyardClientController = class {
       this.setState({ scan: result, action: null, status: "ready" });
       return result;
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15548,7 +15932,7 @@ var DockyardClientController = class {
       const value = await this.call("scan", { providerId });
       return { result: this.applyValue(value, providerId, { preserveControl: true }), error: null };
     } catch (error51) {
-      return { result: null, error: errorText(error51) };
+      return { result: null, error: errorText(error51, this.t) };
     }
   }
   async add(providerId, candidateId) {
@@ -15558,11 +15942,11 @@ var DockyardClientController = class {
       const result = this.applyValue(value, providerId);
       const count = result?.accounts?.length ?? 0;
       const discovery = await this.refreshDiscovery(providerId);
-      const scanNotice = discovery.error ? `\u53D1\u73B0\u767B\u9646\u6001\u5237\u65B0\u5931\u8D25\uFF1A${discovery.error}` : null;
-      this.setState({ message: scanNotice ?? (count ? `\u5DF2\u6DFB\u52A0 ${count} \u4E2A\u8D26\u53F7\u3002` : "\u6CA1\u6709\u65B0\u7684 OAuth \u5019\u9009\u3002") });
+      const scanNotice = discovery.error ? text(this.t, "status.discoveryRefreshFailed", { error: discovery.error }) : null;
+      this.setState({ message: scanNotice ?? (count ? text(this.t, "status.accountAdded", { count }) : text(this.t, "status.noNewOAuthCandidates")) });
       return result;
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15570,7 +15954,7 @@ var DockyardClientController = class {
     const current = this.store.getSnapshot();
     if (current.auth?.providerId === providerId && ["pending", "processing"].includes(current.auth.status) && current.auth.sessionId) {
       this.scheduleAuth(providerId, current.auth.sessionId);
-      this.setState({ action: null, status: "ready", error: null, message: "\u5DF2\u6709\u767B\u5F55\u9A8C\u8BC1\u8FDB\u884C\u4E2D\uFF0C\u8BF7\u4F7F\u7528\u5F53\u524D\u5B98\u65B9\u6388\u6743\u9875\u9762\uFF1B\u4E0D\u4F1A\u91CD\u590D\u6253\u5F00\u3002" });
+      this.setState({ action: null, status: "ready", error: null, message: text(this.t, "status.oauthInProgress") });
       return current.auth;
     }
     this.setState({ action: "login", status: "loading", providerId, error: null, message: null });
@@ -15596,7 +15980,7 @@ var DockyardClientController = class {
       return result;
     } catch (error51) {
       authWindow?.close?.();
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15607,11 +15991,11 @@ var DockyardClientController = class {
       const result = this.applyValue(value, providerId);
       if (["pending", "processing"].includes(result?.status) && result.sessionId) {
         this.scheduleAuth(providerId, result.sessionId);
-        this.setState({ message: "\u6388\u6743\u7801\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7B49\u5F85\u5B98\u65B9\u9A8C\u8BC1\u7ED3\u679C\u2026" });
+        this.setState({ message: text(this.t, "status.oauthCodeSubmitted") });
       }
       return result;
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15629,7 +16013,7 @@ var DockyardClientController = class {
           this.authTimers.set(sessionId, timer);
         }
       } catch (error51) {
-        this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+        this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       }
     };
     this.authTimers.set(sessionId, setTimeout(tick, 1e3));
@@ -15642,10 +16026,10 @@ var DockyardClientController = class {
     try {
       const value = await this.call("cancel", { providerId, sessionId });
       this.applyValue(value, providerId);
-      this.setState({ auth: null, action: null, status: "ready", message: "\u672C\u6B21\u767B\u5F55\u9A8C\u8BC1\u5DF2\u53D6\u6D88\u3002" });
+      this.setState({ auth: null, action: null, status: "ready", message: text(this.t, "status.oauthCancelled") });
       return value;
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15654,10 +16038,10 @@ var DockyardClientController = class {
     try {
       const value = await this.call("setPolicy", { providerId, policy: "manual", defaultAccountId: accountId });
       this.applyValue(value, providerId);
-      this.setState({ message: "\u5DF2\u5207\u6362\u4E3A\u624B\u52A8\u8D26\u53F7\u3002" });
+      this.setState({ message: text(this.t, "status.accountSelected") });
       return value;
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15666,16 +16050,20 @@ var DockyardClientController = class {
     try {
       const value = await this.call("removeAccount", { providerId, accountId });
       const result = this.applyValue(value, providerId);
-      const diagnostics = result?.diagnostics?.length ? `\uFF08${result.diagnostics.join("\uFF1B")}\uFF09` : "";
+      const diagnostics = result?.diagnostics?.length ? ` (${result.diagnostics.join("; ")})` : "";
       const discovery = await this.refreshDiscovery(providerId);
-      const scanNotice = discovery.error ? `\uFF1B\u53D1\u73B0\u767B\u9646\u6001\u5237\u65B0\u5931\u8D25\uFF1A${discovery.error}` : "";
+      const scanNotice = discovery.error ? text(this.t, "status.discoveryRefreshFailed", { error: discovery.error }) : "";
       const provider = providerFromSnapshot(this.store.getSnapshot().snapshot, providerId);
       const supportsOAuthLogin = provider?.manifest?.capabilities?.includes("oauth_authorization");
-      const reentry = supportsOAuthLogin ? "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u70B9\u51FB\u91CD\u65B0\u6388\u6743\u3002" : "\u5982\u9700\u91CD\u65B0\u63A5\u5165\uFF0C\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u3002";
-      this.setState({ auth: null, message: `\u8D26\u53F7\u5DF2\u79FB\u9664${diagnostics}${scanNotice}\uFF1B${reentry}` });
+      const reentry = supportsOAuthLogin ? text(this.t, "status.reentryOAuth") : text(this.t, "status.reentryScan");
+      this.setState({ auth: null, message: text(this.t, "status.accountRemoved", {
+        details: diagnostics,
+        scanNotice: scanNotice ? `; ${scanNotice}` : "",
+        reentry
+      }) });
       return value;
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15684,10 +16072,10 @@ var DockyardClientController = class {
     try {
       const value = await this.call("setPolicy", { providerId, policy });
       this.applyValue(value, providerId);
-      this.setState({ message: `\u8D26\u53F7\u7B56\u7565\u5DF2\u8BBE\u7F6E\u4E3A${POLICY_LABELS[policy] ?? policy}\u3002` });
+      this.setState({ message: text(this.t, "status.policyUpdated", { policy: policyLabel(this.t, policy) }) });
       return value;
     } catch (error51) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error51) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error51, this.t) });
       return null;
     }
   }
@@ -15720,10 +16108,10 @@ function ChevronIcon({ open }) {
     fill: "currentColor"
   })));
 }
-function quotaView(account) {
-  const rows = quotaRowsForAccount(account);
+function quotaView(account, t) {
+  const rows = quotaRowsForAccount(account, t);
   if (rows.length === 0) {
-    const diagnostic = account?.resources?.quotaDiagnostic ?? "provider \u5C1A\u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3";
+    const diagnostic = account?.resources?.quotaDiagnostic ?? text(t, "quota.noWindow");
     const quotaUrl = account?.resources?.quotaUrl;
     return h(
       "div",
@@ -15733,12 +16121,12 @@ function quotaView(account) {
         href: quotaUrl,
         target: "_blank",
         rel: "noreferrer noopener"
-      }, "\u6253\u5F00\u5B98\u65B9\u7528\u91CF\u9875\u9762")) : null
+      }, text(t, "quota.openUsage"))) : null
     );
   }
   return h("div", { className: "dockyard-dsh-quota" }, rows.map((window2, index) => {
     const percent = quotaPercent(window2);
-    const value = window2.limit === null || window2.limit === void 0 ? formatNumber(window2.remaining) : `${formatNumber(window2.remaining)} / ${formatNumber(window2.limit)}`;
+    const value = window2.limit === null || window2.limit === void 0 ? formatNumber(window2.remaining, t) : `${formatNumber(window2.remaining, t)} / ${formatNumber(window2.limit, t)}`;
     const unit = window2.unit ? ` ${window2.unit}` : "";
     return h(
       "div",
@@ -15746,7 +16134,7 @@ function quotaView(account) {
       h(
         "div",
         { className: "dockyard-dsh-quota-row" },
-        h("span", { className: "dockyard-dsh-quota-copy" }, `${window2.name ?? window2.id ?? "\u989D\u5EA6"}${unit}`),
+        h("span", { className: "dockyard-dsh-quota-copy" }, `${window2.name ?? window2.id ?? text(t, "value.quota")}${unit}`),
         h("span", { className: "dockyard-dsh-quota-value" }, percent === null ? value : `${percent}%`)
       ),
       percent === null ? null : h(
@@ -15754,11 +16142,14 @@ function quotaView(account) {
         { className: "dockyard-dsh-quota-track" },
         h("div", { className: "dockyard-dsh-quota-fill", style: { width: `${percent}%` } })
       ),
-      h("div", { className: "dockyard-dsh-muted" }, `\u91CD\u7F6E\uFF1A${formatDate(window2.resetAt)} \xB7 \u66F4\u65B0\uFF1A${formatDate(window2.updatedAt)}`)
+      h("div", { className: "dockyard-dsh-muted" }, text(t, "quota.resetUpdated", {
+        reset: formatDate(window2.resetAt, t),
+        updated: formatDate(window2.updatedAt, t)
+      }))
     );
   }));
 }
-function AccountCard({ account, current, providerId, controller, busy }) {
+function AccountCard({ account, current, providerId, controller, busy, t }) {
   const health = account?.health?.status;
   return h(
     "div",
@@ -15769,8 +16160,8 @@ function AccountCard({ account, current, providerId, controller, busy }) {
       h(
         "div",
         { className: "dockyard-dsh-account-identity" },
-        h("div", { className: "dockyard-dsh-account-name" }, accountName(account)),
-        h("div", { className: "dockyard-dsh-account-id" }, accountIdentityLine(account))
+        h("div", { className: "dockyard-dsh-account-name" }, accountName(account, t)),
+        h("div", { className: "dockyard-dsh-account-id" }, accountIdentityLine(account, t))
       ),
       h(
         "div",
@@ -15780,27 +16171,27 @@ function AccountCard({ account, current, providerId, controller, busy }) {
           className: "dockyard-dsh-account-use",
           disabled: busy || current,
           onClick: () => controller.selectAccount(providerId, account.accountId)
-        }, current ? "\u5F53\u524D\u8D26\u53F7" : "\u624B\u52A8\u4F7F\u7528"),
+        }, current ? text(t, "account.current") : text(t, "account.manualUse")),
         h("button", {
           type: "button",
           className: "dockyard-dsh-account-remove",
           disabled: busy,
           onClick: () => {
-            if (typeof window !== "undefined" && !window.confirm(`\u786E\u8BA4\u79FB\u9664\u8D26\u53F7 ${accountName(account)}\uFF1F\u8FD9\u4F1A\u4ECE Dockyard DSH \u8D26\u53F7\u6C60\u548C\u672C\u673A Keychain \u5F15\u7528\u4E2D\u5220\u9664\u3002`)) return;
+            if (typeof window !== "undefined" && !window.confirm(text(t, "account.confirmRemove", { account: accountName(account, t) }))) return;
             controller.removeAccount(providerId, account.accountId);
           }
-        }, "\u79FB\u9664")
+        }, text(t, "account.remove"))
       )
     ),
     h(
       "div",
       { className: "dockyard-dsh-account-meta" },
-      h("span", { className: "dockyard-dsh-health", "data-bad": ["degraded", "cooldown", "expired", "exhausted"].includes(health) }, `${healthLabel(health)} \xB7 ${account.subscription?.plan ?? "\u8BA2\u9605\u672A\u8FD4\u56DE"}`),
-      account.refresh?.nextRefreshAt ? h("span", null, `OAuth\uFF1A${formatDate(account.refresh.nextRefreshAt)}`) : null
+      h("span", { className: "dockyard-dsh-health", "data-bad": ["degraded", "cooldown", "expired", "exhausted"].includes(health) }, `${healthLabel(health, t)} \xB7 ${account.subscription?.plan ?? text(t, "account.planMissing")}`),
+      account.refresh?.nextRefreshAt ? h("span", null, `OAuth: ${formatDate(account.refresh.nextRefreshAt, t)}`) : null
     ),
     account.resources?.identityNote ? h("div", { className: "dockyard-dsh-account-note" }, account.resources.identityNote) : null,
     account.health?.lastError ? h("div", { className: "dockyard-dsh-account-error", title: account.health.lastError }, account.health.lastError) : null,
-    quotaView(account)
+    quotaView(account, t)
   );
 }
 function candidateMatchesAccount(candidate, account) {
@@ -15810,12 +16201,12 @@ function candidateMatchesAccount(candidate, account) {
   const accountEmail = typeof account.email === "string" ? account.email.trim().toLowerCase() : "";
   return Boolean(candidateEmail && accountEmail && candidateEmail === accountEmail);
 }
-function CandidateList({ scan, providerId, controller, busy, accounts = [] }) {
+function CandidateList({ scan, providerId, controller, busy, accounts = [], t }) {
   const provider = scan?.providers?.find((entry) => entry.providerId === providerId);
   const candidates = provider?.candidates ?? [];
   const availableCandidates = candidates.filter((candidate) => !candidate.imported && !accounts.some((account) => candidateMatchesAccount(candidate, account)));
   if (availableCandidates.length === 0) {
-    return h("div", { className: "dockyard-dsh-muted" }, provider?.diagnostics?.join("\uFF1B") ?? "\u6CA1\u6709\u53D1\u73B0\u65B0\u7684\u672C\u673A OAuth \u767B\u5F55\u6001");
+    return h("div", { className: "dockyard-dsh-muted" }, provider?.diagnostics?.join("\uFF1B") ?? text(t, "candidate.noNew"));
   }
   return h("div", { className: "dockyard-dsh-candidates" }, availableCandidates.map((candidate) => h(
     "div",
@@ -15829,10 +16220,10 @@ function CandidateList({ scan, providerId, controller, busy, accounts = [] }) {
       className: "dockyard-dsh-action",
       disabled: busy,
       onClick: () => controller.add(providerId, candidate.candidateId)
-    }, "\u6DFB\u52A0")
+    }, text(t, "candidate.add"))
   )));
 }
-function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
+function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy, t }) {
   const [code, setCode] = useState("");
   const submit = async (event) => {
     event.preventDefault();
@@ -15840,12 +16231,12 @@ function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
     const result = await controller.submitAuthorizationCode(providerId, auth.sessionId, code);
     if (result) setCode("");
   };
-  const providerLabel = providerId === "antigravity" ? "Antigravity" : "\u5B98\u65B9\u8BA2\u9605";
+  const providerLabel = providerId === "antigravity" ? "Antigravity" : text(t, "auth.providerSubscription");
   return h(
     "div",
     { className: "dockyard-dsh-login-guide" },
-    h("div", { className: "dockyard-dsh-login-guide-title" }, `${providerLabel} \u6D4F\u89C8\u5668\u6388\u6743`),
-    h("div", { className: "dockyard-dsh-login-guide-copy" }, "DSH \u5DF2\u6253\u5F00\u5B98\u65B9\u6388\u6743\u9875\u9762\uFF0C\u8BF7\u9009\u62E9\u8981\u6DFB\u52A0\u7684\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\uFF1A"),
+    h("div", { className: "dockyard-dsh-login-guide-title" }, text(t, "auth.browserTitle", { provider: providerLabel })),
+    h("div", { className: "dockyard-dsh-login-guide-copy" }, text(t, "auth.intro")),
     h(
       "ol",
       { className: "dockyard-dsh-login-guide-steps" },
@@ -15853,19 +16244,19 @@ function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
         "li",
         { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "1"),
-        h("span", null, "\u5728\u5B98\u65B9\u9875\u9762\u9009\u62E9\u8981\u6DFB\u52A0\u7684\u8D26\u53F7\u5E76\u5B8C\u6210\u6388\u6743\u3002")
+        h("span", null, text(t, "auth.step1"))
       ),
       h(
         "li",
         { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "2"),
-        h("span", null, "\u6388\u6743\u5B8C\u6210\u540E\u56DE\u5230\u8FD9\u91CC\uFF0CDSH \u4F1A\u81EA\u52A8\u63A5\u5165\u8D26\u53F7\uFF0C\u5E76\u663E\u793A\u5B98\u65B9\u8FD4\u56DE\u7684\u53EF\u7528\u6027\u6216\u989D\u5EA6\u4FE1\u606F\u3002")
+        h("span", null, text(t, "auth.step2"))
       ),
       h(
         "li",
         { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "3"),
-        h("span", null, "\u5982\u679C\u9875\u9762\u8FD4\u56DE\u6388\u6743\u7801\uFF0C\u8BF7\u7C98\u8D34\u5305\u542B state \u7684\u5B8C\u6574\u56DE\u8C03\u5730\u5740\uFF0C\u6216\u4F7F\u7528 code#state \u683C\u5F0F\u3002")
+        h("span", null, text(t, "auth.step3"))
       )
     ),
     h(
@@ -15875,40 +16266,41 @@ function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
         value: code,
         disabled: busy,
         onChange: (event) => setCode(event.target.value),
-        placeholder: "\u5B8C\u6574\u56DE\u8C03\u5730\u5740\u6216 code#state",
-        "aria-label": "\u5B98\u65B9\u6388\u6743\u7801\u6216\u56DE\u8C03\u5730\u5740"
+        placeholder: text(t, "auth.callbackPlaceholder"),
+        "aria-label": text(t, "auth.callbackAria")
       }),
-      h("button", { type: "submit", className: "dockyard-dsh-action", disabled: busy || !code.trim() }, "\u63D0\u4EA4\u9A8C\u8BC1")
+      h("button", { type: "submit", className: "dockyard-dsh-action", disabled: busy || !code.trim() }, text(t, "auth.submit"))
     ),
-    auth?.authorizationUrl && typeof window !== "undefined" ? h("button", { type: "button", className: "dockyard-dsh-action", onClick: () => window.open(auth.authorizationUrl, "_blank", "noopener,noreferrer") }, "\u91CD\u65B0\u6253\u5F00\u9A8C\u8BC1\u9875") : null,
+    auth?.authorizationUrl && typeof window !== "undefined" ? h("button", { type: "button", className: "dockyard-dsh-action", onClick: () => window.open(auth.authorizationUrl, "_blank", "noopener,noreferrer") }, text(t, "auth.reopen")) : null,
     auth?.sessionId && ["pending", "processing"].includes(auth.status) ? h("button", {
       type: "button",
       className: "dockyard-dsh-action dockyard-dsh-action-danger",
       disabled: busy,
       onClick: () => controller.cancelAuthorization(providerId, auth.sessionId)
-    }, busy ? "\u53D6\u6D88\u4E2D\u2026" : "\u53D6\u6D88\u672C\u6B21\u767B\u5F55") : null,
+    }, busy ? text(t, "status.canceling") : text(t, "auth.cancel")) : null,
     auth?.diagnostic ? h("div", { className: "dockyard-dsh-login-guide-error" }, auth.diagnostic) : null
   );
 }
-function nativeQuotaView(native) {
+function nativeQuotaView(native, t) {
   const usage = native?.usage ?? native?.entry?.usage ?? null;
   if (usage?.status === "unsupported") {
-    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? "provider \u5B98\u65B9\u672A\u63D0\u4F9B\u5B9E\u65F6\u989D\u5EA6\u63A5\u53E3");
+    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? text(t, "quota.noWindow"));
   }
   if (usage?.status === "error") {
-    return h("div", { className: "dockyard-dsh-muted", "data-error": true }, `\u989D\u5EA6\u8BFB\u53D6\u5931\u8D25\uFF1A${usage.message ?? "\u672A\u77E5\u9519\u8BEF"}`);
+    return h("div", { className: "dockyard-dsh-muted", "data-error": true }, text(t, "quota.readFailed", { error: usage.message ?? text(t, "error.unknown") }));
   }
   if (usage?.status === "unconfigured") {
-    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? "\u8BE5 Key \u5C1A\u672A\u914D\u7F6E");
+    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? text(t, "quota.keyUnconfigured"));
   }
   const quota = native?.quota ?? native?.entry?.quota ?? null;
-  if (quota) return quotaView({ quota });
-  return h("div", { className: "dockyard-dsh-muted" }, "\u5F53\u524D provider \u672A\u8FD4\u56DE\u989D\u5EA6\u7A97\u53E3\uFF1B\u8FD9\u91CC\u4E0D\u4F1A\u731C\u6D4B\u6216\u663E\u793A\u4F2A\u9020\u767E\u5206\u6BD4\u3002");
+  if (quota) return quotaView({ quota }, t);
+  return h("div", { className: "dockyard-dsh-muted" }, text(t, "quota.currentNoWindow"));
 }
-function NativeKeyCard({ entry, providerId, controller, busy }) {
+function NativeKeyCard({ entry, providerId, controller, busy, t }) {
   const configured = entry?.configured === true;
   const current = entry?.active === true;
   const writable = entry?.credential?.writable !== false;
+  const label = entry?.label ?? entry?.ref ?? text(t, "title.key");
   return h(
     "div",
     { className: "dockyard-dsh-account", "data-current": current },
@@ -15918,7 +16310,7 @@ function NativeKeyCard({ entry, providerId, controller, busy }) {
       h(
         "div",
         { className: "dockyard-dsh-account-identity" },
-        h("div", { className: "dockyard-dsh-account-name" }, entry?.label ?? entry?.ref ?? "Key"),
+        h("div", { className: "dockyard-dsh-account-name" }, label),
         h("div", { className: "dockyard-dsh-key-ref", title: entry?.ref }, entry?.ref)
       ),
       h(
@@ -15929,36 +16321,36 @@ function NativeKeyCard({ entry, providerId, controller, busy }) {
           className: "dockyard-dsh-account-use",
           disabled: busy || current || !configured,
           onClick: () => controller.selectKey(providerId, entry.ref)
-        }, current ? "\u5F53\u524D Key" : "\u624B\u52A8\u4F7F\u7528"),
+        }, current ? text(t, "native.currentKey") : text(t, "native.manualUse")),
         h("button", {
           type: "button",
           className: "dockyard-dsh-account-remove",
           disabled: busy,
-          title: writable ? "\u4ECE DSH Credentials \u79FB\u9664" : "\u4EC5\u89E3\u9664 provider \u5F15\u7528\uFF0C\u4E0D\u5220\u9664\u539F\u59CB\u6587\u4EF6\u51ED\u8BC1",
+          title: writable ? text(t, "native.removeTitle") : text(t, "native.unlinkTitle"),
           onClick: () => {
-            const action = writable ? "\u4ECE DSH Credentials \u4E2D\u5220\u9664\u8BE5 Key" : "\u89E3\u9664 provider \u5BF9\u8BE5 Key \u7684\u5F15\u7528\uFF08\u539F\u59CB\u6587\u4EF6\u51ED\u8BC1\u4F1A\u4FDD\u7559\uFF09";
-            if (typeof window !== "undefined" && !window.confirm(`\u786E\u8BA4${action}\uFF1A${entry?.label ?? entry?.ref}\uFF1F`)) return;
+            const action = writable ? text(t, "native.removeTitle") : text(t, "native.unlinkTitle");
+            if (typeof window !== "undefined" && !window.confirm(text(t, "native.removeConfirm", { action, label }))) return;
             controller.removeKey(providerId, entry.ref);
           }
-        }, writable ? "\u79FB\u9664" : "\u89E3\u9664\u5F15\u7528")
+        }, writable ? text(t, "native.remove") : text(t, "native.unlinkReference"))
       )
     ),
     h(
       "div",
       { className: "dockyard-dsh-account-meta" },
-      h("span", { className: configured ? "dockyard-dsh-health" : "dockyard-dsh-health", "data-bad": !configured }, configured ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"),
-      entry?.credential?.source ? h("span", { className: "dockyard-dsh-key-source" }, `\u6765\u6E90\uFF1A${entry.credential.source}`) : null,
-      entry?.implicit ? h("span", { className: "dockyard-dsh-key-source" }, "\u6765\u81EA\u5F53\u524D provider \u914D\u7F6E") : null
+      h("span", { className: "dockyard-dsh-health", "data-bad": !configured }, configured ? text(t, "native.configured") : text(t, "native.unconfigured")),
+      entry?.credential?.source ? h("span", { className: "dockyard-dsh-key-source" }, text(t, "native.source", { source: entry.credential.source })) : null,
+      entry?.implicit ? h("span", { className: "dockyard-dsh-key-source" }, text(t, "native.fromProviderConfig")) : null
     ),
-    entry?.usage ? nativeQuotaView(entry) : null
+    entry?.usage ? nativeQuotaView(entry, t) : null
   );
 }
-function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, onClose }) {
+function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [labelDraft, setLabelDraft] = useState("");
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
-  const modelLabel = model?.name ?? current?.model ?? "\u672A\u9009\u62E9\u6A21\u578B";
+  const modelLabel = model?.name ?? current?.model ?? text(t, "title.noModel");
   const compactModelId = displayModelId(providerId, current?.model);
   const tier = current?.reasoningEffort ?? model?.reasoning?.defaultEffort ?? null;
   const busy = native.action !== null;
@@ -15987,7 +16379,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
     {
       className: "dockyard-dsh-popup",
       role: "dialog",
-      "aria-label": `${title} Key \u4E0E\u989D\u5EA6\u7BA1\u7406`,
+      "aria-label": text(t, "native.keyAria", { title }),
       onMouseDown: (event) => event.stopPropagation()
     },
     h(
@@ -15996,32 +16388,32 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
       h(
         "div",
         { className: "dockyard-dsh-head-copy" },
-        h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD KEY PROVIDER"),
+        h("div", { className: "dockyard-dsh-eyebrow" }, text(t, "eyebrow.keyProvider")),
         h("div", { className: "dockyard-dsh-title" }, title),
         h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${compactModelId && modelLabel !== current.model && modelLabel !== compactModelId ? ` \xB7 ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null
       ),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "\u5173\u95ED" }, "\xD7")
+      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "\xD7")
     ),
     h("div", {
       className: "dockyard-dsh-status",
       "data-error": Boolean(native.error),
       "data-success": Boolean(native.message && !native.error),
       role: native.error ? "alert" : "status"
-    }, h("span", { className: "dockyard-dsh-status-copy" }, native.error ?? native.message ?? (native.status === "loading" ? "\u6B63\u5728\u8BFB\u53D6 DSH provider \u72B6\u6001\u2026" : "\u72B6\u6001\u6765\u81EA DSH \u539F\u751F provider \u914D\u7F6E\u4E0E Credentials"))),
+    }, h("span", { className: "dockyard-dsh-status-copy" }, native.error ?? native.message ?? (native.status === "loading" ? text(t, "status.readingNative") : text(t, "status.nativeSource")))),
     h(
       "div",
       { className: "dockyard-dsh-popup-scroll" },
       h(
         "div",
         { className: "dockyard-dsh-toolbar" },
-        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => nativeController.refresh(providerId) }, native.action === "refresh" ? "\u5237\u65B0\u4E2D\u2026" : "\u21BB \u5B9E\u65F6\u5237\u65B0")
+        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => nativeController.refresh(providerId) }, native.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh"))
       ),
-      h("div", { className: "dockyard-dsh-key-notice" }, native.runtimeMode === "request-key-pool" ? "API Key \u53EA\u901A\u8FC7 DSH Credentials \u4FDD\u5B58\uFF0C\u4E0D\u4F1A\u56DE\u663E\uFF0C\u4E5F\u4E0D\u4F1A\u5199\u5165\u6D4F\u89C8\u5668\u5B58\u50A8\u3002\u5F53\u524D\u5DF2\u63A5\u5165\u8BF7\u6C42\u7EA7 Key \u6C60\uFF1A\u624B\u52A8\u3001\u8F6E\u8BE2\u548C\u5931\u8D25\u8F6C\u79FB\u4E0D\u4F1A\u6539\u5199 provider \u7684\u6FC0\u6D3B\u914D\u7F6E\u3002" : "API Key \u53EA\u901A\u8FC7 DSH Credentials \u4FDD\u5B58\uFF0C\u4E0D\u4F1A\u56DE\u663E\uFF0C\u4E5F\u4E0D\u4F1A\u5199\u5165\u6D4F\u89C8\u5668\u5B58\u50A8\u3002\u5F53\u524D DSH \u9002\u914D\u5668\u672A\u66B4\u9732\u8BF7\u6C42\u7EA7 Key \u6C60\uFF0C\u6682\u53EA\u80FD\u624B\u52A8\u5207\u6362\u6FC0\u6D3B Key\u3002"),
+      h("div", { className: "dockyard-dsh-key-notice" }, native.runtimeMode === "request-key-pool" ? text(t, "native.notice.requestPool") : text(t, "native.notice.manual")),
       h(
         "div",
         { className: "dockyard-dsh-field" },
-        h("span", { className: "dockyard-dsh-field-label" }, "Key \u7B56\u7565"),
+        h("span", { className: "dockyard-dsh-field-label" }, text(t, "native.keyStrategy")),
         h(
           "select",
           {
@@ -16032,79 +16424,80 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
               void nativeController.setPolicy(providerId, event.target.value);
             }
           },
-          h("option", { value: "manual" }, NATIVE_KEY_POLICY_LABELS.manual),
-          h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, NATIVE_KEY_POLICY_LABELS.round_robin),
-          h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, NATIVE_KEY_POLICY_LABELS.failover)
-        )
-      ),
-      h(
-        "div",
-        { className: "dockyard-dsh-key-form" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u6DFB\u52A0\u65B0\u7684 API Key"), h("span", { className: "dockyard-dsh-section-value" }, "\u5199\u5165 DSH Credentials")),
+          h("option", { value: "manual" }, text(t, "nativePolicy.manual")),
+          h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.round_robin")),
+          h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.failover"))
+        ),
         h(
           "div",
-          { className: "dockyard-dsh-key-form-row" },
+          { className: "dockyard-dsh-key-form" },
+          h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.addKeyTitle")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.credentialsWrite"))),
+          h(
+            "div",
+            { className: "dockyard-dsh-key-form-row" },
+            h("input", {
+              className: "dockyard-dsh-key-input",
+              type: "password",
+              value: keyDraft,
+              placeholder: text(t, "native.pasteApiKey"),
+              autoComplete: "off",
+              onChange: (event) => setKeyDraft(event.target.value)
+            }),
+            h("button", { type: "button", className: "dockyard-dsh-key-save", disabled: busy || !keyDraft.trim(), onClick: addKey }, native.action === "add" ? text(t, "native.saving") : text(t, "native.save"))
+          ),
           h("input", {
             className: "dockyard-dsh-key-input",
-            type: "password",
-            value: keyDraft,
-            placeholder: "\u7C98\u8D34 API Key",
-            autoComplete: "off",
-            onChange: (event) => setKeyDraft(event.target.value)
-          }),
-          h("button", { type: "button", className: "dockyard-dsh-key-save", disabled: busy || !keyDraft.trim(), onClick: addKey }, native.action === "add" ? "\u4FDD\u5B58\u4E2D\u2026" : "\u6DFB\u52A0\u5E76\u542F\u7528")
+            type: "text",
+            value: labelDraft,
+            placeholder: text(t, "native.optionalName"),
+            onChange: (event) => setLabelDraft(event.target.value)
+          })
         ),
-        h("input", {
-          className: "dockyard-dsh-key-input",
-          type: "text",
-          value: labelDraft,
-          placeholder: "\u540D\u79F0\uFF08\u53EF\u9009\uFF0C\u4F8B\u5982\u5DE5\u4F5C Key\uFF09",
-          onChange: (event) => setLabelDraft(event.target.value)
-        })
-      ),
-      efforts.length > 0 ? h(
-        "div",
-        { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u5F53\u524D\u6A21\u578B\u6863\u4F4D"), h("span", { className: "dockyard-dsh-section-value" }, "\u6765\u81EA\u5B9E\u65F6 catalog")),
-        h("div", { className: "dockyard-dsh-tier-list" }, efforts.map((effort) => h("button", {
-          type: "button",
-          className: "dockyard-dsh-tier",
-          "data-active": tier === effort.id,
-          disabled: tierBusy,
-          key: effort.id,
-          title: effort.description ?? effort.id,
-          onClick: () => chooseTier(effort.id)
-        }, effort.name ?? effort.id)))
-      ) : null,
-      h(
-        "div",
-        { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u5DF2\u914D\u7F6E Key"), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
-        keys.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, "\u5F53\u524D provider \u8FD8\u6CA1\u6709\u914D\u7F6E API Key\u3002") : keys.map((entry) => h(NativeKeyCard, {
-          key: entry.ref,
-          entry,
-          providerId,
-          controller: nativeController,
-          busy
-        }))
-      ),
-      h(
-        "div",
-        { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u989D\u5EA6\u7A97\u53E3"), h("span", { className: "dockyard-dsh-section-value" }, "provider \u5B9E\u65F6\u8FD4\u56DE")),
-        nativeQuotaView(native)
+        efforts.length > 0 ? h(
+          "div",
+          { className: "dockyard-dsh-section" },
+          h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.currentModelTier")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "subscription.liveCatalog"))),
+          h("div", { className: "dockyard-dsh-tier-list" }, efforts.map((effort) => h("button", {
+            type: "button",
+            className: "dockyard-dsh-tier",
+            "data-active": tier === effort.id,
+            disabled: tierBusy,
+            key: effort.id,
+            title: effort.description ?? effort.id,
+            onClick: () => chooseTier(effort.id)
+          }, effort.name ?? effort.id)))
+        ) : null,
+        h(
+          "div",
+          { className: "dockyard-dsh-section" },
+          h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.configuredKeys")), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
+          keys.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, text(t, "native.noKeys")) : keys.map((entry) => h(NativeKeyCard, {
+            t,
+            key: entry.ref,
+            entry,
+            providerId,
+            controller: nativeController,
+            busy
+          }))
+        ),
+        h(
+          "div",
+          { className: "dockyard-dsh-section" },
+          h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.quotaWindow")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.providerRealtime"))),
+          nativeQuotaView(native, t)
+        )
       )
     )
   );
 }
-function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose }) {
+function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
   const busy = controlState.action !== null;
   return h(
     "div",
     {
       className: "dockyard-dsh-popup",
       role: "dialog",
-      "aria-label": "\u8BA2\u9605\u7BA1\u7406",
+      "aria-label": text(t, "subscription.aria"),
       onMouseDown: (event) => event.stopPropagation()
     },
     h(
@@ -16113,11 +16506,11 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
       h(
         "div",
         { className: "dockyard-dsh-head-copy" },
-        h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD SUBSCRIPTIONS"),
-        h("div", { className: "dockyard-dsh-title" }, "\u8BA2\u9605\u7BA1\u7406"),
-        h("div", { className: "dockyard-dsh-model" }, "\u9009\u62E9\u4E00\u4E2A\u5382\u5546\uFF0C\u8FDB\u5165\u767B\u5F55\u3001\u8D26\u53F7\u548C\u989D\u5EA6\u914D\u7F6E")
+        h("div", { className: "dockyard-dsh-eyebrow" }, text(t, "eyebrow.subscriptions")),
+        h("div", { className: "dockyard-dsh-title" }, text(t, "title.subscriptionManagement")),
+        h("div", { className: "dockyard-dsh-model" }, text(t, "subtitle.subscriptionManagement"))
       ),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "\u5173\u95ED" }, "\xD7")
+      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "\xD7")
     ),
     h(
       "div",
@@ -16127,7 +16520,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
         "data-success": Boolean(controlState.message && !controlState.error),
         role: controlState.error ? "alert" : "status"
       },
-      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading" ? "\u6B63\u5728\u8BFB\u53D6\u8BA2\u9605\u5382\u5546\u2026" : "\u63A5\u5165\u8D26\u53F7\u540E\uFF0C\u6A21\u578B\u4F1A\u81EA\u52A8\u51FA\u73B0\u5728\u6A21\u578B\u9009\u62E9\u5668\u4E2D\u3002"))
+      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading" ? text(t, "status.readingSubscriptions") : text(t, "status.subscriptionReady")))
     ),
     h(
       "div",
@@ -16140,7 +16533,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
           className: "dockyard-dsh-action dockyard-dsh-action-primary",
           disabled: busy,
           onClick: () => controller.refreshAll()
-        }, controlState.action === "refresh" ? "\u5237\u65B0\u4E2D\u2026" : "\u21BB \u5237\u65B0\u5168\u90E8\u989D\u5EA6")
+        }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "subscription.refreshAll"))
       ),
       h(
         "div",
@@ -16148,14 +16541,14 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
         h(
           "div",
           { className: "dockyard-dsh-section-title" },
-          h("span", null, "\u8BA2\u9605\u5382\u5546"),
-          h("span", { className: "dockyard-dsh-section-value" }, `${providers.length} \u4E2A`)
+          h("span", null, text(t, "subscription.providers")),
+          h("span", { className: "dockyard-dsh-section-value" }, text(t, "subscription.providerCount", { count: providers.length }))
         ),
-        providers.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, "\u6682\u672A\u53D1\u73B0\u53EF\u7528\u7684\u8BA2\u9605\u5382\u5546\u3002") : h("div", { className: "dockyard-dsh-provider-list" }, providers.map((provider) => {
+        providers.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, text(t, "subscription.none")) : h("div", { className: "dockyard-dsh-provider-list" }, providers.map((provider) => {
           const providerId = provider.providerId;
           const group = directoryState?.groups?.find((entry) => entry.id === providerId);
-          const modelCount = Array.isArray(group?.models) ? `${group.models.length} \u4E2A\u6A21\u578B` : "\u6A21\u578B\u76EE\u5F55\u5F85\u52A0\u8F7D";
-          const displayName = providerDisplayName(providerId, provider.manifest);
+          const modelCount = Array.isArray(group?.models) ? text(t, "subscription.modelCount", { count: group.models.length }) : text(t, "subscription.modelPending");
+          const displayName = providerDisplayName(providerId, provider.manifest, t);
           return h(
             "button",
             {
@@ -16164,13 +16557,13 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
               "data-current": providerId === selectedProviderId,
               key: providerId,
               onClick: () => onSelect(providerId),
-              "aria-label": `\u914D\u7F6E${displayName}`
+              "aria-label": text(t, "subscription.configure", { provider: displayName })
             },
             h(
               "span",
               { className: "dockyard-dsh-provider-row-copy" },
               h("span", { className: "dockyard-dsh-provider-row-name" }, displayName),
-              h("span", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider)} \xB7 ${modelCount}`)
+              h("span", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider, t)} \xB7 ${modelCount}`)
             ),
             h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "\u203A")
           );
@@ -16179,10 +16572,10 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
     )
   );
 }
-function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, onOpenOverview, onClose }) {
+function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, onOpenOverview, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
-  const modelLabel = model?.name ?? current?.model ?? "\u672A\u9009\u62E9\u6A21\u578B";
+  const modelLabel = model?.name ?? current?.model ?? text(t, "title.noModel");
   const compactModelId = displayModelId(providerId, current?.model);
   const tier = current?.reasoningEffort ?? model?.reasoning?.defaultEffort ?? null;
   const accounts = provider?.accounts ?? [];
@@ -16205,7 +16598,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
     {
       className: "dockyard-dsh-popup",
       role: "dialog",
-      "aria-label": `${providerDisplayName(providerId, provider?.manifest)} \u8D26\u53F7\u7BA1\u7406`,
+      "aria-label": `${providerDisplayName(providerId, provider?.manifest, t)} ${text(t, "trigger.accountQuota")}`,
       onMouseDown: (event) => event.stopPropagation()
     },
     h(
@@ -16214,12 +16607,12 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
       h(
         "div",
         { className: "dockyard-dsh-head-copy" },
-        h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD SUBSCRIPTION"),
-        h("div", { className: "dockyard-dsh-title" }, providerDisplayName(providerId, provider?.manifest) || group?.name),
+        h("div", { className: "dockyard-dsh-eyebrow" }, text(t, "eyebrow.subscription")),
+        h("div", { className: "dockyard-dsh-title" }, providerDisplayName(providerId, provider?.manifest, t) || group?.name),
         h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${compactModelId && modelLabel !== current.model && modelLabel !== compactModelId ? ` \xB7 ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null
       ),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "\u5173\u95ED" }, "\xD7")
+      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "\xD7")
     ),
     h(
       "div",
@@ -16229,42 +16622,42 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         "data-success": Boolean(controlState.message && !controlState.error),
         role: controlState.error ? "alert" : "status"
       },
-      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading" ? "\u6B63\u5728\u8BFB\u53D6 provider \u5B9E\u65F6\u72B6\u6001\u2026" : "\u72B6\u6001\u6765\u81EA\u5F53\u524D provider \u7684 OAuth \u4E0E\u989D\u5EA6\u6570\u636E"))
+      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading" ? text(t, "status.readingProvider") : text(t, "status.providerOAuthQuota")))
     ),
     h(
       "div",
       { className: "dockyard-dsh-popup-scroll" },
-      providerId === "antigravity" ? h("div", { className: "dockyard-dsh-account-note" }, "\u6DFB\u52A0\u8D26\u53F7\u65F6\uFF0CDSH \u4F1A\u63A5\u5165 Google \u5B98\u65B9\u4F1A\u8BDD\u5E76\u8BFB\u53D6\u5B9E\u65F6\u989D\u5EA6\uFF1B\u8BF7\u6309\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u6388\u6743\u9875\u63D0\u793A\u5B8C\u6210\u767B\u5F55\u3002") : null,
+      providerId === "antigravity" ? h("div", { className: "dockyard-dsh-account-note" }, text(t, "subscription.antigravityNote")) : null,
       h(
         "div",
         { className: "dockyard-dsh-toolbar" },
-        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: onOpenOverview }, "\u5168\u90E8\u8BA2\u9605"),
-        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => controller.refresh(providerId) }, controlState.action === "refresh" ? "\u5237\u65B0\u4E2D\u2026" : "\u21BB \u5B9E\u65F6\u5237\u65B0"),
-        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login" ? supportsOAuthLogin ? "\u7B49\u5F85\u9A8C\u8BC1\u2026" : "\u8BFB\u53D6\u8BF4\u660E\u2026" : authInProgress ? "\u9A8C\u8BC1\u8FDB\u884C\u4E2D\u2026" : needsReauthorization && supportsOAuthLogin ? "\u21BB \u91CD\u65B0\u6388\u6743" : supportsOAuthLogin ? "\uFF0B \u767B\u5F55\u6DFB\u52A0\u8D26\u53F7" : "\u5B98\u65B9\u767B\u5F55\u8BF4\u660E"),
-        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: () => controller.scan(providerId) }, controlState.action === "scan" ? "\u626B\u63CF\u4E2D\u2026" : "\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001")
+        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: onOpenOverview }, text(t, "subscription.all")),
+        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => controller.refresh(providerId) }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh")),
+        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login" ? supportsOAuthLogin ? text(t, "status.waitingVerification") : text(t, "status.readingInstructions") : authInProgress ? text(t, "status.verificationInProgress") : needsReauthorization && supportsOAuthLogin ? text(t, "auth.reauthorize") : supportsOAuthLogin ? text(t, "auth.loginAdd") : text(t, "auth.officialInstructions")),
+        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: () => controller.scan(providerId) }, controlState.action === "scan" ? text(t, "status.scanning") : text(t, "auth.scanLocal"))
       ),
-      controlState.auth?.providerId === providerId ? controlState.auth.authorizationCodeRequired || providerId === "antigravity" ? h(AuthorizationCodeLoginGuide, { auth: controlState.auth, providerId, controller, busy }) : h(
+      controlState.auth?.providerId === providerId ? controlState.auth.authorizationCodeRequired || providerId === "antigravity" ? h(AuthorizationCodeLoginGuide, { auth: controlState.auth, providerId, controller, busy, t }) : h(
         "div",
         { className: "dockyard-dsh-status dockyard-dsh-auth-status" },
         h("span", { className: "dockyard-dsh-status-copy" }, `${controlState.auth.status}${controlState.auth.instructions ? ` \xB7 ${controlState.auth.instructions}` : ""}`),
-        controlState.auth.authorizationUrl && typeof window !== "undefined" ? h("button", { type: "button", className: "dockyard-dsh-action", title: "\u6253\u5F00\u5B98\u65B9\u6388\u6743\u9875\u9762", onClick: () => window.open(controlState.auth.authorizationUrl, "_blank", "noopener,noreferrer") }, "\u6388\u6743") : null,
+        controlState.auth.authorizationUrl && typeof window !== "undefined" ? h("button", { type: "button", className: "dockyard-dsh-action", title: text(t, "auth.openPage"), onClick: () => window.open(controlState.auth.authorizationUrl, "_blank", "noopener,noreferrer") }, text(t, "auth.authorize")) : null,
         controlState.auth.diagnostic ? h("span", { className: "dockyard-dsh-status-copy dockyard-dsh-auth-diagnostic" }, controlState.auth.diagnostic) : null
       ) : null,
       h(
         "div",
         { className: "dockyard-dsh-field" },
-        h("span", { className: "dockyard-dsh-field-label" }, "\u8D26\u53F7\u7B56\u7565"),
+        h("span", { className: "dockyard-dsh-field-label" }, text(t, "subscription.accountStrategy")),
         h("select", {
           className: "dockyard-dsh-select",
           value: provider?.policy ?? "round_robin",
           disabled: busy,
           onChange: (event) => controller.setPolicy(providerId, event.target.value)
-        }, Object.entries(POLICY_LABELS).map(([value, label]) => h("option", { value, key: value }, label)))
+        }, Object.keys(POLICY_KEYS).map((value) => h("option", { value, key: value }, policyLabel(t, value))))
       ),
       efforts.length > 0 ? h(
         "div",
         { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u5F53\u524D\u6A21\u578B\u6863\u4F4D"), h("span", { className: "dockyard-dsh-section-value" }, "\u6765\u81EA\u5B9E\u65F6 catalog")),
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.currentModelTier")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "subscription.liveCatalog"))),
         h("div", { className: "dockyard-dsh-tier-list" }, efforts.map((effort) => h("button", {
           type: "button",
           className: "dockyard-dsh-tier",
@@ -16278,8 +16671,9 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
       h(
         "div",
         { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u5DF2\u8FDE\u63A5\u8D26\u53F7"), h("span", { className: "dockyard-dsh-section-value" }, `${accounts.length}`)),
-        accounts.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, supportsOAuthLogin ? "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u70B9\u51FB\u201C\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u201D\u540E\u4F1A\u6253\u5F00 provider \u5B98\u65B9\u9A8C\u8BC1\u9875\u3002" : "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u5E76\u6DFB\u52A0\u5019\u9009\u3002") : accounts.map((account) => h(AccountCard, {
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "subscription.connectedAccounts")), h("span", { className: "dockyard-dsh-section-value" }, `${accounts.length}`)),
+        accounts.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, supportsOAuthLogin ? text(t, "subscription.noAccountsOAuth") : text(t, "subscription.noAccountsScan")) : accounts.map((account) => h(AccountCard, {
+          t,
           key: account.accountId,
           account,
           current: account.accountId === activeId,
@@ -16291,13 +16685,13 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
       controlState.scan ? h(
         "div",
         { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "\u672C\u673A OAuth \u5019\u9009")),
-        h(CandidateList, { scan: controlState.scan, providerId, controller, busy, accounts })
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "subscription.localCandidates"))),
+        h(CandidateList, { scan: controlState.scan, providerId, controller, busy, accounts, t })
       ) : null
     )
   );
 }
-function DockyardAccountControl({ directory, modelDirectory, controller, nativeController }) {
+function DockyardAccountControl({ directory, modelDirectory, controller, nativeController, t }) {
   const directoryState = useSnapshot(directory);
   const controlState = useSnapshot(controller.store);
   const nativeState = useSnapshot(nativeController.store);
@@ -16378,9 +16772,12 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     if (!providerId) return void 0;
     const hasProvider = Boolean(provider);
     if (hasProvider) {
-      void controller.refresh(providerId);
-      const needsAntigravityIdentityScan = providerId === "antigravity" && (provider.accounts ?? []).some((account) => !account.email && !["official_cli_auth_status", "official_client_auth_status", "local_oauth_session_fingerprint"].includes(account.resources?.identitySource));
-      if (open && needsAntigravityIdentityScan) void controller.scan(providerId);
+      const needsIdentityScan = (provider.accounts ?? []).some((account) => !account.email);
+      if (open && needsIdentityScan) {
+        void controller.scan(providerId).then(() => controller.refresh(providerId));
+      } else {
+        void controller.refresh(providerId);
+      }
       const timer2 = setInterval(() => controller.refresh(providerId), 3e4);
       return () => clearInterval(timer2);
     }
@@ -16441,9 +16838,9 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     };
   }, [open, providerId, showOverview, providers.length]);
   const currentSelectedAccount = currentProvider?.defaultAccountId ? currentProvider.accounts?.find((account) => account.accountId === currentProvider.defaultAccountId) : currentProvider?.accounts?.length === 1 ? currentProvider.accounts[0] : null;
-  const summary = currentProviderId && currentProvider ? currentProvider.accounts?.length > 1 && !currentProvider.defaultAccountId ? `${currentProvider.accounts.length} \u8D26\u53F7` : quotaSummary(currentSelectedAccount) : currentProviderId && currentNative ? `${currentNative.keys?.filter((entry) => entry.configured).length ?? 0} Key` : currentProviderId && currentNativeLoading ? "\u8BFB\u53D6\u4E2D\u2026" : "";
+  const summary = currentProviderId && currentProvider ? currentProvider.accounts?.length > 1 && !currentProvider.defaultAccountId ? text(t, "summary.accountCount", { count: currentProvider.accounts.length }) : quotaSummary(currentSelectedAccount, t) : currentProviderId && currentNative ? text(t, "summary.keyCount", { count: currentNative.keys?.filter((entry) => entry.configured).length ?? 0 }) : currentProviderId && currentNativeLoading ? text(t, "status.reading") : "";
   const loading = controlState.action !== null || nativeState.action !== null || directoryState.status === "loading";
-  const providerLabel = currentProviderId ? providerDisplayName(currentProviderId, currentProvider?.manifest ?? currentNative?.entry) : "\u8BA2\u9605\u7BA1\u7406";
+  const providerLabel = currentProviderId ? providerDisplayName(currentProviderId, currentProvider?.manifest ?? currentNative?.entry, t) : text(t, "trigger.subscriptionManagement");
   const modelLabel = model?.name ?? current?.model ?? "";
   const toggleOpen = () => {
     if (open) {
@@ -16471,8 +16868,8 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       {
         type: "button",
         className: "dockyard-dsh-trigger",
-        title: currentProviderId ? `${providerLabel} \xB7 ${modelLabel}` : "\u8BA2\u9605\u7BA1\u7406",
-        "aria-label": currentProviderId ? `${providerLabel} ${currentProvider ? "\u8D26\u53F7\u4E0E\u989D\u5EA6\u7BA1\u7406" : "Key \u4E0E\u989D\u5EA6\u7BA1\u7406"}` : "\u8BA2\u9605\u7BA1\u7406",
+        title: currentProviderId ? text(t, "trigger.providerModel", { provider: providerLabel, model: modelLabel }) : text(t, "trigger.subscriptionManagement"),
+        "aria-label": currentProviderId ? `${providerLabel} ${currentProvider ? text(t, "trigger.accountQuota") : text(t, "trigger.keyQuota")}` : text(t, "subscription.aria"),
         "aria-expanded": open,
         onClick: toggleOpen
       },
@@ -16484,16 +16881,17 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     h("button", {
       type: "button",
       className: "dockyard-dsh-add-trigger",
-      title: "\u6DFB\u52A0\u8BA2\u9605",
-      "aria-label": "\u6DFB\u52A0\u8BA2\u9605",
+      title: text(t, "trigger.addTitle"),
+      "aria-label": text(t, "subscription.addAria"),
       onClick: openSubscriptionOverview
-    }, "\uFF0B \u6DFB\u52A0\u8BA2\u9605"),
+    }, text(t, "trigger.addSubscription")),
     overviewOpen ? h(SubscriptionOverviewPopup, {
       providers,
       directoryState,
       controlState,
       controller,
       selectedProviderId: currentProviderId,
+      t,
       onSelect: (selectedProviderId) => {
         setShowOverview(false);
         setDetailProviderId(selectedProviderId);
@@ -16509,9 +16907,11 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directoryState,
       controlState,
       controller,
+      t,
       onOpenOverview: openSubscriptionOverview,
       onClose: () => setOpen(false)
     }) : open && native ? h(NativeKeyPopup, {
+      t,
       providerId,
       native,
       directory: modelDirectory,
@@ -16521,20 +16921,23 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     }) : null
   );
 }
-var inject = ["slots", "modelDirectories", "remote", "connection"];
+var inject = ["slots", "modelDirectories", "remote", "connection", "locale"];
 async function apply(ctx) {
   installStyles();
   const disposeModelMenuFolding = installModelMenuFolding();
+  const disposeLocale = ctx.locale.register(DOCKYARD_LOCALE_NS, DOCKYARD_LOCALES);
+  const t = ctx.locale.bind(DOCKYARD_LOCALE_NS);
   const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
   const remote = ctx.get("remote.dockyard");
-  const controller = new DockyardClientController(remote);
+  const controller = new DockyardClientController(remote, t);
   ctx.inject(["slots", "modelDirectories", "connection"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
-    const nativeController = new NativeKeyPoolController(connection?.api, remote);
+    const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
     scope.slots.inject("conversation.input.left", () => scope.slots.register({
       name: "conversation.input.left",
       id: "dockyard-account-control",
       order: 10,
+      locale: DOCKYARD_LOCALE_NS,
       inject: (sessionId) => {
         const modelDirectory = scope.modelDirectories.directoryFor(sessionId);
         return {
@@ -16548,6 +16951,7 @@ async function apply(ctx) {
   });
   return async () => {
     disposeModelMenuFolding();
+    disposeLocale?.();
     controller.dispose();
     await disposeRemote?.();
   };

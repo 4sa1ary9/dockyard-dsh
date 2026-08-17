@@ -11,11 +11,11 @@ export const NATIVE_KEY_POLICY_LABELS = Object.freeze({
 function resultValue(response, operation) {
   const result = response?.result;
   if (result?.ok === false) {
-    throw new Error(result.error?.message ?? result.error?.code ?? `${operation} 失败`);
+    throw new Error(result.error?.message ?? result.error?.code ?? `${operation} failed`);
   }
   if (result?.ok === true) return result.value;
   if (response?.ok === false) {
-    throw new Error(response.error?.message ?? response.error?.code ?? `${operation} 失败`);
+    throw new Error(response.error?.message ?? response.error?.code ?? `${operation} failed`);
   }
   return response?.value ?? response;
 }
@@ -92,8 +92,8 @@ function makeKeyRef(providerId) {
   return `${base}_DOCKYARD_${Date.now().toString(36).toUpperCase()}_${random}`;
 }
 
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error ?? "未知错误");
+function errorMessage(error, t) {
+  return error instanceof Error ? error.message : String(error ?? t?.("error.unknown") ?? "Unknown error");
 }
 
 function nativeEntry(providerRows, providerId) {
@@ -107,7 +107,7 @@ function isApiKeyEntry(entry, profile) {
   ));
 }
 
-function keyRows(metadata, credentials, activeRef) {
+function keyRows(metadata, credentials, activeRef, t) {
   const rows = metadata.keys.map((entry) => ({
     ...entry,
     active: entry.ref === activeRef,
@@ -117,7 +117,7 @@ function keyRows(metadata, credentials, activeRef) {
   if (activeRef && !rows.some((entry) => entry.ref === activeRef)) {
     rows.unshift({
       ref: activeRef,
-      label: "当前 DSH Key",
+      label: t?.("native.currentDshKey") ?? "Current DSH Key",
       createdAt: null,
       active: true,
       configured: credentials[activeRef]?.configured === true,
@@ -158,9 +158,14 @@ export class NativeKeyPoolController {
   });
   generation = 0;
 
-  constructor(api, remote = null) {
+  constructor(api, remote = null, t = null) {
     this.api = api;
     this.remote = remote;
+    this.t = t;
+  }
+
+  operation(key, fallback) {
+    return typeof this.t === "function" ? this.t(key) : fallback;
   }
 
   setState(next) {
@@ -213,8 +218,8 @@ export class NativeKeyPoolController {
         this.api.llm.providers({}),
         this.api.settings.describe({}),
       ]);
-      const providers = resultValue(providersResponse, "读取 provider 目录").providers ?? [];
-      const settings = resultValue(settingsResponse, "读取 provider 配置");
+      const providers = resultValue(providersResponse, this.operation("native.operation.readProviderCatalog", "Read provider catalog")).providers ?? [];
+      const settings = resultValue(settingsResponse, this.operation("native.operation.readProviderConfig", "Read provider configuration"));
       const entry = nativeEntry(providers, providerId);
       const namespace = settings.namespaces?.find((view) => view.ns === entry?.settingsNs) ?? null;
       const settingsPath = Array.isArray(entry?.settingsPath) ? entry.settingsPath : [];
@@ -246,12 +251,12 @@ export class NativeKeyPoolController {
       ])];
       let credentials = {};
       if (refs.length > 0 && this.api.credentials?.describe) {
-        credentials = resultValue(await this.api.credentials.describe({ refs }), "读取 Key 状态").credentials ?? {};
+        credentials = resultValue(await this.api.credentials.describe({ refs }), this.operation("native.operation.readKeyStatus", "Read Key status")).credentials ?? {};
       }
-      const keys = keyRows(metadata, credentials, activeRef);
+      const keys = keyRows(metadata, credentials, activeRef, this.t);
       let hostStatus = null;
       try {
-        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, "读取 Dockyard Key 池");
+        hostStatus = await this.remoteCall("nativeKeyStatus", { providerId }, this.operation("native.operation.readKeyPool", "Read Dockyard Key pool"));
       } catch {
         // A local debug page may be running without the host remote. The DSH
         // credentials/settings view above remains a useful read-only fallback.
@@ -281,7 +286,7 @@ export class NativeKeyPoolController {
         status: "error",
         action: null,
         providerId,
-        error: errorMessage(error),
+        error: errorMessage(error, this.t),
       });
       return null;
     }
@@ -297,13 +302,13 @@ export class NativeKeyPoolController {
     const state = await this.load(providerId);
     if (!state) return null;
     try {
-      const refreshed = await this.remoteCall("nativeKeyRefresh", { providerId }, "刷新 provider 实时额度");
+      const refreshed = await this.remoteCall("nativeKeyRefresh", { providerId }, this.operation("native.operation.refreshQuota", "Refresh live provider quota"));
       if (refreshed) {
         this.applyHostStatus(refreshed);
         this.setState({ action: null, status: "ready", error: null });
       }
     } catch (error) {
-      this.setState({ action: null, status: "ready", error: errorMessage(error) });
+      this.setState({ action: null, status: "ready", error: errorMessage(error, this.t) });
     }
     return this.store.getSnapshot();
   }
@@ -312,7 +317,7 @@ export class NativeKeyPoolController {
     const state = this.store.getSnapshot();
     if (state.providerId !== providerId || !state.namespace) await this.load(providerId);
     const current = this.store.getSnapshot();
-    if (!current.namespace) throw new Error("DSH 没有返回该 provider 的可写配置");
+    if (!current.namespace) throw new Error(this.t?.("native.error.noWritableConfig") ?? "DSH did not return writable configuration for this provider");
     const profile = getPath(current.namespace.value, current.settingsPath);
     const path = [...current.settingsPath, "apiKeyEnv"];
     const ops = clear
@@ -325,19 +330,19 @@ export class NativeKeyPoolController {
       ops,
       expectedRevision: current.namespace.revision,
     });
-    resultValue(response, "更新 provider Key 配置");
+    resultValue(response, this.operation("native.operation.updateProviderKey", "Update provider Key configuration"));
   }
 
   async addKey(providerId, value, label = "") {
     const key = String(value ?? "").trim();
-    if (!key) throw new Error("请输入 API Key");
+    if (!key) throw new Error(this.t?.("native.error.enterApiKey") ?? "Enter an API Key");
     this.setState({ action: "add", status: "loading", providerId, error: null, message: null });
     try {
       await this.ensure(providerId);
       const current = this.store.getSnapshot();
-      if (!current.native) throw new Error("当前模型不是 DSH 原生 API Key provider");
+      if (!current.native) throw new Error(this.t?.("native.error.notNativeProvider") ?? "The current model is not a native DSH API Key provider");
       const ref = makeKeyRef(providerId);
-      resultValue(await this.api.credentials.set({ ref, value: key }), "保存 API Key");
+      resultValue(await this.api.credentials.set({ ref, value: key }), this.operation("native.operation.saveApiKey", "Save API Key"));
       await this.mutateProfile(providerId, ref);
       const metadata = readMetadata(providerId);
       metadata.keys = [...metadata.keys.filter((entry) => entry.ref !== ref), {
@@ -346,12 +351,12 @@ export class NativeKeyPoolController {
         createdAt: new Date().toISOString(),
       }];
       writeMetadata(providerId, metadata);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, "登记 Dockyard Key");
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: metadata.keys.at(-1).label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
       await this.load(providerId);
-      this.setState({ message: "Key 已写入 DSH Credentials，并已设为当前 Key。", action: null, status: "ready" });
+      this.setState({ message: this.t?.("native.message.keySaved") ?? "The Key was written to DSH Credentials and set as the current Key.", action: null, status: "ready" });
       return this.store.getSnapshot();
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorMessage(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorMessage(error, this.t) });
       return null;
     }
   }
@@ -363,19 +368,19 @@ export class NativeKeyPoolController {
       await this.ensure(providerId);
       const current = this.store.getSnapshot();
       const key = current.keys.find((entry) => entry.ref === ref);
-      if (!key) throw new Error("找不到这个 Key 的本地索引");
-      if (!key.configured) throw new Error("这个 Key 在 DSH Credentials 中尚未配置");
+      if (!key) throw new Error(this.t?.("native.error.keyNotIndexed") ?? "This Key is missing from the local index");
+      if (!key.configured) throw new Error(this.t?.("native.error.keyNotConfigured") ?? "This Key is not configured in DSH Credentials");
       await this.mutateProfile(providerId, ref);
-      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, "登记 Dockyard Key");
-      await this.remoteCall("nativeKeySetPolicy", { providerId, policy: "manual" }, "切换为手动 Key");
+      await this.remoteCall("nativeKeyRegister", { providerId, ref, label: key.label }, this.operation("native.operation.registerKey", "Register Dockyard Key"));
+      await this.remoteCall("nativeKeySetPolicy", { providerId, policy: "manual" }, this.operation("native.operation.setManualKey", "Switch to manual Key"));
       const metadata = readMetadata(providerId);
       metadata.policy = "manual";
       writeMetadata(providerId, metadata);
       await this.load(providerId);
-      this.setState({ message: `已切换到${key.label}。`, action: null, status: "ready" });
+      this.setState({ message: this.t?.("native.message.keySelected", { label: key.label }) ?? `Switched to ${key.label}.`, action: null, status: "ready" });
       return this.store.getSnapshot();
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorMessage(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorMessage(error, this.t) });
       return null;
     }
   }
@@ -387,28 +392,34 @@ export class NativeKeyPoolController {
       await this.ensure(providerId);
       const current = this.store.getSnapshot();
       const key = current.keys.find((entry) => entry.ref === ref);
-      if (!key) throw new Error("找不到这个 Key 的本地索引");
+      if (!key) throw new Error(this.t?.("native.error.keyNotIndexed") ?? "This Key is missing from the local index");
       const remaining = current.keys.filter((entry) => entry.ref !== ref && entry.configured);
       if (current.apiKeyRef === ref) {
         if (remaining[0]) await this.mutateProfile(providerId, remaining[0].ref);
         else await this.mutateProfile(providerId, null, { clear: true });
       }
       const writable = key.credential?.writable !== false;
-      if (writable) resultValue(await this.api.credentials.unset({ ref }), "移除 API Key");
+      if (writable) resultValue(await this.api.credentials.unset({ ref }), this.operation("native.operation.removeApiKey", "Remove API Key"));
       const metadata = readMetadata(providerId);
       metadata.keys = metadata.keys.filter((entry) => entry.ref !== ref);
       writeMetadata(providerId, metadata);
       try {
-        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, "移除 Dockyard Key");
+        await this.remoteCall("nativeKeyUnregister", { providerId, ref }, this.operation("native.operation.removeDockyardKey", "Remove Dockyard Key"));
       } catch {
         // The credential/config removal already succeeded. The host resolver
         // also ignores an unconfigured stale ref, so this is safe to retry.
       }
       await this.load(providerId);
-      this.setState({ message: writable ? `已移除${key.label}。` : `已解除${key.label}的 provider 引用；原始文件凭证未删除。`, action: null, status: "ready" });
+      this.setState({
+         message: writable
+           ? this.t?.("native.message.keyRemoved", { label: key.label }) ?? `Removed ${key.label}.`
+           : this.t?.("native.message.referenceRemoved", { label: key.label }) ?? `Unlinked ${key.label} from the provider; the original file credential was kept.`,
+         action: null,
+         status: "ready",
+       });
       return this.store.getSnapshot();
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorMessage(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorMessage(error, this.t) });
       return null;
     }
   }
@@ -416,17 +427,19 @@ export class NativeKeyPoolController {
   async setPolicy(providerId, policy) {
     if (!Object.hasOwn(NATIVE_KEY_POLICY_LABELS, policy)) return;
     try {
-      await this.remoteCall("nativeKeySetPolicy", { providerId, policy }, "更新 Key 策略");
+      await this.remoteCall("nativeKeySetPolicy", { providerId, policy }, this.operation("native.operation.updatePolicy", "Update Key policy"));
     } catch (error) {
-      this.setState({ error: errorMessage(error) });
+      this.setState({ error: errorMessage(error, this.t) });
       return null;
     }
     const metadata = readMetadata(providerId);
     metadata.policy = policy;
     writeMetadata(providerId, metadata);
     this.setState({ policy, runtimeMode: "request-key-pool", message: policy === "manual"
-      ? "已设为手动选择 Key。"
-      : policy === "round_robin" ? "已启用请求级多 Key 轮询。" : "已启用失败转移：当前 Key 失败时自动尝试下一个 Key。" });
+      ? this.t?.("native.message.policyManual") ?? "Manual Key selection enabled."
+      : policy === "round_robin"
+        ? this.t?.("native.message.policyRoundRobin") ?? "Request-level Key round robin enabled."
+        : this.t?.("native.message.policyFailover") ?? "Failover enabled: the next Key is tried automatically when the current Key fails." });
     return this.store.getSnapshot();
   }
 }

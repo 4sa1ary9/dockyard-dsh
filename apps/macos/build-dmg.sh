@@ -96,7 +96,7 @@ const fs = require("node:fs");
 const file = process.env.PROFILE_MANIFEST;
 const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
 if (manifest.dependencies?.["@dockyard-dsh/plugin"]) {
-  manifest.dependencies["@dockyard-dsh/plugin"] = "0.1.0";
+  manifest.dependencies["@dockyard-dsh/plugin"] = "0.1.1";
 }
 fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
@@ -156,8 +156,10 @@ mkdir -p "$DIST_ROOT/dmg-root"
 cp -R "$APP" "$DIST_ROOT/dmg-root/$APP_NAME.app"
 ln -s /Applications "$DIST_ROOT/dmg-root/Applications"
 hdiutil create \
+  -fs HFS+ \
   -volname "$APP_NAME" \
   -srcfolder "$DIST_ROOT/dmg-root" \
+  -noanyowners \
   -ov \
   -format UDZO \
   "$DMG" >/dev/null

@@ -4,9 +4,11 @@ import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
 
 import { TYPERT_REMOTE } from "./dockyard-typert.remote.mjs";
 import {
-  NativeKeyPoolController,
-  NATIVE_KEY_POLICY_LABELS,
-} from "./native-key-pool.mjs";
+  DOCKYARD_LOCALE_NS,
+  DOCKYARD_LOCALES,
+  translate as translateText,
+} from "./dockyard-locale.mjs";
+import { NativeKeyPoolController } from "./native-key-pool.mjs";
 
 const h = React.createElement;
 const {
@@ -17,12 +19,20 @@ const {
 } = React;
 
 const STYLE_ID = "dockyard-dsh-account-control";
-const POLICY_LABELS = Object.freeze({
-  manual: "手动选择",
-  sticky_session: "会话粘滞",
-  round_robin: "账号轮询",
-  failover: "失败转移",
+const POLICY_KEYS = Object.freeze({
+  manual: "policy.manual",
+  sticky_session: "policy.sticky_session",
+  round_robin: "policy.round_robin",
+  failover: "policy.failover",
 });
+
+function text(t, key, params) {
+  return translateText(t, key, params);
+}
+
+function policyLabel(t, policy) {
+  return text(t, POLICY_KEYS[policy] ?? "policy.manual");
+}
 
 const DOCKYARD_CHEVRON_PATH = "M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z";
 
@@ -35,7 +45,7 @@ button[role="menuitemradio"] [class$="_description"]{display:none!important}
 .dockyard-dsh-model-group-toggle:hover,.dockyard-dsh-model-group-toggle:focus-visible{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-model-group-toggle .dockyard-dsh-model-group-chevron{margin-left:auto}
 section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{display:none!important}
-.dockyard-dsh-trigger{display:inline-flex;align-items:center;gap:5px;max-width:160px;height:28px;padding:0 8px;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#c7ccd5);background:transparent;cursor:pointer;font:500 13px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
+.dockyard-dsh-trigger{display:inline-flex;align-items:center;gap:8px;max-width:260px;height:28px;padding:0 10px;border:0;border-radius:999px;color:var(--dsw-alias-label-secondary,#c7ccd5);background:transparent;cursor:pointer;font:500 13px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap}
 .dockyard-dsh-trigger:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
 .dockyard-dsh-trigger:focus-visible{outline:2px solid var(--dsw-alias-border-l3,#8fa3c7);outline-offset:1px}
 .dockyard-dsh-trigger[aria-expanded=true]{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
@@ -46,7 +56,7 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-dot[data-live=true]{background:#79d6c8;box-shadow:0 0 8px rgba(121,214,200,.8)}
 .dockyard-dsh-dot[data-loading=true]{background:#cbb7ff;animation:dockyard-dsh-pulse 1s ease-in-out infinite}
 .dockyard-dsh-label{min-width:0;overflow:hidden;text-overflow:ellipsis}
-.dockyard-dsh-summary{color:var(--dsw-alias-label-caption,#8b93a1);font-weight:400;overflow:hidden;text-overflow:ellipsis}
+.dockyard-dsh-summary{min-width:0;margin-left:4px;color:var(--dsw-alias-label-caption,#8b93a1);font-size:12px;font-weight:400;line-height:18px;overflow:hidden;text-overflow:ellipsis}
 .dockyard-dsh-chevron{display:inline-flex;width:14px;height:14px;flex:none;align-items:center;justify-content:center;color:var(--dsw-alias-label-caption,#8b93a1);transition:transform 140ms ease;transform-origin:center}
 .dockyard-dsh-chevron[data-open=true]{transform:rotate(180deg)}
 .dockyard-dsh-chevron svg{display:block;width:14px;height:14px}
@@ -66,12 +76,13 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-title{margin-top:2px;font-size:16px;font-weight:650;line-height:22px}
 .dockyard-dsh-model{margin-top:2px;overflow:hidden;color:var(--dsw-alias-label-tertiary,#a9b0ba);text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-model-context{margin-top:2px;color:var(--dsw-alias-label-caption,#8b93a1);font-size:10px;line-height:15px;text-align:left}
-.dockyard-dsh-close{width:26px;height:26px;flex:none;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary,#a9b0ba);cursor:pointer;font-size:20px;line-height:24px}
+.dockyard-dsh-close{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex:none;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dsw-alias-label-tertiary,#a9b0ba);cursor:pointer;font-size:0;line-height:0}
+.dockyard-dsh-close::before{content:"×";display:block;font:600 18px/18px Inter,var(--dsw-font-family,sans-serif);transform:translateY(-0.5px)}
 .dockyard-dsh-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#fff)}
-.dockyard-dsh-status{display:flex;align-items:center;gap:7px;min-height:28px;padding:6px 8px;border-radius:8px;background:var(--dsw-alias-bg-module-platform,rgba(255,255,255,.06));color:var(--dsw-alias-label-tertiary,#a9b0ba)}
+.dockyard-dsh-status{display:flex;align-items:center;gap:0;min-height:28px;padding:6px 0;border-radius:8px;background:var(--dsw-alias-bg-module-platform,rgba(255,255,255,.06));color:var(--dsw-alias-label-tertiary,#a9b0ba)}
 .dockyard-dsh-status[data-error=true]{background:rgba(255,104,104,.11);color:var(--dsw-alias-state-error-primary,#ff7a7a)}
-.dockyard-dsh-status[data-success=true]{color:#9ce5dc}
-.dockyard-dsh-status-copy{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
+.dockyard-dsh-status[data-success=true]{background:rgba(156,229,220,.08);color:#9ce5dc}
+.dockyard-dsh-status-copy{display:block;align-self:center;min-width:0;flex:1;overflow-wrap:anywhere;white-space:normal;text-align:left}
 .dockyard-dsh-auth-status{align-items:flex-start}
 .dockyard-dsh-auth-status .dockyard-dsh-status-copy{white-space:normal;overflow-wrap:anywhere;line-height:18px}
 .dockyard-dsh-auth-status .dockyard-dsh-auth-diagnostic{flex-basis:100%;color:var(--dsw-alias-state-error-primary,#ff7a7a)}
@@ -179,6 +190,7 @@ function syncModelGroupChevron(title, open) {
 }
 
 function syncModelMenuGroups(menu) {
+  const english = menu.getAttribute("aria-label") === "Model and reasoning effort";
   for (const section of modelMenuSections(menu)) {
     const labelledBy = section.getAttribute("aria-labelledby");
     const title = [...section.children].find((child) => child.id === labelledBy)
@@ -197,7 +209,9 @@ function syncModelMenuGroups(menu) {
     title.setAttribute("role", "button");
     title.setAttribute("tabindex", "0");
     title.setAttribute("aria-expanded", String(!collapsed));
-    title.setAttribute("title", collapsed ? "展开模型" : "折叠模型");
+    title.setAttribute("title", collapsed
+      ? (english ? "Expand model" : "展开模型")
+      : (english ? "Collapse model" : "折叠模型"));
     syncModelGroupChevron(title, !collapsed);
   }
 }
@@ -226,7 +240,9 @@ function installModelMenuFolding() {
     syncModelMenuGroups(menu);
   };
   const sync = () => {
-    for (const menu of document.querySelectorAll('[role="menu"][aria-label="模型与推理等级"]')) {
+    for (const menu of document.querySelectorAll('[role="menu"]')) {
+      const label = menu.getAttribute("aria-label") ?? "";
+      if (label !== "模型与推理等级" && label !== "Model and reasoning effort") continue;
       if (!boundMenus.has(menu)) {
         menu.addEventListener("click", toggle);
         menu.addEventListener("keydown", toggle);
@@ -252,23 +268,27 @@ function useSnapshot(store) {
   return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
 }
 
-function errorText(error) {
+function errorText(error, t) {
   if (error instanceof Error) return error.message;
-  return String(error ?? "未知错误");
+  return String(error ?? text(t, "error.unknown"));
 }
 
-function refreshResultMessage(result) {
+function refreshResultMessage(result, t) {
   if (!Array.isArray(result)) return null;
   const failures = result.reduce((count, entry) => count + (Array.isArray(entry?.diagnostics) && entry.diagnostics.length > 0 ? 1 : 0), 0);
-  if (result.length === 0) return "没有已连接账号需要刷新。";
-  if (failures === 0) return `已刷新 ${result.length} 个账号，额度来自 provider 最新返回。`;
-  return `已返回 ${result.length - failures}/${result.length} 个账号；${failures} 个刷新超时或失败，已保留其上次额度。`;
+  if (result.length === 0) return text(t, "status.noConnectedAccounts");
+  if (failures === 0) return text(t, "status.refreshedAccounts", { count: result.length });
+  return text(t, "status.refreshPartial", {
+    success: result.length - failures,
+    total: result.length,
+    failures,
+  });
 }
 
-function unwrapRemote(response) {
+function unwrapRemote(response, t) {
   if (response?.ok === true) return response.value;
   if (response?.ok === false) {
-    const detail = response.error?.message ?? response.error?.code ?? "远程操作失败";
+    const detail = response.error?.message ?? response.error?.code ?? text(t, "error.remoteNotMounted", { method: "remote operation" });
     throw new Error(detail);
   }
   return response;
@@ -278,12 +298,12 @@ function providerFromSnapshot(snapshot, providerId) {
   return snapshot?.providers?.find((provider) => provider.providerId === providerId) ?? null;
 }
 
-function providerDisplayName(providerId, manifest) {
+function providerDisplayName(providerId, manifest, t) {
   if (providerId === "antigravity") return "Antigravity";
   if (providerId === "minimax" || providerId === "minimax-cn") return "MiniMax";
   if (providerId === "deepseek" || providerId === "deepseek-official") return "DeepSeek";
   if (providerId === "openrouter") return "OpenRouter";
-  return manifest?.displayName ?? providerId ?? "provider";
+  return manifest?.displayName ?? providerId ?? text(t, "value.provider");
 }
 
 function displayModelId(providerId, modelId) {
@@ -300,23 +320,23 @@ function connectedAccountSignature(snapshot) {
   ].join(":")).join("|");
 }
 
-function formatDate(value) {
-  if (!value) return "未返回";
+function formatDate(value, t) {
+  if (!value) return text(t, "value.notReturned");
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 }
 
-function formatNumber(value) {
-  if (value === null || value === undefined) return "未知";
+function formatNumber(value, t) {
+  if (value === null || value === undefined) return text(t, "value.unknown");
   return typeof value === "number" ? new Intl.NumberFormat().format(value) : String(value);
 }
 
-function quotaWindowRows(quota) {
+function quotaWindowRows(quota, t) {
   if (!quota || typeof quota !== "object") return [];
   if (Array.isArray(quota.windows) && quota.windows.length > 0) return quota.windows;
   if (quota.remaining !== null || quota.limit !== null || quota.resetAt) return [{
     id: "quota",
-    name: quota.unit ?? "额度",
+    name: quota.unit ?? text(t, "value.quota"),
     remaining: quota.remaining,
     limit: quota.limit,
     unit: quota.unit,
@@ -326,8 +346,8 @@ function quotaWindowRows(quota) {
   return [];
 }
 
-function quotaRowsForAccount(account) {
-  return quotaWindowRows(account?.quota);
+function quotaRowsForAccount(account, t) {
+  return quotaWindowRows(account?.quota, t);
 }
 
 function quotaPercent(window) {
@@ -335,17 +355,17 @@ function quotaPercent(window) {
   return Math.max(0, Math.min(100, Math.round((window.remaining / window.limit) * 100)));
 }
 
-function quotaSummary(account) {
+function quotaSummary(account, t) {
   const health = account?.health?.status;
-  if (health === "expired") return "需重新授权";
-  if (health === "exhausted") return "额度耗尽";
-  if (health === "degraded" && account?.health?.lastError) return "请求失败";
-  const first = quotaRowsForAccount(account)[0];
+  if (health === "expired") return text(t, "health.expired");
+  if (health === "exhausted") return text(t, "health.exhausted");
+  if (health === "degraded" && account?.health?.lastError) return text(t, "health.degraded");
+  const first = quotaRowsForAccount(account, t)[0];
   const percent = quotaPercent(first);
   if (percent !== null) return `${percent}%`;
-  if (first?.remaining !== null && first?.remaining !== undefined) return formatNumber(first.remaining);
-  if (account?.resources?.quotaDiagnostic) return "额度未知";
-  return account ? "已连接" : "未添加";
+  if (first?.remaining !== null && first?.remaining !== undefined) return formatNumber(first.remaining, t);
+  if (account?.resources?.quotaDiagnostic) return text(t, "value.quota");
+  return account ? text(t, "summary.connected") : text(t, "summary.notConnected");
 }
 
 function providerAccount(provider) {
@@ -355,35 +375,33 @@ function providerAccount(provider) {
   return provider?.accounts?.length === 1 ? provider.accounts[0] : null;
 }
 
-function providerOverviewSummary(provider) {
+function providerOverviewSummary(provider, t) {
   const accounts = provider?.accounts ?? [];
-  if (accounts.length === 0) return "未接入 · 点击配置";
+  if (accounts.length === 0) return text(t, "summary.notConnected");
   const selected = providerAccount(provider);
-  const summary = selected ? quotaSummary(selected) : "已连接";
-  return `${accounts.length} 个账号 · ${summary}`;
+  const summary = selected ? quotaSummary(selected, t) : text(t, "summary.connected");
+  return text(t, "summary.accounts", { count: accounts.length, summary });
 }
 
-function accountName(account) {
-  return account?.email ?? account?.displayName ?? account?.accountId ?? "未知账号";
+function accountName(account, t) {
+  return account?.email ?? account?.displayName ?? account?.accountId ?? text(t, "value.unknown");
 }
 
-function accountIdentityLine(account) {
+function accountIdentityLine(account, t) {
   const identitySource = account?.resources?.identitySource;
-  if (account?.email && account?.resources?.authSource === "official_cursor_browser_oauth") return "官方浏览器 OAuth · 邮箱已识别";
-  if (["official_cli_auth_status", "official_client_auth_status"].includes(identitySource)) return "官方登录态 · 邮箱已识别";
-  if (account?.resources?.sessionFingerprint) return `官方会话指纹 · ${account.resources.sessionFingerprint}`;
-  return account?.accountId ?? "未知账号";
+  if (account?.email && account?.resources?.authSource === "official_cursor_browser_oauth") return text(t, "identity.cursorBrowser");
+  if (["official_cli_auth_status", "official_client_auth_status"].includes(identitySource)) return text(t, "identity.officialLogin");
+  if (account?.resources?.sessionFingerprint) return text(t, "identity.sessionFingerprint", { fingerprint: account.resources.sessionFingerprint });
+  return account?.accountId ?? text(t, "value.unknown");
 }
 
-function healthLabel(status) {
-  return ({
-    healthy: "正常",
-    degraded: "异常",
-    cooldown: "冷却",
-    expired: "需重新授权",
-    exhausted: "额度耗尽",
-    unknown: "待检查",
-  })[status] ?? status ?? "待检查";
+function healthLabel(status, t) {
+  return status === "healthy" ? text(t, "health.healthy")
+    : status === "degraded" ? text(t, "health.degraded")
+      : status === "cooldown" ? text(t, "health.cooldown")
+        : status === "expired" ? text(t, "health.expired")
+          : status === "exhausted" ? text(t, "health.exhausted")
+            : status ?? text(t, "health.unknown");
 }
 
 class DockyardClientController {
@@ -402,8 +420,9 @@ class DockyardClientController {
   refreshPromises = new Map();
   authTimers = new Map();
 
-  constructor(remote) {
+  constructor(remote, t) {
     this.remote = remote;
+    this.t = t;
   }
 
   setState(next) {
@@ -446,9 +465,9 @@ class DockyardClientController {
       };
       if (result.diagnostic) next.message = result.diagnostic;
       else if (result.instructions && result.status !== "opened") next.message = result.instructions;
-      else if (result.status === "completed") next.message = "官方 OAuth 已完成，账号池已更新。";
+      else if (result.status === "completed") next.message = text(this.t, "status.oauthCompleted");
       else if (["failed", "error"].includes(result.status)) {
-        next.error = result.diagnostic ?? result.instructions ?? "官方 OAuth 验证失败，请重新授权。";
+        next.error = result.diagnostic ?? result.instructions ?? text(this.t, "status.oauthFailed");
       }
     }
     if (result?.providers) next.scan = result;
@@ -459,8 +478,8 @@ class DockyardClientController {
 
   async call(method, ...args) {
     const fn = this.remote?.[method];
-    if (typeof fn !== "function") throw new Error(`Dockyard Remote 尚未挂载：${method}`);
-    return unwrapRemote(await fn(...args));
+    if (typeof fn !== "function") throw new Error(text(this.t, "error.remoteNotMounted", { method }));
+    return unwrapRemote(await fn(...args), this.t);
   }
 
   async ensureSnapshot() {
@@ -475,7 +494,7 @@ class DockyardClientController {
         return snapshot;
       })
       .catch((error) => {
-        this.setState({ status: "error", error: errorText(error) });
+        this.setState({ status: "error", error: errorText(error, this.t) });
         throw error;
       })
       .finally(() => {
@@ -498,10 +517,10 @@ class DockyardClientController {
       try {
         const value = await this.call("refresh", { providerId });
         const result = this.applyValue(value, providerId);
-        this.setState({ message: refreshResultMessage(result) });
+        this.setState({ message: refreshResultMessage(result, this.t) });
         return result;
       } catch (error) {
-        this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+        this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
         return null;
       }
     })();
@@ -522,10 +541,10 @@ class DockyardClientController {
       try {
         const value = await this.call("refresh", {});
         const result = this.applyValue(value);
-        this.setState({ message: refreshResultMessage(result) });
+        this.setState({ message: refreshResultMessage(result, this.t) });
         return result;
       } catch (error) {
-        this.setState({ action: null, status: "error", providerId: null, error: errorText(error) });
+        this.setState({ action: null, status: "error", providerId: null, error: errorText(error, this.t) });
         return null;
       }
     })();
@@ -545,7 +564,7 @@ class DockyardClientController {
       this.setState({ scan: result, action: null, status: "ready" });
       return result;
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -555,7 +574,7 @@ class DockyardClientController {
       const value = await this.call("scan", { providerId });
       return { result: this.applyValue(value, providerId, { preserveControl: true }), error: null };
     } catch (error) {
-      return { result: null, error: errorText(error) };
+      return { result: null, error: errorText(error, this.t) };
     }
   }
 
@@ -566,11 +585,15 @@ class DockyardClientController {
       const result = this.applyValue(value, providerId);
       const count = result?.accounts?.length ?? 0;
       const discovery = await this.refreshDiscovery(providerId);
-      const scanNotice = discovery.error ? `发现登陆态刷新失败：${discovery.error}` : null;
-      this.setState({ message: scanNotice ?? (count ? `已添加 ${count} 个账号。` : "没有新的 OAuth 候选。") });
+      const scanNotice = discovery.error
+        ? text(this.t, "status.discoveryRefreshFailed", { error: discovery.error })
+        : null;
+      this.setState({ message: scanNotice ?? (count
+        ? text(this.t, "status.accountAdded", { count })
+        : text(this.t, "status.noNewOAuthCandidates")) });
       return result;
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -581,7 +604,7 @@ class DockyardClientController {
       && ["pending", "processing"].includes(current.auth.status)
       && current.auth.sessionId) {
       this.scheduleAuth(providerId, current.auth.sessionId);
-      this.setState({ action: null, status: "ready", error: null, message: "已有登录验证进行中，请使用当前官方授权页面；不会重复打开。" });
+      this.setState({ action: null, status: "ready", error: null, message: text(this.t, "status.oauthInProgress") });
       return current.auth;
     }
     this.setState({ action: "login", status: "loading", providerId, error: null, message: null });
@@ -615,7 +638,7 @@ class DockyardClientController {
       return result;
     } catch (error) {
       authWindow?.close?.();
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -627,11 +650,11 @@ class DockyardClientController {
       const result = this.applyValue(value, providerId);
       if (["pending", "processing"].includes(result?.status) && result.sessionId) {
         this.scheduleAuth(providerId, result.sessionId);
-        this.setState({ message: "授权码已提交，正在等待官方验证结果…" });
+        this.setState({ message: text(this.t, "status.oauthCodeSubmitted") });
       }
       return result;
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -650,7 +673,7 @@ class DockyardClientController {
           this.authTimers.set(sessionId, timer);
         }
       } catch (error) {
-        this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+        this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       }
     };
     this.authTimers.set(sessionId, setTimeout(tick, 1000));
@@ -664,10 +687,10 @@ class DockyardClientController {
     try {
       const value = await this.call("cancel", { providerId, sessionId });
       this.applyValue(value, providerId);
-      this.setState({ auth: null, action: null, status: "ready", message: "本次登录验证已取消。" });
+      this.setState({ auth: null, action: null, status: "ready", message: text(this.t, "status.oauthCancelled") });
       return value;
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -677,10 +700,10 @@ class DockyardClientController {
     try {
       const value = await this.call("setPolicy", { providerId, policy: "manual", defaultAccountId: accountId });
       this.applyValue(value, providerId);
-      this.setState({ message: "已切换为手动账号。" });
+      this.setState({ message: text(this.t, "status.accountSelected") });
       return value;
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -690,18 +713,24 @@ class DockyardClientController {
     try {
       const value = await this.call("removeAccount", { providerId, accountId });
       const result = this.applyValue(value, providerId);
-      const diagnostics = result?.diagnostics?.length ? `（${result.diagnostics.join("；")}）` : "";
+      const diagnostics = result?.diagnostics?.length ? ` (${result.diagnostics.join("; ")})` : "";
       const discovery = await this.refreshDiscovery(providerId);
-      const scanNotice = discovery.error ? `；发现登陆态刷新失败：${discovery.error}` : "";
+      const scanNotice = discovery.error
+        ? text(this.t, "status.discoveryRefreshFailed", { error: discovery.error })
+        : "";
       const provider = providerFromSnapshot(this.store.getSnapshot().snapshot, providerId);
       const supportsOAuthLogin = provider?.manifest?.capabilities?.includes("oauth_authorization");
       const reentry = supportsOAuthLogin
-        ? "如需重新接入，请点击重新授权。"
-        : "如需重新接入，请先在官方客户端或官方环境完成登录，再扫描本机登录态。";
-      this.setState({ auth: null, message: `账号已移除${diagnostics}${scanNotice}；${reentry}` });
+        ? text(this.t, "status.reentryOAuth")
+        : text(this.t, "status.reentryScan");
+      this.setState({ auth: null, message: text(this.t, "status.accountRemoved", {
+        details: diagnostics,
+        scanNotice: scanNotice ? `; ${scanNotice}` : "",
+        reentry,
+      }) });
       return value;
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -711,10 +740,10 @@ class DockyardClientController {
     try {
       const value = await this.call("setPolicy", { providerId, policy });
       this.applyValue(value, providerId);
-      this.setState({ message: `账号策略已设置为${POLICY_LABELS[policy] ?? policy}。` });
+      this.setState({ message: text(this.t, "status.policyUpdated", { policy: policyLabel(this.t, policy) }) });
       return value;
     } catch (error) {
-      this.setState({ action: null, status: "error", providerId, error: errorText(error) });
+      this.setState({ action: null, status: "error", providerId, error: errorText(error, this.t) });
       return null;
     }
   }
@@ -756,10 +785,10 @@ function ChevronIcon({ open }) {
   })));
 }
 
-function quotaView(account) {
-  const rows = quotaRowsForAccount(account);
+function quotaView(account, t) {
+  const rows = quotaRowsForAccount(account, t);
   if (rows.length === 0) {
-    const diagnostic = account?.resources?.quotaDiagnostic ?? "provider 尚未返回额度窗口";
+    const diagnostic = account?.resources?.quotaDiagnostic ?? text(t, "quota.noWindow");
     const quotaUrl = account?.resources?.quotaUrl;
     return h("div", { className: "dockyard-dsh-muted" },
       diagnostic,
@@ -768,55 +797,58 @@ function quotaView(account) {
           href: quotaUrl,
           target: "_blank",
           rel: "noreferrer noopener",
-        }, "打开官方用量页面"))
+        }, text(t, "quota.openUsage")))
         : null,
     );
   }
   return h("div", { className: "dockyard-dsh-quota" }, rows.map((window, index) => {
     const percent = quotaPercent(window);
     const value = window.limit === null || window.limit === undefined
-      ? formatNumber(window.remaining)
-      : `${formatNumber(window.remaining)} / ${formatNumber(window.limit)}`;
+      ? formatNumber(window.remaining, t)
+      : `${formatNumber(window.remaining, t)} / ${formatNumber(window.limit, t)}`;
     const unit = window.unit ? ` ${window.unit}` : "";
     return h("div", { key: `${window.id ?? "quota"}-${index}` },
       h("div", { className: "dockyard-dsh-quota-row" },
-        h("span", { className: "dockyard-dsh-quota-copy" }, `${window.name ?? window.id ?? "额度"}${unit}`),
+        h("span", { className: "dockyard-dsh-quota-copy" }, `${window.name ?? window.id ?? text(t, "value.quota")}${unit}`),
         h("span", { className: "dockyard-dsh-quota-value" }, percent === null ? value : `${percent}%`)),
       percent === null ? null : h("div", { className: "dockyard-dsh-quota-track" },
         h("div", { className: "dockyard-dsh-quota-fill", style: { width: `${percent}%` } })),
-      h("div", { className: "dockyard-dsh-muted" }, `重置：${formatDate(window.resetAt)} · 更新：${formatDate(window.updatedAt)}`));
+      h("div", { className: "dockyard-dsh-muted" }, text(t, "quota.resetUpdated", {
+        reset: formatDate(window.resetAt, t),
+        updated: formatDate(window.updatedAt, t),
+      })));
   }));
 }
 
-function AccountCard({ account, current, providerId, controller, busy }) {
+function AccountCard({ account, current, providerId, controller, busy, t }) {
   const health = account?.health?.status;
   return h("div", { className: "dockyard-dsh-account", "data-current": current },
     h("div", { className: "dockyard-dsh-account-head" },
       h("div", { className: "dockyard-dsh-account-identity" },
-        h("div", { className: "dockyard-dsh-account-name" }, accountName(account)),
-        h("div", { className: "dockyard-dsh-account-id" }, accountIdentityLine(account))),
+        h("div", { className: "dockyard-dsh-account-name" }, accountName(account, t)),
+        h("div", { className: "dockyard-dsh-account-id" }, accountIdentityLine(account, t))),
       h("div", { className: "dockyard-dsh-account-actions" },
         h("button", {
           type: "button",
           className: "dockyard-dsh-account-use",
           disabled: busy || current,
           onClick: () => controller.selectAccount(providerId, account.accountId),
-        }, current ? "当前账号" : "手动使用"),
+        }, current ? text(t, "account.current") : text(t, "account.manualUse")),
         h("button", {
           type: "button",
           className: "dockyard-dsh-account-remove",
           disabled: busy,
           onClick: () => {
-            if (typeof window !== "undefined" && !window.confirm(`确认移除账号 ${accountName(account)}？这会从 Dockyard DSH 账号池和本机 Keychain 引用中删除。`)) return;
+            if (typeof window !== "undefined" && !window.confirm(text(t, "account.confirmRemove", { account: accountName(account, t) }))) return;
             controller.removeAccount(providerId, account.accountId);
           },
-        }, "移除"))),
+        }, text(t, "account.remove")))),
     h("div", { className: "dockyard-dsh-account-meta" },
-      h("span", { className: "dockyard-dsh-health", "data-bad": ["degraded", "cooldown", "expired", "exhausted"].includes(health) }, `${healthLabel(health)} · ${account.subscription?.plan ?? "订阅未返回"}`),
-      account.refresh?.nextRefreshAt ? h("span", null, `OAuth：${formatDate(account.refresh.nextRefreshAt)}`) : null),
+      h("span", { className: "dockyard-dsh-health", "data-bad": ["degraded", "cooldown", "expired", "exhausted"].includes(health) }, `${healthLabel(health, t)} · ${account.subscription?.plan ?? text(t, "account.planMissing")}`),
+      account.refresh?.nextRefreshAt ? h("span", null, `OAuth: ${formatDate(account.refresh.nextRefreshAt, t)}`) : null),
     account.resources?.identityNote ? h("div", { className: "dockyard-dsh-account-note" }, account.resources.identityNote) : null,
     account.health?.lastError ? h("div", { className: "dockyard-dsh-account-error", title: account.health.lastError }, account.health.lastError) : null,
-    quotaView(account));
+    quotaView(account, t));
 }
 
 function candidateMatchesAccount(candidate, account) {
@@ -827,14 +859,14 @@ function candidateMatchesAccount(candidate, account) {
   return Boolean(candidateEmail && accountEmail && candidateEmail === accountEmail);
 }
 
-function CandidateList({ scan, providerId, controller, busy, accounts = [] }) {
+function CandidateList({ scan, providerId, controller, busy, accounts = [], t }) {
   const provider = scan?.providers?.find((entry) => entry.providerId === providerId);
   const candidates = provider?.candidates ?? [];
   const availableCandidates = candidates.filter((candidate) => (
     !candidate.imported && !accounts.some((account) => candidateMatchesAccount(candidate, account))
   ));
   if (availableCandidates.length === 0) {
-    return h("div", { className: "dockyard-dsh-muted" }, provider?.diagnostics?.join("；") ?? "没有发现新的本机 OAuth 登录态");
+    return h("div", { className: "dockyard-dsh-muted" }, provider?.diagnostics?.join("；") ?? text(t, "candidate.noNew"));
   }
   return h("div", { className: "dockyard-dsh-candidates" }, availableCandidates.map((candidate) => h("div", {
     className: "dockyard-dsh-candidate",
@@ -846,10 +878,10 @@ function CandidateList({ scan, providerId, controller, busy, accounts = [] }) {
       className: "dockyard-dsh-action",
       disabled: busy,
       onClick: () => controller.add(providerId, candidate.candidateId),
-    }, "添加"))));
+    }, text(t, "candidate.add")))));
 }
 
-function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
+function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy, t }) {
   const [code, setCode] = useState("");
   const submit = async (event) => {
     event.preventDefault();
@@ -857,31 +889,31 @@ function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
     const result = await controller.submitAuthorizationCode(providerId, auth.sessionId, code);
     if (result) setCode("");
   };
-  const providerLabel = providerId === "antigravity" ? "Antigravity" : "官方订阅";
+  const providerLabel = providerId === "antigravity" ? "Antigravity" : text(t, "auth.providerSubscription");
   return h("div", { className: "dockyard-dsh-login-guide" },
-    h("div", { className: "dockyard-dsh-login-guide-title" }, `${providerLabel} 浏览器授权`),
-    h("div", { className: "dockyard-dsh-login-guide-copy" }, "DSH 已打开官方授权页面，请选择要添加的账号并完成授权："),
+    h("div", { className: "dockyard-dsh-login-guide-title" }, text(t, "auth.browserTitle", { provider: providerLabel })),
+    h("div", { className: "dockyard-dsh-login-guide-copy" }, text(t, "auth.intro")),
     h("ol", { className: "dockyard-dsh-login-guide-steps" },
       h("li", { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "1"),
-        h("span", null, "在官方页面选择要添加的账号并完成授权。")),
+        h("span", null, text(t, "auth.step1"))),
       h("li", { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "2"),
-        h("span", null, "授权完成后回到这里，DSH 会自动接入账号，并显示官方返回的可用性或额度信息。")),
+        h("span", null, text(t, "auth.step2"))),
       h("li", { className: "dockyard-dsh-login-guide-step" },
         h("span", { className: "dockyard-dsh-login-guide-number" }, "3"),
-        h("span", null, "如果页面返回授权码，请粘贴包含 state 的完整回调地址，或使用 code#state 格式。"))),
+        h("span", null, text(t, "auth.step3")))),
     h("form", { className: "dockyard-dsh-login-guide-code", onSubmit: submit },
       h("input", {
         value: code,
         disabled: busy,
         onChange: (event) => setCode(event.target.value),
-        placeholder: "完整回调地址或 code#state",
-        "aria-label": "官方授权码或回调地址",
+        placeholder: text(t, "auth.callbackPlaceholder"),
+        "aria-label": text(t, "auth.callbackAria"),
       }),
-      h("button", { type: "submit", className: "dockyard-dsh-action", disabled: busy || !code.trim() }, "提交验证")),
+      h("button", { type: "submit", className: "dockyard-dsh-action", disabled: busy || !code.trim() }, text(t, "auth.submit"))),
     auth?.authorizationUrl && typeof window !== "undefined"
-      ? h("button", { type: "button", className: "dockyard-dsh-action", onClick: () => window.open(auth.authorizationUrl, "_blank", "noopener,noreferrer") }, "重新打开验证页")
+      ? h("button", { type: "button", className: "dockyard-dsh-action", onClick: () => window.open(auth.authorizationUrl, "_blank", "noopener,noreferrer") }, text(t, "auth.reopen"))
       : null,
     auth?.sessionId && ["pending", "processing"].includes(auth.status)
       ? h("button", {
@@ -889,35 +921,36 @@ function AuthorizationCodeLoginGuide({ auth, providerId, controller, busy }) {
         className: "dockyard-dsh-action dockyard-dsh-action-danger",
         disabled: busy,
         onClick: () => controller.cancelAuthorization(providerId, auth.sessionId),
-      }, busy ? "取消中…" : "取消本次登录")
+      }, busy ? text(t, "status.canceling") : text(t, "auth.cancel"))
       : null,
     auth?.diagnostic ? h("div", { className: "dockyard-dsh-login-guide-error" }, auth.diagnostic) : null);
 }
 
-function nativeQuotaView(native) {
+function nativeQuotaView(native, t) {
   const usage = native?.usage ?? native?.entry?.usage ?? null;
   if (usage?.status === "unsupported") {
-    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? "provider 官方未提供实时额度接口");
+    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? text(t, "quota.noWindow"));
   }
   if (usage?.status === "error") {
-    return h("div", { className: "dockyard-dsh-muted", "data-error": true }, `额度读取失败：${usage.message ?? "未知错误"}`);
+    return h("div", { className: "dockyard-dsh-muted", "data-error": true }, text(t, "quota.readFailed", { error: usage.message ?? text(t, "error.unknown") }));
   }
   if (usage?.status === "unconfigured") {
-    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? "该 Key 尚未配置");
+    return h("div", { className: "dockyard-dsh-muted" }, usage.message ?? text(t, "quota.keyUnconfigured"));
   }
   const quota = native?.quota ?? native?.entry?.quota ?? null;
-  if (quota) return quotaView({ quota });
-  return h("div", { className: "dockyard-dsh-muted" }, "当前 provider 未返回额度窗口；这里不会猜测或显示伪造百分比。");
+  if (quota) return quotaView({ quota }, t);
+  return h("div", { className: "dockyard-dsh-muted" }, text(t, "quota.currentNoWindow"));
 }
 
-function NativeKeyCard({ entry, providerId, controller, busy }) {
+function NativeKeyCard({ entry, providerId, controller, busy, t }) {
   const configured = entry?.configured === true;
   const current = entry?.active === true;
   const writable = entry?.credential?.writable !== false;
+  const label = entry?.label ?? entry?.ref ?? text(t, "title.key");
   return h("div", { className: "dockyard-dsh-account", "data-current": current },
     h("div", { className: "dockyard-dsh-account-head" },
       h("div", { className: "dockyard-dsh-account-identity" },
-        h("div", { className: "dockyard-dsh-account-name" }, entry?.label ?? entry?.ref ?? "Key"),
+        h("div", { className: "dockyard-dsh-account-name" }, label),
         h("div", { className: "dockyard-dsh-key-ref", title: entry?.ref }, entry?.ref)),
       h("div", { className: "dockyard-dsh-account-actions" },
         h("button", {
@@ -925,31 +958,31 @@ function NativeKeyCard({ entry, providerId, controller, busy }) {
           className: "dockyard-dsh-account-use",
           disabled: busy || current || !configured,
           onClick: () => controller.selectKey(providerId, entry.ref),
-        }, current ? "当前 Key" : "手动使用"),
+        }, current ? text(t, "native.currentKey") : text(t, "native.manualUse")),
         h("button", {
           type: "button",
           className: "dockyard-dsh-account-remove",
           disabled: busy,
-          title: writable ? "从 DSH Credentials 移除" : "仅解除 provider 引用，不删除原始文件凭证",
+          title: writable ? text(t, "native.removeTitle") : text(t, "native.unlinkTitle"),
           onClick: () => {
-            const action = writable ? "从 DSH Credentials 中删除该 Key" : "解除 provider 对该 Key 的引用（原始文件凭证会保留）";
-            if (typeof window !== "undefined" && !window.confirm(`确认${action}：${entry?.label ?? entry?.ref}？`)) return;
+            const action = writable ? text(t, "native.removeTitle") : text(t, "native.unlinkTitle");
+            if (typeof window !== "undefined" && !window.confirm(text(t, "native.removeConfirm", { action, label }))) return;
             controller.removeKey(providerId, entry.ref);
           },
-        }, writable ? "移除" : "解除引用"))),
+        }, writable ? text(t, "native.remove") : text(t, "native.unlinkReference")))),
     h("div", { className: "dockyard-dsh-account-meta" },
-      h("span", { className: configured ? "dockyard-dsh-health" : "dockyard-dsh-health", "data-bad": !configured }, configured ? "已配置" : "未配置"),
-      entry?.credential?.source ? h("span", { className: "dockyard-dsh-key-source" }, `来源：${entry.credential.source}`) : null,
-      entry?.implicit ? h("span", { className: "dockyard-dsh-key-source" }, "来自当前 provider 配置") : null),
-    entry?.usage ? nativeQuotaView(entry) : null);
+      h("span", { className: "dockyard-dsh-health", "data-bad": !configured }, configured ? text(t, "native.configured") : text(t, "native.unconfigured")),
+      entry?.credential?.source ? h("span", { className: "dockyard-dsh-key-source" }, text(t, "native.source", { source: entry.credential.source })) : null,
+      entry?.implicit ? h("span", { className: "dockyard-dsh-key-source" }, text(t, "native.fromProviderConfig")) : null),
+    entry?.usage ? nativeQuotaView(entry, t) : null);
 }
 
-function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, onClose }) {
+function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [labelDraft, setLabelDraft] = useState("");
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
-  const modelLabel = model?.name ?? current?.model ?? "未选择模型";
+  const modelLabel = model?.name ?? current?.model ?? text(t, "title.noModel");
   const compactModelId = displayModelId(providerId, current?.model);
   const tier = current?.reasoningEffort ?? model?.reasoning?.defaultEffort ?? null;
   const busy = native.action !== null;
@@ -979,60 +1012,62 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
   return h("div", {
     className: "dockyard-dsh-popup",
     role: "dialog",
-    "aria-label": `${title} Key 与额度管理`,
+    "aria-label": text(t, "native.keyAria", { title }),
     onMouseDown: (event) => event.stopPropagation(),
   },
     h("div", { className: "dockyard-dsh-head" },
       h("div", { className: "dockyard-dsh-head-copy" },
-        h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD KEY PROVIDER"),
+        h("div", { className: "dockyard-dsh-eyebrow" }, text(t, "eyebrow.keyProvider")),
         h("div", { className: "dockyard-dsh-title" }, title),
         h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${compactModelId && modelLabel !== current.model && modelLabel !== compactModelId ? ` · ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "关闭" }, "×")),
+      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "×")),
     h("div", {
       className: "dockyard-dsh-status",
       "data-error": Boolean(native.error),
       "data-success": Boolean(native.message && !native.error),
       role: native.error ? "alert" : "status",
-    }, h("span", { className: "dockyard-dsh-status-copy" }, native.error ?? native.message ?? (native.status === "loading" ? "正在读取 DSH provider 状态…" : "状态来自 DSH 原生 provider 配置与 Credentials"))),
+    }, h("span", { className: "dockyard-dsh-status-copy" }, native.error ?? native.message ?? (native.status === "loading"
+      ? text(t, "status.readingNative")
+      : text(t, "status.nativeSource")))),
       h("div", { className: "dockyard-dsh-popup-scroll" },
       h("div", { className: "dockyard-dsh-toolbar" },
-        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => nativeController.refresh(providerId) }, native.action === "refresh" ? "刷新中…" : "↻ 实时刷新")),
+        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => nativeController.refresh(providerId) }, native.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh"))),
       h("div", { className: "dockyard-dsh-key-notice" }, native.runtimeMode === "request-key-pool"
-        ? "API Key 只通过 DSH Credentials 保存，不会回显，也不会写入浏览器存储。当前已接入请求级 Key 池：手动、轮询和失败转移不会改写 provider 的激活配置。"
-        : "API Key 只通过 DSH Credentials 保存，不会回显，也不会写入浏览器存储。当前 DSH 适配器未暴露请求级 Key 池，暂只能手动切换激活 Key。"),
+        ? text(t, "native.notice.requestPool")
+        : text(t, "native.notice.manual")),
       h("div", { className: "dockyard-dsh-field" },
-        h("span", { className: "dockyard-dsh-field-label" }, "Key 策略"),
+        h("span", { className: "dockyard-dsh-field-label" }, text(t, "native.keyStrategy")),
         h("select", {
           className: "dockyard-dsh-select",
           value: native.policy ?? "manual",
           disabled: busy,
           onChange: (event) => { void nativeController.setPolicy(providerId, event.target.value); },
         },
-          h("option", { value: "manual" }, NATIVE_KEY_POLICY_LABELS.manual),
-          h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, NATIVE_KEY_POLICY_LABELS.round_robin),
-          h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, NATIVE_KEY_POLICY_LABELS.failover))),
+          h("option", { value: "manual" }, text(t, "nativePolicy.manual")),
+          h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.round_robin")),
+          h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.failover"))),
       h("div", { className: "dockyard-dsh-key-form" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "添加新的 API Key"), h("span", { className: "dockyard-dsh-section-value" }, "写入 DSH Credentials")),
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.addKeyTitle")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.credentialsWrite"))),
         h("div", { className: "dockyard-dsh-key-form-row" },
           h("input", {
             className: "dockyard-dsh-key-input",
             type: "password",
             value: keyDraft,
-            placeholder: "粘贴 API Key",
+            placeholder: text(t, "native.pasteApiKey"),
             autoComplete: "off",
             onChange: (event) => setKeyDraft(event.target.value),
           }),
-          h("button", { type: "button", className: "dockyard-dsh-key-save", disabled: busy || !keyDraft.trim(), onClick: addKey }, native.action === "add" ? "保存中…" : "添加并启用")),
+          h("button", { type: "button", className: "dockyard-dsh-key-save", disabled: busy || !keyDraft.trim(), onClick: addKey }, native.action === "add" ? text(t, "native.saving") : text(t, "native.save"))),
         h("input", {
           className: "dockyard-dsh-key-input",
           type: "text",
           value: labelDraft,
-          placeholder: "名称（可选，例如工作 Key）",
+          placeholder: text(t, "native.optionalName"),
           onChange: (event) => setLabelDraft(event.target.value),
         })),
       efforts.length > 0 ? h("div", { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "当前模型档位"), h("span", { className: "dockyard-dsh-section-value" }, "来自实时 catalog")),
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.currentModelTier")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "subscription.liveCatalog"))),
         h("div", { className: "dockyard-dsh-tier-list" }, efforts.map((effort) => h("button", {
           type: "button",
           className: "dockyard-dsh-tier",
@@ -1043,35 +1078,36 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
           onClick: () => chooseTier(effort.id),
         }, effort.name ?? effort.id)))) : null,
       h("div", { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "已配置 Key"), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.configuredKeys")), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
         keys.length === 0
-          ? h("div", { className: "dockyard-dsh-muted" }, "当前 provider 还没有配置 API Key。")
-          : keys.map((entry) => h(NativeKeyCard, {
+          ? h("div", { className: "dockyard-dsh-muted" }, text(t, "native.noKeys"))
+          : keys.map((entry) => h(NativeKeyCard, { t,
             key: entry.ref,
             entry,
             providerId,
             controller: nativeController,
+
             busy,
           }))),
       h("div", { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "额度窗口"), h("span", { className: "dockyard-dsh-section-value" }, "provider 实时返回")),
-        nativeQuotaView(native))));
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.quotaWindow")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.providerRealtime"))),
+        nativeQuotaView(native, t)))));
 }
 
-function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose }) {
+function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
   const busy = controlState.action !== null;
   return h("div", {
     className: "dockyard-dsh-popup",
     role: "dialog",
-    "aria-label": "订阅管理",
+    "aria-label": text(t, "subscription.aria"),
     onMouseDown: (event) => event.stopPropagation(),
   },
     h("div", { className: "dockyard-dsh-head" },
       h("div", { className: "dockyard-dsh-head-copy" },
-        h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD SUBSCRIPTIONS"),
-        h("div", { className: "dockyard-dsh-title" }, "订阅管理"),
-        h("div", { className: "dockyard-dsh-model" }, "选择一个厂商，进入登录、账号和额度配置")),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "关闭" }, "×")),
+        h("div", { className: "dockyard-dsh-eyebrow" }, text(t, "eyebrow.subscriptions")),
+        h("div", { className: "dockyard-dsh-title" }, text(t, "title.subscriptionManagement")),
+        h("div", { className: "dockyard-dsh-model" }, text(t, "subtitle.subscriptionManagement"))),
+      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "×")),
     h("div", {
       className: "dockyard-dsh-status",
       "data-error": Boolean(controlState.error),
@@ -1079,8 +1115,8 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
       role: controlState.error ? "alert" : "status",
     },
       h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading"
-        ? "正在读取订阅厂商…"
-        : "接入账号后，模型会自动出现在模型选择器中。"))),
+        ? text(t, "status.readingSubscriptions")
+        : text(t, "status.subscriptionReady")))),
     h("div", { className: "dockyard-dsh-popup-scroll" },
       h("div", { className: "dockyard-dsh-toolbar" },
         h("button", {
@@ -1088,37 +1124,39 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
           className: "dockyard-dsh-action dockyard-dsh-action-primary",
           disabled: busy,
           onClick: () => controller.refreshAll(),
-        }, controlState.action === "refresh" ? "刷新中…" : "↻ 刷新全部额度")),
+        }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "subscription.refreshAll"))),
       h("div", { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" },
-          h("span", null, "订阅厂商"),
-          h("span", { className: "dockyard-dsh-section-value" }, `${providers.length} 个`)),
+          h("span", null, text(t, "subscription.providers")),
+          h("span", { className: "dockyard-dsh-section-value" }, text(t, "subscription.providerCount", { count: providers.length }))),
         providers.length === 0
-          ? h("div", { className: "dockyard-dsh-muted" }, "暂未发现可用的订阅厂商。")
+          ? h("div", { className: "dockyard-dsh-muted" }, text(t, "subscription.none"))
           : h("div", { className: "dockyard-dsh-provider-list" }, providers.map((provider) => {
             const providerId = provider.providerId;
             const group = directoryState?.groups?.find((entry) => entry.id === providerId);
-            const modelCount = Array.isArray(group?.models) ? `${group.models.length} 个模型` : "模型目录待加载";
-            const displayName = providerDisplayName(providerId, provider.manifest);
+            const modelCount = Array.isArray(group?.models)
+              ? text(t, "subscription.modelCount", { count: group.models.length })
+              : text(t, "subscription.modelPending");
+            const displayName = providerDisplayName(providerId, provider.manifest, t);
             return h("button", {
               type: "button",
               className: "dockyard-dsh-provider-row",
               "data-current": providerId === selectedProviderId,
               key: providerId,
               onClick: () => onSelect(providerId),
-              "aria-label": `配置${displayName}`,
+              "aria-label": text(t, "subscription.configure", { provider: displayName }),
             },
               h("span", { className: "dockyard-dsh-provider-row-copy" },
                 h("span", { className: "dockyard-dsh-provider-row-name" }, displayName),
-                h("span", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider)} · ${modelCount}`)),
+                h("span", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider, t)} · ${modelCount}`)),
               h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "›"));
           })))));
 }
 
-function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, onOpenOverview, onClose }) {
+function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, onOpenOverview, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
-  const modelLabel = model?.name ?? current?.model ?? "未选择模型";
+  const modelLabel = model?.name ?? current?.model ?? text(t, "title.noModel");
   const compactModelId = displayModelId(providerId, current?.model);
   const tier = current?.reasoningEffort ?? model?.reasoning?.defaultEffort ?? null;
   const accounts = provider?.accounts ?? [];
@@ -1143,48 +1181,54 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
   return h("div", {
     className: "dockyard-dsh-popup",
     role: "dialog",
-    "aria-label": `${providerDisplayName(providerId, provider?.manifest)} 账号管理`,
+    "aria-label": `${providerDisplayName(providerId, provider?.manifest, t)} ${text(t, "trigger.accountQuota")}`,
     onMouseDown: (event) => event.stopPropagation(),
   },
     h("div", { className: "dockyard-dsh-head" },
       h("div", { className: "dockyard-dsh-head-copy" },
-        h("div", { className: "dockyard-dsh-eyebrow" }, "DOCKYARD SUBSCRIPTION"),
-        h("div", { className: "dockyard-dsh-title" }, providerDisplayName(providerId, provider?.manifest) || group?.name),
+        h("div", { className: "dockyard-dsh-eyebrow" }, text(t, "eyebrow.subscription")),
+        h("div", { className: "dockyard-dsh-title" }, providerDisplayName(providerId, provider?.manifest, t) || group?.name),
         h("div", { className: "dockyard-dsh-model", title: current?.model }, `${modelLabel}${compactModelId && modelLabel !== current.model && modelLabel !== compactModelId ? ` · ${compactModelId}` : ""}`),
         model?.description ? h("div", { className: "dockyard-dsh-model-context" }, model.description) : null),
-      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": "关闭" }, "×")),
+      h("button", { type: "button", className: "dockyard-dsh-close", onClick: onClose, "aria-label": text(t, "ui.close") }, "×")),
     h("div", {
       className: "dockyard-dsh-status",
       "data-error": Boolean(controlState.error),
       "data-success": Boolean(controlState.message && !controlState.error),
       role: controlState.error ? "alert" : "status",
     },
-      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading" ? "正在读取 provider 实时状态…" : "状态来自当前 provider 的 OAuth 与额度数据"))),
+      h("span", { className: "dockyard-dsh-status-copy" }, controlState.error ?? controlState.message ?? (controlState.status === "loading"
+        ? text(t, "status.readingProvider")
+        : text(t, "status.providerOAuthQuota")))),
     h("div", { className: "dockyard-dsh-popup-scroll" },
-      providerId === "antigravity" ? h("div", { className: "dockyard-dsh-account-note" }, "添加账号时，DSH 会接入 Google 官方会话并读取实时额度；请按官方客户端或授权页提示完成登录。") : null,
+      providerId === "antigravity" ? h("div", { className: "dockyard-dsh-account-note" }, text(t, "subscription.antigravityNote")) : null,
       h("div", { className: "dockyard-dsh-toolbar" },
-        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: onOpenOverview }, "全部订阅"),
-        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => controller.refresh(providerId) }, controlState.action === "refresh" ? "刷新中…" : "↻ 实时刷新"),
-        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login" ? (supportsOAuthLogin ? "等待验证…" : "读取说明…") : authInProgress ? "验证进行中…" : needsReauthorization && supportsOAuthLogin ? "↻ 重新授权" : supportsOAuthLogin ? "＋ 登录添加账号" : "官方登录说明"),
-        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: () => controller.scan(providerId) }, controlState.action === "scan" ? "扫描中…" : "扫描本机登录态")),
+        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: onOpenOverview }, text(t, "subscription.all")),
+        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => controller.refresh(providerId) }, controlState.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh")),
+        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy || authInProgress, onClick: () => controller.login(providerId) }, controlState.action === "login"
+          ? (supportsOAuthLogin ? text(t, "status.waitingVerification") : text(t, "status.readingInstructions"))
+          : authInProgress ? text(t, "status.verificationInProgress")
+            : needsReauthorization && supportsOAuthLogin ? text(t, "auth.reauthorize")
+              : supportsOAuthLogin ? text(t, "auth.loginAdd") : text(t, "auth.officialInstructions")),
+        h("button", { type: "button", className: "dockyard-dsh-action", disabled: busy, onClick: () => controller.scan(providerId) }, controlState.action === "scan" ? text(t, "status.scanning") : text(t, "auth.scanLocal"))),
       controlState.auth?.providerId === providerId
         ? controlState.auth.authorizationCodeRequired || providerId === "antigravity"
-          ? h(AuthorizationCodeLoginGuide, { auth: controlState.auth, providerId, controller, busy })
+          ? h(AuthorizationCodeLoginGuide, { auth: controlState.auth, providerId, controller, busy, t })
           : h("div", { className: "dockyard-dsh-status dockyard-dsh-auth-status" },
             h("span", { className: "dockyard-dsh-status-copy" }, `${controlState.auth.status}${controlState.auth.instructions ? ` · ${controlState.auth.instructions}` : ""}`),
-            controlState.auth.authorizationUrl && typeof window !== "undefined" ? h("button", { type: "button", className: "dockyard-dsh-action", title: "打开官方授权页面", onClick: () => window.open(controlState.auth.authorizationUrl, "_blank", "noopener,noreferrer") }, "授权") : null,
+            controlState.auth.authorizationUrl && typeof window !== "undefined" ? h("button", { type: "button", className: "dockyard-dsh-action", title: text(t, "auth.openPage"), onClick: () => window.open(controlState.auth.authorizationUrl, "_blank", "noopener,noreferrer") }, text(t, "auth.authorize")) : null,
             controlState.auth.diagnostic ? h("span", { className: "dockyard-dsh-status-copy dockyard-dsh-auth-diagnostic" }, controlState.auth.diagnostic) : null)
         : null,
       h("div", { className: "dockyard-dsh-field" },
-        h("span", { className: "dockyard-dsh-field-label" }, "账号策略"),
+        h("span", { className: "dockyard-dsh-field-label" }, text(t, "subscription.accountStrategy")),
         h("select", {
           className: "dockyard-dsh-select",
           value: provider?.policy ?? "round_robin",
           disabled: busy,
           onChange: (event) => controller.setPolicy(providerId, event.target.value),
-        }, Object.entries(POLICY_LABELS).map(([value, label]) => h("option", { value, key: value }, label)))),
+        }, Object.keys(POLICY_KEYS).map((value) => h("option", { value, key: value }, policyLabel(t, value))))),
       efforts.length > 0 ? h("div", { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "当前模型档位"), h("span", { className: "dockyard-dsh-section-value" }, "来自实时 catalog")),
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.currentModelTier")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "subscription.liveCatalog"))),
         h("div", { className: "dockyard-dsh-tier-list" }, efforts.map((effort) => h("button", {
           type: "button",
           className: "dockyard-dsh-tier",
@@ -1195,25 +1239,26 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
           onClick: () => chooseTier(effort.id),
         }, effort.name ?? effort.id)))) : null,
       h("div", { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "已连接账号"), h("span", { className: "dockyard-dsh-section-value" }, `${accounts.length}`)),
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "subscription.connectedAccounts")), h("span", { className: "dockyard-dsh-section-value" }, `${accounts.length}`)),
         accounts.length === 0
           ? h("div", { className: "dockyard-dsh-muted" }, supportsOAuthLogin
-            ? "还没有账号；点击“登录添加账号”后会打开 provider 官方验证页。"
-            : "还没有账号；请先在官方客户端或官方环境完成登录，再扫描本机登录态并添加候选。")
-          : accounts.map((account) => h(AccountCard, {
+            ? text(t, "subscription.noAccountsOAuth")
+            : text(t, "subscription.noAccountsScan"))
+          : accounts.map((account) => h(AccountCard, { t,
             key: account.accountId,
             account,
             current: account.accountId === activeId,
+
             providerId,
             controller,
             busy,
           }))),
       controlState.scan ? h("div", { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, "本机 OAuth 候选")),
-        h(CandidateList, { scan: controlState.scan, providerId, controller, busy, accounts })) : null));
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "subscription.localCandidates"))),
+        h(CandidateList, { scan: controlState.scan, providerId, controller, busy, accounts, t })) : null));
 }
 
-function DockyardAccountControl({ directory, modelDirectory, controller, nativeController }) {
+function DockyardAccountControl({ directory, modelDirectory, controller, nativeController, t }) {
   const directoryState = useSnapshot(directory);
   const controlState = useSnapshot(controller.store);
   const nativeState = useSnapshot(nativeController.store);
@@ -1320,11 +1365,12 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     if (!providerId) return undefined;
     const hasProvider = Boolean(provider);
     if (hasProvider) {
-      void controller.refresh(providerId);
-      const needsAntigravityIdentityScan = providerId === "antigravity"
-        && (provider.accounts ?? []).some((account) => !account.email
-          && !["official_cli_auth_status", "official_client_auth_status", "local_oauth_session_fingerprint"].includes(account.resources?.identitySource));
-      if (open && needsAntigravityIdentityScan) void controller.scan(providerId);
+      const needsIdentityScan = (provider.accounts ?? []).some((account) => !account.email);
+      if (open && needsIdentityScan) {
+        void controller.scan(providerId).then(() => controller.refresh(providerId));
+      } else {
+        void controller.refresh(providerId);
+      }
       const timer = setInterval(() => controller.refresh(providerId), 30_000);
       return () => clearInterval(timer);
     }
@@ -1393,15 +1439,15 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     : currentProvider?.accounts?.length === 1 ? currentProvider.accounts[0] : null;
   const summary = currentProviderId && currentProvider
     ? currentProvider.accounts?.length > 1 && !currentProvider.defaultAccountId
-      ? `${currentProvider.accounts.length} 账号`
-      : quotaSummary(currentSelectedAccount)
+      ? text(t, "summary.accountCount", { count: currentProvider.accounts.length })
+      : quotaSummary(currentSelectedAccount, t)
     : currentProviderId && currentNative
-      ? `${currentNative.keys?.filter((entry) => entry.configured).length ?? 0} Key`
-    : currentProviderId && currentNativeLoading ? "读取中…" : "";
+      ? text(t, "summary.keyCount", { count: currentNative.keys?.filter((entry) => entry.configured).length ?? 0 })
+    : currentProviderId && currentNativeLoading ? text(t, "status.reading") : "";
   const loading = controlState.action !== null || nativeState.action !== null || directoryState.status === "loading";
   const providerLabel = currentProviderId
-    ? providerDisplayName(currentProviderId, currentProvider?.manifest ?? currentNative?.entry)
-    : "订阅管理";
+    ? providerDisplayName(currentProviderId, currentProvider?.manifest ?? currentNative?.entry, t)
+    : text(t, "trigger.subscriptionManagement");
   const modelLabel = model?.name ?? current?.model ?? "";
 
   const toggleOpen = () => {
@@ -1430,10 +1476,12 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     h("button", {
       type: "button",
       className: "dockyard-dsh-trigger",
-      title: currentProviderId ? `${providerLabel} · ${modelLabel}` : "订阅管理",
+      title: currentProviderId
+         ? text(t, "trigger.providerModel", { provider: providerLabel, model: modelLabel })
+         : text(t, "trigger.subscriptionManagement"),
       "aria-label": currentProviderId
-        ? `${providerLabel} ${currentProvider ? "账号与额度管理" : "Key 与额度管理"}`
-        : "订阅管理",
+        ? `${providerLabel} ${currentProvider ? text(t, "trigger.accountQuota") : text(t, "trigger.keyQuota")}`
+        : text(t, "subscription.aria"),
       "aria-expanded": open,
       onClick: toggleOpen,
     },
@@ -1444,16 +1492,17 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     h("button", {
       type: "button",
       className: "dockyard-dsh-add-trigger",
-      title: "添加订阅",
-      "aria-label": "添加订阅",
+      title: text(t, "trigger.addTitle"),
+      "aria-label": text(t, "subscription.addAria"),
       onClick: openSubscriptionOverview,
-    }, "＋ 添加订阅"),
+    }, text(t, "trigger.addSubscription")),
     overviewOpen ? h(SubscriptionOverviewPopup, {
       providers,
       directoryState,
       controlState,
       controller,
       selectedProviderId: currentProviderId,
+       t,
       onSelect: (selectedProviderId) => {
         setShowOverview(false);
         setDetailProviderId(selectedProviderId);
@@ -1469,9 +1518,10 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directoryState,
       controlState,
       controller,
-      onOpenOverview: openSubscriptionOverview,
+      t,
+       onOpenOverview: openSubscriptionOverview,
       onClose: () => setOpen(false),
-    }) : open && native ? h(NativeKeyPopup, {
+    }) : open && native ? h(NativeKeyPopup, { t,
       providerId,
       native,
       directory: modelDirectory,
@@ -1484,25 +1534,28 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
 // `remote.dockyard` is created by this plugin's own `$mount` call below. It
 // must not be a top-level dependency, otherwise Cordis waits for the service
 // before running this plugin and the plugin can never create it.
-export const inject = ["slots", "modelDirectories", "remote", "connection"];
+export const inject = ["slots", "modelDirectories", "remote", "connection", "locale"];
 
 /** Mount the provider-aware account control in the native DSH composer. */
 export async function apply(ctx) {
   installStyles();
   const disposeModelMenuFolding = installModelMenuFolding();
+  const disposeLocale = ctx.locale.register(DOCKYARD_LOCALE_NS, DOCKYARD_LOCALES);
+  const t = ctx.locale.bind(DOCKYARD_LOCALE_NS);
   const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
   // Read the dynamically mounted namespace through the service registry. The
   // traceable `ctx.remote.dockyard` property requires a declared inject and
   // would reintroduce the self-dependency deadlock above.
   const remote = ctx.get("remote.dockyard");
-  const controller = new DockyardClientController(remote);
+  const controller = new DockyardClientController(remote, t);
   ctx.inject(["slots", "modelDirectories", "connection"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
-    const nativeController = new NativeKeyPoolController(connection?.api, remote);
+    const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
     scope.slots.inject("conversation.input.left", () => scope.slots.register({
       name: "conversation.input.left",
       id: "dockyard-account-control",
       order: 10,
+       locale: DOCKYARD_LOCALE_NS,
       inject: (sessionId) => {
         const modelDirectory = scope.modelDirectories.directoryFor(sessionId);
         return {
@@ -1516,6 +1569,7 @@ export async function apply(ctx) {
   });
   return async () => {
     disposeModelMenuFolding();
+    disposeLocale?.();
     controller.dispose();
     await disposeRemote?.();
   };

@@ -154,6 +154,7 @@ function providerAccount(pool, accountId) {
 }
 
 function providerErrorStatus(error) {
+  if (error?.quotaUnavailable) return "error";
   if (error?.authExpired || error?.accountMismatch) return "auth_expired";
   // A provider-side 403 is an operation/permission failure. Keep the account
   // usable and surface it as degraded instead of claiming its OAuth expired.
@@ -303,6 +304,26 @@ export class DockyardRuntime {
           } catch {
             // Keep the existing account usable through its current provider
             // session; the next explicit add/scan can retry the capture.
+          }
+        }
+
+        // Grok's official auth.json is the durable source of its OAuth
+        // refresh token. Repair accounts imported by an older browser flow
+        // (or without email metadata) from that source during discovery;
+        // otherwise the UI can show a UUID while quota requests keep using a
+        // stale Keychain credential.
+        const shouldRepairGrokCredential = currentProviderId === "grok"
+          && typeof entry.module.importAccount === "function"
+          && ((candidate.email && !existing.email)
+            || (candidate.source && candidate.source !== existingIdentity.authSource));
+        if (shouldRepairGrokCredential) {
+          try {
+            const repaired = await entry.module.importAccount(candidate, providerContext(this));
+            entry.pool.upsert(repaired, { resetHealth: true });
+            changedProviderIds.add(currentProviderId);
+          } catch {
+            // Discovery metadata can still repair the visible identity even
+            // when secure credential migration is unavailable.
           }
         }
       }
