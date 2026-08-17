@@ -12,3 +12,5 @@ node_modules/
 
 # Keep packages/dsh-plugin/dist and packages/dsh-plugin/lib/client.js tracked:
 # they are the prebuilt entry points used by GitHub installs.
+
+dist/macos/

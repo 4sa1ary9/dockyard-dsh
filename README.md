@@ -44,6 +44,16 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 
 纯 JavaScript 的部分未来可以继续做跨平台抽象，但本仓库当前不能宣传为 macOS/Windows 通用。如果你使用 Windows，请等待 Windows backend 和真实 E2E 验证完成。
 
+### macOS 独立应用与 DMG
+
+如果你不想手动安装 Node.js、pnpm 或 DSH，可以在 Mac 上构建/分发自带运行时的通用 DMG：
+
+```sh
+./apps/macos/build-dmg.sh
+```
+
+构建结果在 `dist/macos/`。双击 App 后，它会启动内置的 DSH Web profile，并在原生 WebKit 窗口中显示 `http://127.0.0.1:3080`。详细说明见 [`apps/macos/README.md`](apps/macos/README.md)。当前构建包含 Apple Silicon 和 Intel 两个架构；正式对外发布还需要使用 Developer ID 签名并完成 Apple notarization。
+
 ### 安装前提：先安装 DSH，再安装 Dockyard DSH
 
 Dockyard DSH 是 DSH plugin，不是独立的 agent。请先安装 DSH CLI，并确认 `dsh` 命令可用。
@@ -220,6 +230,16 @@ The complete integration currently depends on macOS-specific behavior:
 - There is no Windows credential-store backend, Windows-native OAuth launcher, or Windows packaging/E2E validation in this release.
 
 Some pure JavaScript layers can be abstracted for other platforms later, but this repository must currently be treated as a macOS-only plugin.
+
+### Standalone macOS app and DMG
+
+If you do not want to install Node.js, pnpm, or DSH manually, build the self-contained universal DMG on macOS:
+
+```sh
+./apps/macos/build-dmg.sh
+```
+
+The outputs are written to `dist/macos/`. Launching the app starts the embedded DSH Web profile and displays `http://127.0.0.1:3080` in a native WebKit window. See [`apps/macos/README.md`](apps/macos/README.md) for details. The current build includes Apple Silicon and Intel slices; public distribution also requires a Developer ID signature and Apple notarization.
 
 ### Prerequisite: install DSH before installing Dockyard DSH
 
