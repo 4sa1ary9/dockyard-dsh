@@ -7,7 +7,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var webPort = 3080
     private var window: NSWindow!
     private var webView: WKWebView!
-    private var oauthWindow: NSWindow?
     private var oauthWebView: WKWebView?
     private var dshProcess: Process?
     private var logHandle: FileHandle?
@@ -82,18 +81,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         popup.uiDelegate = self
         popup.autoresizingMask = [.width, .height]
 
-        let popupWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 980, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        popupWindow.title = "Dockyard DSH — sign in"
-        popupWindow.minSize = NSSize(width: 640, height: 520)
-        popupWindow.contentView = popup
-        popupWindow.center()
-        popupWindow.makeKeyAndOrderFront(nil)
-        oauthWindow = popupWindow
+        // Keep the popup WebView off-screen. The authorization URL is handed to
+        // the system browser in the navigation delegate below; creating and
+        // destroying a second AppKit window during WebKit navigation can crash
+        // macOS 27's WebKit bridge.
         oauthWebView = popup
         return popup
     }
@@ -106,13 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         if webView === oauthWebView,
            let url = navigationAction.request.url,
            url.scheme?.lowercased() == "http" || url.scheme?.lowercased() == "https" {
-            let popupWindow = oauthWindow
-            oauthWindow = nil
+            let popupWebView = oauthWebView
             oauthWebView = nil
             decisionHandler(.cancel)
-            DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self, popupWebView] in
                 self?.openAuthorizationURL(url)
-                popupWindow?.close()
+                _ = popupWebView
             }
             return
         }
