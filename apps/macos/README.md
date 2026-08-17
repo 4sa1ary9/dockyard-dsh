@@ -23,7 +23,7 @@ Outputs are written to `dist/macos/`:
 - `Dockyard DSH.app`
 - `Dockyard-DSH-macos-universal.dmg`
 
-The app launches the embedded DSH server on `127.0.0.1:3080` and displays it in a native WebKit window. `DOCKYARD_DSH_PORT` may be set for local testing when port 3080 is already occupied.
+The app launches the embedded DSH server on `127.0.0.1:3080` and displays it in a native WebKit window. OAuth authorization links are opened in the system default browser so provider account selection and callback handling work like the regular Web UI. `DOCKYARD_DSH_PORT` may be set for local testing when port 3080 is already occupied.
 
 The current build is ad-hoc signed for local testing. Set `CODESIGN_IDENTITY` to a Developer ID identity for a distributable signed build, then notarize the resulting app/DMG through Apple.
 

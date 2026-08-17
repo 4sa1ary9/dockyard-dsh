@@ -52,7 +52,7 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 ./apps/macos/build-dmg.sh
 ```
 
-构建结果在 `dist/macos/`。双击 App 后，它会启动内置的 DSH Web profile，并在原生 WebKit 窗口中显示 `http://127.0.0.1:3080`。详细说明见 [`apps/macos/README.md`](apps/macos/README.md)。当前构建包含 Apple Silicon 和 Intel 两个架构；正式对外发布还需要使用 Developer ID 签名并完成 Apple notarization。
+构建结果在 `dist/macos/`。双击 App 后，它会启动内置的 DSH Web profile，并在原生 WebKit 窗口中显示 `http://127.0.0.1:3080`；OAuth 授权页会交给系统默认浏览器打开。详细说明见 [`apps/macos/README.md`](apps/macos/README.md)。当前构建包含 Apple Silicon 和 Intel 两个架构；正式对外发布还需要使用 Developer ID 签名并完成 Apple notarization。
 
 ### 安装前提：先安装 DSH，再安装 Dockyard DSH
 
@@ -239,7 +239,7 @@ If you do not want to install Node.js, pnpm, or DSH manually, build the self-con
 ./apps/macos/build-dmg.sh
 ```
 
-The outputs are written to `dist/macos/`. Launching the app starts the embedded DSH Web profile and displays `http://127.0.0.1:3080` in a native WebKit window. See [`apps/macos/README.md`](apps/macos/README.md) for details. The current build includes Apple Silicon and Intel slices; public distribution also requires a Developer ID signature and Apple notarization.
+The outputs are written to `dist/macos/`. Launching the app starts the embedded DSH Web profile and displays `http://127.0.0.1:3080` in a native WebKit window; OAuth authorization pages open in the system default browser. See [`apps/macos/README.md`](apps/macos/README.md) for details. The current build includes Apple Silicon and Intel slices; public distribution also requires a Developer ID signature and Apple notarization.
 
 ### Prerequisite: install DSH before installing Dockyard DSH
 

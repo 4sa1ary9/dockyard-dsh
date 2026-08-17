@@ -3,10 +3,12 @@ import Darwin
 import Foundation
 import WebKit
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
     private var webPort = 3080
     private var window: NSWindow!
     private var webView: WKWebView!
+    private var oauthWindow: NSWindow?
+    private var oauthWebView: WKWebView?
     private var dshProcess: Process?
     private var logHandle: FileHandle?
     private var stopping = false
@@ -32,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         configuration.websiteDataStore = .default()
         webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
 
         window = NSWindow(
@@ -47,6 +50,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         showLoading(message: "Starting Dockyard DSH…")
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        guard let url = navigationAction.request.url else { return nil }
+        if url.scheme?.lowercased() != "about" {
+            openAuthorizationURL(url)
+            return nil
+        }
+
+        let popup = WKWebView(frame: .zero, configuration: configuration)
+        popup.navigationDelegate = self
+        popup.uiDelegate = self
+        popup.autoresizingMask = [.width, .height]
+
+        let popupWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 980, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        popupWindow.title = "Dockyard DSH — sign in"
+        popupWindow.minSize = NSSize(width: 640, height: 520)
+        popupWindow.contentView = popup
+        popupWindow.center()
+        popupWindow.makeKeyAndOrderFront(nil)
+        oauthWindow = popupWindow
+        oauthWebView = popup
+        return popup
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if webView === oauthWebView,
+           let url = navigationAction.request.url,
+           url.scheme?.lowercased() == "http" || url.scheme?.lowercased() == "https" {
+            openAuthorizationURL(url)
+            oauthWindow?.close()
+            oauthWindow = nil
+            oauthWebView = nil
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    private func openAuthorizationURL(_ url: URL) {
+        guard ["http", "https"].contains(url.scheme?.lowercased()) else { return }
+        if !NSWorkspace.shared.open(url) {
+            appendLog(Data("[Dockyard DSH] Could not open authorization URL: \(url.absoluteString)\\n".utf8))
+        }
     }
 
     private func resolveWebPort() throws -> Int {
