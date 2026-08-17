@@ -4024,7 +4024,13 @@ function createAntigravityOAuthAuthorizer({
         const account = candidate(context?.now instanceof Date ? context.now : /* @__PURE__ */ new Date(), {
           email: extractAntigravityAccountEmail(session.output),
           session: auth,
-          existingAccounts: context?.accounts ?? []
+          existingAccounts: context?.accounts ?? [],
+          // agy's isolated temporary profile is a browser OAuth session, not
+          // the user's active local CLI session. Mark it accordingly so quota
+          // refresh and request execution use the captured credential instead
+          // of rejecting it as a session mismatch.
+          source: "official_antigravity_browser_oauth",
+          sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
         });
         session.status = "completed";
         session.result = {

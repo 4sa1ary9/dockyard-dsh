@@ -405,6 +405,8 @@ test("Antigravity OAuth authorizer captures agy's browser URL and imports its is
   assert.equal(result.status, "completed");
   assert.equal(result.authorizationUrl, "https://accounts.google.com/o/oauth2/auth?state=test&code_challenge=test");
   assert.equal(result.accounts[0].resources.sessionPersistence, "captured");
+  assert.equal(result.accounts[0].resources.sessionSource, "browser");
+  assert.equal(result.accounts[0].source, "official_antigravity_browser_oauth");
   assert.equal(started.browserOpened, true);
 });
 
