@@ -4,7 +4,7 @@
 
 [中文](#中文) · [English](#english)
 
-> **Current status / 当前状态:** Developer preview · **macOS only** · Windows is not supported or verified in this release.
+> **Current status / 当前状态:** Developer preview · **macOS DMG available** · Windows EXE is in active development and is not released or verified yet.
 
 ## 中文
 
@@ -31,18 +31,17 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 - 读取 provider 返回的实时模型目录、推理档位、套餐和额度窗口。
 - 所有命令、模型选择和 LLM 生成都读取同一个 Dockyard runtime，不维护第二套账号池或额度缓存。
 
-### 平台支持：当前仅 macOS
+### 平台支持：macOS 已发布，Windows 开发中
 
-**当前发布版本只支持 macOS。Windows 不是受支持的平台，也没有经过完整验证。**
+**当前发布版本支持 macOS；Windows EXE 正在制作中，尚未发布或完成完整验证。**
 
-原因是当前完整功能依赖 macOS 原生能力和 macOS 官方客户端状态：
+macOS 完整功能依赖以下原生能力：
 
 - 凭据存储使用 macOS Keychain 和 Swift helper。
 - 浏览器 OAuth 由 DSH GUI 打开 provider 官方授权页面，并使用 PKCE、state 校验和 loopback/manual-code 回调；CLI fallback 才使用官方 CLI。
 - 扫描模式仍可读取 Cursor、Antigravity 等 provider 的 macOS 官方桌面端或本机 CLI 会话状态。
-- 当前没有 Windows credential-store backend、Windows 原生 OAuth 启动器和 Windows 打包验证。
 
-纯 JavaScript 的部分未来可以继续做跨平台抽象，但本仓库当前不能宣传为 macOS/Windows 通用。如果你使用 Windows，请等待 Windows backend 和真实 E2E 验证完成。
+Windows 版本正在补齐 credential store、原生 OAuth 启动器、EXE 打包和真实 E2E 验证。
 
 ### macOS 独立应用与 DMG
 
@@ -224,18 +223,17 @@ When an official client, CLI, or OAuth source is missing or not signed in, Docky
 - Read live provider model catalogs, reasoning tiers, plans, and quota windows.
 - Keep commands, model selection, and generation on the same Dockyard runtime and source of truth.
 
-### Platform support: macOS only
+### Platform support: macOS released, Windows in development
 
-**This release supports macOS only. Windows is not supported and has not been fully verified.**
+**The current release supports macOS. A Windows EXE is in active development and is not released or fully verified yet.**
 
-The complete integration currently depends on macOS-specific behavior:
+The macOS integration depends on native behavior:
 
 - Credentials use the macOS Keychain and a Swift helper.
 - Browser OAuth is opened by the DSH GUI and uses PKCE, state validation, loopback callbacks, or manual-code entry; the official CLI is only a fallback.
 - Scan mode still reads macOS desktop or local CLI session state for providers that expose it.
-- There is no Windows credential-store backend, Windows-native OAuth launcher, or Windows packaging/E2E validation in this release.
 
-Some pure JavaScript layers can be abstracted for other platforms later, but this repository must currently be treated as a macOS-only plugin.
+The Windows version is being completed with a credential store, native OAuth launcher, EXE packaging, and real E2E validation.
 
 ### Standalone macOS app and DMG
 
