@@ -561,8 +561,7 @@ export class GrokOAuthDriver {
             code_challenge_method: "S256",
             state,
             nonce,
-            referrer: "grok-build",
-          });
+                      });
           return url.toString();
         },
         exchangeCode: async ({ code, codeVerifier, redirectUri, context }) => {
