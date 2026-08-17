@@ -364,7 +364,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func synchronizeBundledFiles(from bundledProfile: URL, to profile: URL) throws {
         let files = [
             ("node_modules/@dockyard-dsh/plugin/packages/dsh-plugin/dist/macos-keychain-helper.swift", "Bundled macOS Keychain helper"),
-            ("node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js", "Bundled model selector")
+            ("node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js", "Bundled model selector"),
+            ("node_modules/@dockyard-dsh/plugin/packages/dsh-plugin/lib/client.js", "Bundled Dockyard account client")
         ]
         for (relativePath, resourceName) in files {
             let bundledFile = bundledProfile.appendingPathComponent(relativePath)
