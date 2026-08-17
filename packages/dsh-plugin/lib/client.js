@@ -16373,12 +16373,12 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
     return void 0;
   }, [controller, nativeController, providerId]);
   useEffect(() => {
-    if (!open || !providerId) return void 0;
+    if (!providerId) return void 0;
     const hasProvider = Boolean(provider);
     if (hasProvider) {
       void controller.refresh(providerId);
       const needsAntigravityIdentityScan = providerId === "antigravity" && (provider.accounts ?? []).some((account) => !account.email && !["official_cli_auth_status", "official_client_auth_status", "local_oauth_session_fingerprint"].includes(account.resources?.identitySource));
-      if (needsAntigravityIdentityScan) void controller.scan(providerId);
+      if (open && needsAntigravityIdentityScan) void controller.scan(providerId);
       const timer2 = setInterval(() => controller.refresh(providerId), 3e4);
       return () => clearInterval(timer2);
     }

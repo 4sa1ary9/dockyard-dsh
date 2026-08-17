@@ -109,6 +109,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         decisionHandler(.allow)
     }
 
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Dockyard DSH"
+        alert.informativeText = message
+        alert.addButton(withTitle: "确定")
+        presentJavaScriptAlert(alert, on: webView) { _ in
+            completionHandler()
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Dockyard DSH"
+        alert.informativeText = message
+        alert.addButton(withTitle: "确认")
+        alert.addButton(withTitle: "取消")
+        presentJavaScriptAlert(alert, on: webView) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptTextInputPanelWithPrompt prompt: String,
+        defaultText: String?,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (String?) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "Dockyard DSH"
+        alert.informativeText = prompt
+        let input = NSTextField(string: defaultText ?? "")
+        input.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+        alert.accessoryView = input
+        alert.addButton(withTitle: "确定")
+        alert.addButton(withTitle: "取消")
+        presentJavaScriptAlert(alert, on: webView) { response in
+            completionHandler(response == .alertFirstButtonReturn ? input.stringValue : nil)
+        }
+    }
+
+    private func presentJavaScriptAlert(
+        _ alert: NSAlert,
+        on webView: WKWebView,
+        completionHandler: @escaping (NSApplication.ModalResponse) -> Void
+    ) {
+        if let parent = webView.window ?? window {
+            alert.beginSheetModal(for: parent) { response in
+                completionHandler(response)
+            }
+        } else {
+            completionHandler(alert.runModal())
+        }
+    }
+
     private func openAuthorizationURL(_ url: URL) {
         guard ["http", "https"].contains(url.scheme?.lowercased()) else { return }
         if !NSWorkspace.shared.open(url) {
