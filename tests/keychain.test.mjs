@@ -1,9 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { MacOSKeychainStore } from "../packages/vault/src/index.mjs";
 
 const isMacOS = process.platform === "darwin";
+const packagedHelper = resolve(dirname(fileURLToPath(import.meta.url)), "../packages/dsh-plugin/dist/macos-keychain-helper.swift");
+
+test("the published plugin carries its macOS Keychain helper", () => {
+  assert.equal(existsSync(packagedHelper), true, "the npm package must include the Keychain helper next to its bundled plugin");
+});
 
 /**
  * Real macOS Keychain integration test. The Swift helper is part of the

@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +8,8 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
 const entryPoint = resolve(packageRoot, "src/index.mjs");
 const outputPath = resolve(packageRoot, "dist/index.mjs");
+const keychainHelperSource = resolve(repositoryRoot, "packages/vault/src/macos-keychain-helper.swift");
+const keychainHelperOutput = resolve(packageRoot, "dist/macos-keychain-helper.swift");
 
 await mkdir(dirname(outputPath), { recursive: true });
 await build({
@@ -30,4 +32,5 @@ await build({
 });
 
 await import("./build-client.mjs");
+await copyFile(keychainHelperSource, keychainHelperOutput);
 console.log(`Dockyard DSH plugin bundle written: ${outputPath}`);

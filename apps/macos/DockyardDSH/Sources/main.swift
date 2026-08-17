@@ -210,14 +210,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         try FileManager.default.createDirectory(at: appSupport, withIntermediateDirectories: true)
         let profile = home.appendingPathComponent("profiles", isDirectory: true)
             .appendingPathComponent("web", isDirectory: true)
+        let resources = try resourceDirectory()
+        let bundledHome = resources.appendingPathComponent("dsh-home", isDirectory: true)
+        let bundledProfile = bundledHome.appendingPathComponent("profiles", isDirectory: true)
+            .appendingPathComponent("web", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: bundledProfile.path) else {
+            throw AppError.missingResource("Bundled Web profile")
+        }
         if !FileManager.default.fileExists(atPath: profile.path) {
-            let resources = try resourceDirectory()
-            let bundledHome = resources.appendingPathComponent("dsh-home", isDirectory: true)
-            let bundledProfile = bundledHome.appendingPathComponent("profiles", isDirectory: true)
-                .appendingPathComponent("web", isDirectory: true)
-            guard FileManager.default.fileExists(atPath: bundledProfile.path) else {
-                throw AppError.missingResource("Bundled Web profile")
-            }
             if FileManager.default.fileExists(atPath: home.path) {
                 try FileManager.default.createDirectory(at: home.appendingPathComponent("profiles", isDirectory: true), withIntermediateDirectories: true)
                 try FileManager.default.copyItem(at: bundledProfile, to: profile)
@@ -225,7 +225,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
                 try FileManager.default.copyItem(at: bundledHome, to: home)
             }
         }
+        try synchronizeKeychainHelper(from: bundledProfile, to: profile)
         return home
+    }
+
+    private func synchronizeKeychainHelper(from bundledProfile: URL, to profile: URL) throws {
+        let relativePath = "node_modules/@dockyard-dsh/plugin/packages/dsh-plugin/dist/macos-keychain-helper.swift"
+        let bundledHelper = bundledProfile.appendingPathComponent(relativePath)
+        let installedHelper = profile.appendingPathComponent(relativePath)
+        guard FileManager.default.fileExists(atPath: bundledHelper.path) else {
+            throw AppError.missingResource("Bundled macOS Keychain helper")
+        }
+        try FileManager.default.createDirectory(at: installedHelper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let bundledData = try Data(contentsOf: bundledHelper)
+        if let installedData = try? Data(contentsOf: installedHelper), installedData == bundledData {
+            return
+        }
+        if FileManager.default.fileExists(atPath: installedHelper.path) {
+            try FileManager.default.removeItem(at: installedHelper)
+        }
+        try FileManager.default.copyItem(at: bundledHelper, to: installedHelper)
     }
 
     private func resourceDirectory() throws -> URL {
