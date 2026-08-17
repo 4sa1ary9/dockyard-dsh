@@ -268,8 +268,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             process.currentDirectoryURL = runtime
             var environment = ProcessInfo.processInfo.environment
             environment["DSH_HOME"] = home.path
+            let userHome = FileManager.default.homeDirectoryForCurrentUser.path
             environment["PATH"] = [
                 runtime.appendingPathComponent("bin").path,
+                "\(userHome)/.local/bin",
+                "\(userHome)/.npm-global/bin",
+                "\(userHome)/.npm/bin",
+                "\(userHome)/.bun/bin",
+                "/opt/homebrew/bin",
+                "/opt/homebrew/sbin",
+                "/usr/local/bin",
+                "/usr/local/sbin",
+                environment["PATH"] ?? "",
                 "/usr/bin",
                 "/bin",
                 "/usr/sbin",
