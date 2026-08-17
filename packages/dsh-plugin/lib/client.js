@@ -15574,7 +15574,7 @@ var DockyardClientController = class {
       return current.auth;
     }
     this.setState({ action: "login", status: "loading", providerId, error: null, message: null });
-    const authWindow = typeof window !== "undefined" && typeof window.open === "function" ? window.open("about:blank", "dockyard-dsh-oauth", "popup") : null;
+    const authWindow = providerId === "antigravity" ? null : typeof window !== "undefined" && typeof window.open === "function" ? window.open("about:blank", "dockyard-dsh-oauth", "popup") : null;
     try {
       if (authWindow) authWindow.opener = null;
     } catch {
@@ -15582,7 +15582,9 @@ var DockyardClientController = class {
     try {
       const value = await this.call("login", { providerId });
       const result = this.applyValue(value, providerId);
-      if (result?.authorizationUrl) {
+      if (result?.browserOpened) {
+        authWindow?.close?.();
+      } else if (result?.authorizationUrl) {
         if (authWindow && !authWindow.closed) authWindow.location.href = result.authorizationUrl;
         else if (typeof window !== "undefined") window.open(result.authorizationUrl, "dockyard-dsh-oauth", "popup");
       } else {

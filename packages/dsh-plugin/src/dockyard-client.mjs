@@ -585,9 +585,14 @@ class DockyardClientController {
       return current.auth;
     }
     this.setState({ action: "login", status: "loading", providerId, error: null, message: null });
-    const authWindow = typeof window !== "undefined" && typeof window.open === "function"
-      ? window.open("about:blank", "dockyard-dsh-oauth", "popup")
-      : null;
+    // Antigravity's official `agy` CLI owns its browser window. Do not create
+    // a placeholder tab for that provider; otherwise the captured URL is
+    // opened once by agy and once again by this WebView.
+    const authWindow = providerId === "antigravity"
+      ? null
+      : typeof window !== "undefined" && typeof window.open === "function"
+        ? window.open("about:blank", "dockyard-dsh-oauth", "popup")
+        : null;
     try {
       if (authWindow) authWindow.opener = null;
     } catch {
@@ -596,7 +601,9 @@ class DockyardClientController {
     try {
       const value = await this.call("login", { providerId });
       const result = this.applyValue(value, providerId);
-      if (result?.authorizationUrl) {
+      if (result?.browserOpened) {
+        authWindow?.close?.();
+      } else if (result?.authorizationUrl) {
         if (authWindow && !authWindow.closed) authWindow.location.href = result.authorizationUrl;
         else if (typeof window !== "undefined") window.open(result.authorizationUrl, "dockyard-dsh-oauth", "popup");
       } else {
