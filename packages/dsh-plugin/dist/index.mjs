@@ -5072,7 +5072,8 @@ var GrokOAuthDriver = class {
           code_challenge: codeChallenge,
           code_challenge_method: "S256",
           state,
-          nonce
+          nonce,
+          referrer: "grok-build"
         });
         return url.toString();
       },

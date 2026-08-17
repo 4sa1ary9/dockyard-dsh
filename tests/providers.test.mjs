@@ -1375,7 +1375,7 @@ test("subscription drivers start browser OAuth without a local CLI", async () =>
   assert.equal(grokUrl.pathname, "/oauth2/authorize");
   assert.equal(new URL(grokUrl.searchParams.get("redirect_uri")).pathname, "/callback");
   assert.equal(grokUrl.searchParams.get("code_challenge_method"), "S256");
-   assert.equal(grokUrl.searchParams.has("referrer"), false);
+  assert.equal(grokUrl.searchParams.get("referrer"), "grok-build");
   await grok.cancelAuthorization(grokStarted.sessionId);
 
   const cursor = createCursorDriver({ cliPath: "missing-cursor-agent", commandRunner });
