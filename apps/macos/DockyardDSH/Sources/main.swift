@@ -4,7 +4,7 @@ import Foundation
 import WebKit
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
-    private lazy var webPort = Int(ProcessInfo.processInfo.environment["DOCKYARD_DSH_PORT"] ?? "3080") ?? 3080
+    private var webPort = 3080
     private var window: NSWindow!
     private var webView: WKWebView!
     private var dshProcess: Process?
@@ -49,6 +49,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         showLoading(message: "Starting Dockyard DSH…")
     }
 
+    private func resolveWebPort() throws -> Int {
+        let environment = ProcessInfo.processInfo.environment
+        let override = environment["DOCKYARD_DSH_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let requested = Int(override ?? "3080") ?? 3080
+        let preferred = requested > 0 ? requested : 3080
+        if portIsAvailable(preferred) { return preferred }
+        if override != nil {
+            throw AppError.portUnavailable(preferred)
+        }
+        if preferred < 65535 {
+            for candidate in (preferred + 1)...min(preferred + 100, 65535) where portIsAvailable(candidate) {
+                return candidate
+            }
+        }
+        throw AppError.portUnavailable(preferred)
+    }
+
+    private func portIsAvailable(_ port: Int) -> Bool {
+        guard (1...65535).contains(port) else { return false }
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { return false }
+        defer { close(descriptor) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = in_port_t(port).bigEndian
+        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr)
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
+    }
+
     private func runtimeArchitecture() -> String {
         #if arch(arm64)
         return "arm64"
@@ -61,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     private func startDockyardRuntime() {
         do {
+            webPort = try resolveWebPort()
             let home = try prepareUserHome()
             let resources = try resourceDirectory()
             let runtime = resources.appendingPathComponent("runtime", isDirectory: true)
@@ -233,10 +269,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
 enum AppError: LocalizedError {
     case missingResource(String)
+    case portUnavailable(Int)
 
     var errorDescription: String? {
         switch self {
         case .missingResource(let name): return "Missing \(name) in the application bundle. Reinstall Dockyard DSH."
+        case .portUnavailable(let port): return "Port \(port) is already in use. Quit the other local Web service and try again."
         }
     }
 }
