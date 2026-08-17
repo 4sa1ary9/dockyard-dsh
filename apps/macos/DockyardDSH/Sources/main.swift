@@ -302,26 +302,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 try FileManager.default.copyItem(at: bundledHome, to: home)
             }
         }
-        try synchronizeKeychainHelper(from: bundledProfile, to: profile)
+        try synchronizeBundledFiles(from: bundledProfile, to: profile)
         return home
     }
 
-    private func synchronizeKeychainHelper(from bundledProfile: URL, to profile: URL) throws {
-        let relativePath = "node_modules/@dockyard-dsh/plugin/packages/dsh-plugin/dist/macos-keychain-helper.swift"
-        let bundledHelper = bundledProfile.appendingPathComponent(relativePath)
-        let installedHelper = profile.appendingPathComponent(relativePath)
-        guard FileManager.default.fileExists(atPath: bundledHelper.path) else {
-            throw AppError.missingResource("Bundled macOS Keychain helper")
+    private func synchronizeBundledFiles(from bundledProfile: URL, to profile: URL) throws {
+        let files = [
+            ("node_modules/@dockyard-dsh/plugin/packages/dsh-plugin/dist/macos-keychain-helper.swift", "Bundled macOS Keychain helper"),
+            ("node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js", "Bundled model selector")
+        ]
+        for (relativePath, resourceName) in files {
+            let bundledFile = bundledProfile.appendingPathComponent(relativePath)
+            let installedFile = profile.appendingPathComponent(relativePath)
+            guard FileManager.default.fileExists(atPath: bundledFile.path) else {
+                throw AppError.missingResource(resourceName)
+            }
+            try FileManager.default.createDirectory(at: installedFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let bundledData = try Data(contentsOf: bundledFile)
+            if let installedData = try? Data(contentsOf: installedFile), installedData == bundledData {
+                continue
+            }
+            if FileManager.default.fileExists(atPath: installedFile.path) {
+                try FileManager.default.removeItem(at: installedFile)
+            }
+            try FileManager.default.copyItem(at: bundledFile, to: installedFile)
         }
-        try FileManager.default.createDirectory(at: installedHelper.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let bundledData = try Data(contentsOf: bundledHelper)
-        if let installedData = try? Data(contentsOf: installedHelper), installedData == bundledData {
-            return
-        }
-        if FileManager.default.fileExists(atPath: installedHelper.path) {
-            try FileManager.default.removeItem(at: installedHelper)
-        }
-        try FileManager.default.copyItem(at: bundledHelper, to: installedHelper)
     }
 
     private func resourceDirectory() throws -> URL {

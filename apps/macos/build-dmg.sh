@@ -100,6 +100,22 @@ if (manifest.dependencies?.["@dockyard-dsh/plugin"]) {
 }
 fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
+
+# WebKit reports a null relatedTarget when focus moves into this menu. The
+# upstream component's blur handler then closes the menu before its click
+# handler can select a model. The standalone shell already preserves focus on
+# menu presses; remove that conflicting blur path from the pinned client bundle.
+MODEL_SELECTION_CLIENT="$STAGE/dsh-home/profiles/web/node_modules/@deepseek-ai/dsh-client-ui-model-selection/lib/client.js"
+MODEL_SELECTION_CLIENT="$MODEL_SELECTION_CLIENT" "$NODE_FOR_BUILD" <<'NODE'
+const fs = require("node:fs");
+const file = process.env.MODEL_SELECTION_CLIENT;
+const source = fs.readFileSync(file, "utf8");
+const oldText = "onKeyDown: onRootKeyDown,\n\t\t\t\tonBlur,\n\t\t\t\tchildren: [";
+const newText = "onKeyDown: onRootKeyDown,\n\t\t\t\tchildren: [";
+const occurrences = source.split(oldText).length - 1;
+if (occurrences !== 1) throw new Error(`unexpected model-selection client layout (${occurrences} matches)`);
+fs.writeFileSync(file, source.replace(oldText, newText));
+NODE
 rm -f "$STAGE/dsh-home/profiles/web/pnpm-lock.yaml"
 
 log "copy the embedded runtime into the application bundle"
