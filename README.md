@@ -46,17 +46,23 @@ Dockyard DSH 把多个官方 OAuth / 官方客户端会话接入 DeepSeek Harnes
 
 ### macOS 独立应用与 DMG
 
-如果你不想手动安装 Node.js、pnpm 或 DSH，可以在 Mac 上构建/分发自带运行时的通用 DMG：
+如果不想手动安装 Node.js、pnpm 或 DSH，可以直接下载自带完整运行时的 macOS 通用 DMG：
+
+[下载最新 Dockyard DSH DMG](https://github.com/AITabby/dockyard-dsh/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
+
+也可以在 Mac 上自行构建：
 
 ```sh
 ./apps/macos/build-dmg.sh
 ```
 
-构建结果在 `dist/macos/`。双击 App 后，它会启动内置的 DSH Web profile，并在原生 WebKit 窗口中显示 `http://127.0.0.1:3080`；OAuth 授权页会交给系统默认浏览器打开。详细说明见 [`apps/macos/README.md`](apps/macos/README.md)。当前构建包含 Apple Silicon 和 Intel 两个架构；正式对外发布还需要使用 Developer ID 签名并完成 Apple notarization。
+DMG 内置 Node.js、DSH CLI、完整 `web` profile 和 Dockyard 插件；双击 App 即可运行，不需要另外安装 Node.js、pnpm 或 DSH。它会在原生 WebKit 窗口中显示内置的 DSH Web profile；OAuth 授权页会交给系统默认浏览器打开。当前构建包含 Apple Silicon 和 Intel 两个架构。详细说明见 [`apps/macos/README.md`](apps/macos/README.md)。
 
-### 安装前提：先安装 DSH，再安装 Dockyard DSH
+仍需注意：这是 macOS 专用、当前为本地 ad-hoc 签名的开发预览；某些 provider 的官方 CLI 扫描/兼容性 fallback 仍可能需要对应 CLI，Antigravity 浏览器授权仍需要配置官方 OAuth client 信息。
 
-Dockyard DSH 是 DSH plugin，不是独立的 agent。请先安装 DSH CLI，并确认 `dsh` 命令可用。
+### 从源码安装 Dockyard plugin / Web profile
+
+Dockyard DSH 作为源码 plugin 安装到已有 DSH Web profile 时，才需要先安装 DSH CLI，并确认 `dsh` 命令可用。
 
 当前上游 DSH CLI 的 npm 安装方式：
 
@@ -233,17 +239,21 @@ Some pure JavaScript layers can be abstracted for other platforms later, but thi
 
 ### Standalone macOS app and DMG
 
-If you do not want to install Node.js, pnpm, or DSH manually, build the self-contained universal DMG on macOS:
+If you do not want to install Node.js, pnpm, or DSH manually, download the self-contained universal DMG:
+
+[Download the latest Dockyard DSH DMG](https://github.com/AITabby/dockyard-dsh/releases/latest/download/Dockyard-DSH-macos-universal.dmg)
+
+Or build it on macOS:
 
 ```sh
 ./apps/macos/build-dmg.sh
 ```
 
-The outputs are written to `dist/macos/`. Launching the app starts the embedded DSH Web profile and displays `http://127.0.0.1:3080` in a native WebKit window; OAuth authorization pages open in the system default browser. See [`apps/macos/README.md`](apps/macos/README.md) for details. The current build includes Apple Silicon and Intel slices; public distribution also requires a Developer ID signature and Apple notarization.
+The DMG embeds Node.js, the DSH CLI, the complete `web` profile, and the Dockyard plugin. Launching the app is enough; no separate Node.js, pnpm, or DSH installation is required. OAuth authorization pages open in the system default browser. See [`apps/macos/README.md`](apps/macos/README.md) for details. The current build includes Apple Silicon and Intel slices. This is a macOS-only developer preview with a local ad-hoc signature; some provider CLI scan/compatibility fallbacks still require their provider CLI, and Antigravity browser OAuth still requires the official OAuth client configuration.
 
-### Prerequisite: install DSH before installing Dockyard DSH
+### Installing the source plugin into an existing DSH Web profile
 
-Dockyard DSH is a DSH plugin, not a standalone agent. Install the DSH CLI first and verify that the `dsh` command is available:
+Dockyard DSH is a DSH plugin, not a standalone agent. This prerequisite applies when installing the source plugin into an existing DSH profile; install the DSH CLI first and verify that the `dsh` command is available:
 
 ```sh
 # DSH is currently a developer preview. Use the Node.js version required by DSH.

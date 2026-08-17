@@ -1,6 +1,6 @@
 # Dockyard DSH macOS app
 
-This directory builds a self-contained universal macOS app and DMG around the existing DSH Web profile.
+This directory builds a self-contained universal macOS app and DMG around the existing DSH Web profile. Users of the resulting DMG do not need to install Node.js, pnpm, or DSH separately.
 
 ## Build
 
