@@ -107,9 +107,14 @@ function commandError(text) {
 }
 
 function openDefaultBrowser(url) {
-  if (process.platform !== "darwin" || !url) return;
+  if (!url) return;
   try {
-    const child = spawn("open", [url], { detached: true, stdio: "ignore" });
+    const command = process.platform === "win32"
+      ? { file: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] }
+      : process.platform === "darwin"
+        ? { file: "open", args: [url] }
+        : { file: "xdg-open", args: [url] };
+    const child = spawn(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true });
     child.unref();
   } catch {
     // The authorization URL is still returned in the command result.

@@ -1089,6 +1089,8 @@ var DshInjectionBridge = class {
 // packages/vault/src/index.mjs
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 var KEYCHAIN_SERVICE = "com.dockyard-dsh.credentials";
@@ -1159,6 +1161,105 @@ var UnavailableSecretStore = class {
   async delete() {
   }
 };
+function defaultWindowsSecretsDir() {
+  const root = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
+  return join(root, "dockyard-dsh", "secrets");
+}
+function runPowerShell(script, { input = "", timeoutMs = 15e3 } = {}) {
+  return new Promise((resolve2, reject) => {
+    let settled = false;
+    let timer;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const child = spawn("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      script
+    ], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true
+    });
+    const stdout = [];
+    let stderr = "";
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => finish(reject, error));
+    child.on("close", (code) => {
+      if (settled) return;
+      if (code === 0) {
+        finish(resolve2, Buffer.concat(stdout).toString("utf8").trim());
+        return;
+      }
+      const error = new Error("Windows DPAPI operation failed");
+      error.code = code;
+      error.detail = stderr.replace(/\s+/g, " ").trim().slice(0, 300);
+      finish(reject, error);
+    });
+    timer = setTimeout(() => {
+      child.kill();
+      const error = new Error("Windows DPAPI operation timed out");
+      error.code = "ETIMEDOUT";
+      finish(reject, error);
+    }, timeoutMs);
+    child.stdin.write(input);
+    child.stdin.end();
+  });
+}
+var DPAPI_SCRIPT = [
+  "Add-Type -AssemblyName System.Security",
+  "$ErrorActionPreference = 'Stop'",
+  "$raw = [Console]::In.ReadToEnd()",
+  "$req = $raw | ConvertFrom-Json",
+  "$bytes = [Convert]::FromBase64String([string]$req.data)",
+  "if ($req.op -eq 'protect') {",
+  "  $out = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)",
+  "} else {",
+  "  $out = [System.Security.Cryptography.ProtectedData]::Unprotect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)",
+  "}",
+  "[Convert]::ToBase64String($out)"
+].join("; ");
+var WindowsDpapiSecretStore = class {
+  constructor({ directory = defaultWindowsSecretsDir() } = {}) {
+    this.directory = directory;
+  }
+  #fileFor(ref) {
+    return join(this.directory, `${stableKey(ref)}.bin`);
+  }
+  async #transform(op, bytes) {
+    const encoded = await runPowerShell(DPAPI_SCRIPT, {
+      input: JSON.stringify({ op, data: Buffer.from(bytes).toString("base64") })
+    });
+    if (!encoded) throw new Error("Windows DPAPI helper returned empty data");
+    return Buffer.from(encoded, "base64");
+  }
+  async read(ref) {
+    try {
+      const packed = await readFile(this.#fileFor(ref));
+      return JSON.parse((await this.#transform("unprotect", packed)).toString("utf8"));
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    }
+  }
+  async write(ref, value) {
+    await mkdir(this.directory, { recursive: true });
+    const packed = await this.#transform("protect", Buffer.from(JSON.stringify(value), "utf8"));
+    await writeFile(this.#fileFor(ref), packed);
+    return ref;
+  }
+  async delete(ref) {
+    await rm(this.#fileFor(ref), { force: true });
+  }
+};
 var MacOSKeychainStore = class {
   constructor({ service = KEYCHAIN_SERVICE } = {}) {
     this.service = service;
@@ -1185,17 +1286,18 @@ var MacOSKeychainStore = class {
   }
 };
 function createDefaultSecretStore({ platform = process.platform } = {}) {
-  if (platform !== "darwin") return new UnavailableSecretStore({ platform });
-  return new MacOSKeychainStore();
+  if (platform === "darwin") return new MacOSKeychainStore();
+  if (platform === "win32") return new WindowsDpapiSecretStore();
+  return new UnavailableSecretStore({ platform });
 }
 var secretStoreConstants = Object.freeze({
   keychainService: KEYCHAIN_SERVICE
 });
 
 // packages/runtime/src/state-store.mjs
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir as mkdir2, open, readFile as readFile2, rename, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2, join as join2 } from "node:path";
-import { homedir } from "node:os";
+import { homedir as homedir2 } from "node:os";
 import { randomUUID } from "node:crypto";
 var LOCK_RETRY_MS = 25;
 var LOCK_TIMEOUT_MS = 3e4;
@@ -1206,7 +1308,7 @@ function delay(milliseconds) {
 async function acquireFileLock(filePath) {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  await mkdir(dirname2(filePath), { recursive: true, mode: 448 });
+  await mkdir2(dirname2(filePath), { recursive: true, mode: 448 });
   while (true) {
     try {
       const handle = await open(lockPath, "wx", 384);
@@ -1216,7 +1318,7 @@ async function acquireFileLock(filePath) {
       } catch (error) {
         await handle.close().catch(() => {
         });
-        await rm(lockPath, { force: true }).catch(() => {
+        await rm2(lockPath, { force: true }).catch(() => {
         });
         throw error;
       }
@@ -1226,7 +1328,7 @@ async function acquireFileLock(filePath) {
         released = true;
         await handle.close().catch(() => {
         });
-        await rm(lockPath, { force: true }).catch(() => {
+        await rm2(lockPath, { force: true }).catch(() => {
         });
       };
     } catch (error) {
@@ -1234,7 +1336,7 @@ async function acquireFileLock(filePath) {
       try {
         const metadata = await stat(lockPath);
         if (Date.now() - metadata.mtimeMs > LOCK_STALE_MS) {
-          await rm(lockPath, { force: true });
+          await rm2(lockPath, { force: true });
           continue;
         }
       } catch (lockError) {
@@ -1258,7 +1360,7 @@ async function withFileLock(filePath, operation) {
     await release();
   }
 }
-function defaultDockyardHome({ env = process.env, home = homedir() } = {}) {
+function defaultDockyardHome({ env = process.env, home = homedir2() } = {}) {
   return env.DOCKYARD_DSH_HOME || join2(home, ".dockyard-dsh");
 }
 function defaultDockyardStatePath(options = {}) {
@@ -1277,7 +1379,7 @@ var JsonStateStore = class {
   }
   async load() {
     try {
-      const raw = await readFile(this.filePath, "utf8");
+      const raw = await readFile2(this.filePath, "utf8");
       const parsed = JSON.parse(raw);
       return {
         ...emptyState(),
@@ -1312,17 +1414,17 @@ var JsonStateStore = class {
       ...state,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    await mkdir(dirname2(this.filePath), { recursive: true, mode: 448 });
+    await mkdir2(dirname2(this.filePath), { recursive: true, mode: 448 });
     const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
     let committed = false;
     try {
-      await writeFile(tempPath, `${JSON.stringify(next, null, 2)}
+      await writeFile2(tempPath, `${JSON.stringify(next, null, 2)}
 `, { mode: 384 });
       await rename(tempPath, this.filePath);
       committed = true;
       return next;
     } finally {
-      if (!committed) await rm(tempPath, { force: true }).catch(() => {
+      if (!committed) await rm2(tempPath, { force: true }).catch(() => {
       });
     }
   }
@@ -1330,7 +1432,7 @@ var JsonStateStore = class {
 
 // modules/provider-codex/src/driver.mjs
 import { createHash as createHash3 } from "node:crypto";
-import { homedir as homedir2 } from "node:os";
+import { homedir as homedir3 } from "node:os";
 import { join as join4 } from "node:path";
 
 // packages/oauth/src/browser-oauth-authorizer.mjs
@@ -1338,10 +1440,10 @@ import { createHash as createHash2, randomBytes, randomUUID as randomUUID2 } fro
 import { createServer } from "node:http";
 
 // packages/providers/src/provider-utils.mjs
-import { readFile as readFile2 } from "node:fs/promises";
+import { readFile as readFile3 } from "node:fs/promises";
 async function readJsonFile(path) {
   try {
-    return JSON.parse(await readFile2(path, "utf8"));
+    return JSON.parse(await readFile3(path, "utf8"));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
     throw error;
@@ -1754,7 +1856,7 @@ var browserOAuthAuthorizerConstants = Object.freeze({
 
 // packages/oauth/src/cli-oauth-authorizer.mjs
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { mkdir as mkdir2, mkdtemp, readFile as readFile3, rm as rm2 } from "node:fs/promises";
+import { mkdir as mkdir3, mkdtemp, readFile as readFile4, rm as rm3 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as join3 } from "node:path";
 import { spawn as spawn2 } from "node:child_process";
@@ -1836,7 +1938,7 @@ function createCliOAuthAuthorizer({
   const sessions = /* @__PURE__ */ new Map();
   async function cleanup(session) {
     if (session.cleanupProfile && session.profileDir) {
-      await rm2(session.profileDir, { recursive: true, force: true }).catch(() => {
+      await rm3(session.profileDir, { recursive: true, force: true }).catch(() => {
       });
       session.profileDir = null;
     }
@@ -1871,7 +1973,7 @@ function createCliOAuthAuthorizer({
         }
         let raw;
         try {
-          raw = JSON.parse(await readFile3(join3(session.profileDir, authFileName), "utf8"));
+          raw = JSON.parse(await readFile4(join3(session.profileDir, authFileName), "utf8"));
         } catch (error) {
           session.status = "failed";
           session.diagnostic = `\u5B98\u65B9\u767B\u5F55\u5B8C\u6210\uFF0C\u4F46\u6CA1\u6709\u627E\u5230\u53EF\u8BFB\u53D6\u7684 OAuth \u72B6\u6001\uFF1A${redactError(error)}`;
@@ -1903,7 +2005,7 @@ function createCliOAuthAuthorizer({
   async function begin() {
     const cleanupProfile = !profileDirectory;
     const profileDir = profileDirectory ?? await mkdtemp(join3(tmpdir(), profilePrefix));
-    if (!cleanupProfile) await mkdir2(profileDir, { recursive: true });
+    if (!cleanupProfile) await mkdir3(profileDir, { recursive: true });
     const session = {
       sessionId: `${providerId}:${randomUUID3()}`,
       providerId,
@@ -2047,7 +2149,7 @@ var CREDENTIAL_SLOT = Symbol("dockyard-codex-credential");
 function hash(value) {
   return createHash3("sha256").update(String(value)).digest("hex");
 }
-function codexAuthPath({ env = process.env, home = homedir2(), authFilePath } = {}) {
+function codexAuthPath({ env = process.env, home = homedir3(), authFilePath } = {}) {
   if (authFilePath) return authFilePath;
   return join4(env.CODEX_HOME || join4(home, ".codex"), "auth.json");
 }
@@ -2171,7 +2273,7 @@ var CodexOAuthDriver = class {
   constructor({
     authFilePath,
     env = process.env,
-    home = homedir2(),
+    home = homedir3(),
     tokenUrl = env.DOCKYARD_CODEX_TOKEN_URL || DEFAULT_TOKEN_URL,
     usageUrls = env.DOCKYARD_CODEX_USAGE_URL ? [env.DOCKYARD_CODEX_USAGE_URL] : [...DEFAULT_USAGE_URLS],
     clientId = env.DOCKYARD_CODEX_CLIENT_ID || DEFAULT_CLIENT_ID,
@@ -2607,8 +2709,8 @@ function createCodexModule({ driver = {} } = {}) {
 // modules/provider-antigravity/src/driver.mjs
 import { spawn as spawn4 } from "node:child_process";
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { mkdir as mkdir3, mkdtemp as mkdtemp2, readFile as readFile4, rename as rename2, rm as rm3, writeFile as writeFile2 } from "node:fs/promises";
-import { homedir as homedir4, tmpdir as tmpdir2 } from "node:os";
+import { mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile5, rename as rename2, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
+import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname3, join as join6 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
@@ -2699,7 +2801,7 @@ var cliAgentTransportConstants = Object.freeze({
 
 // modules/provider-antigravity/src/native-transport.mjs
 import { readFileSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
+import { homedir as homedir4 } from "node:os";
 import { join as join5 } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -3035,7 +3137,7 @@ var DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:str
 var DEFAULT_QUOTA_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 var ANTIGRAVITY_INFO_PATHS = [
   "/Applications/Antigravity.app/Contents/Info.plist",
-  join5(homedir3(), "Applications/Antigravity.app/Contents/Info.plist")
+  join5(homedir4(), "Applications/Antigravity.app/Contents/Info.plist")
 ];
 function normalizeAntigravityClientVersion(value) {
   const version = String(value ?? "").trim();
@@ -3096,12 +3198,12 @@ function readOfficialTokenFile(path) {
     return null;
   }
 }
-function readAntigravityTokenFile({ env = process.env, home = homedir3() } = {}) {
+function readAntigravityTokenFile({ env = process.env, home = homedir4() } = {}) {
   return readOfficialTokenFile(
     env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join5(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
   );
 }
-function resolveAntigravityAccessToken({ credential, env = process.env, home = homedir3() } = {}) {
+function resolveAntigravityAccessToken({ credential, env = process.env, home = homedir4() } = {}) {
   const stored = firstString(credential?.access, credential?.token);
   if (stored) {
     return { token: stored, kind: "oauth", email: emailFromObject(credential) };
@@ -3286,7 +3388,7 @@ function createAntigravityNativeExecutor({
       const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
       if (ref) credential = await context.secretStore.read(ref);
     }
-    const auth = await tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home: homedir3() });
+    const auth = await tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home: homedir4() });
     if (!auth?.token) {
       const error = nativeProviderError(PROVIDER_ID2, "Antigravity OAuth token is unavailable; authorize Antigravity first");
       error.authExpired = true;
@@ -3321,7 +3423,7 @@ function createAntigravityNativeExecutor({
 function createAntigravityNativeQuotaReader({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_QUOTA_ENDPOINT || DEFAULT_QUOTA_ENDPOINT,
   env = process.env,
-  home = homedir3(),
+  home = homedir4(),
   timeoutMs = 2e4,
   fetchImpl = fetch,
   tokenResolver = resolveAntigravityAccessToken,
@@ -3614,7 +3716,7 @@ function catalogScopeKey(accounts) {
   const accountIds = (Array.isArray(accounts) ? accounts : []).map((account) => typeof account?.accountId === "string" ? account.accountId : "").filter(Boolean).sort();
   return accountIds.length > 0 ? `accounts:${hash2(accountIds.join("\n")).slice(0, 32)}` : "unscoped";
 }
-function defaultAntigravityCatalogCachePath({ env = process.env, home = homedir4() } = {}) {
+function defaultAntigravityCatalogCachePath({ env = process.env, home = homedir5() } = {}) {
   const dockyardHome = env.DOCKYARD_DSH_HOME || join6(home, ".dockyard-dsh");
   return join6(dockyardHome, "antigravity-catalog.json");
 }
@@ -3627,7 +3729,7 @@ function persistableCatalog(value) {
 async function readAntigravityCatalogCache(filePath) {
   if (!filePath) return { schema: 1, entries: {} };
   try {
-    const parsed = JSON.parse(await readFile4(filePath, "utf8"));
+    const parsed = JSON.parse(await readFile5(filePath, "utf8"));
     return {
       schema: 1,
       entries: parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {}
@@ -3638,17 +3740,17 @@ async function readAntigravityCatalogCache(filePath) {
 }
 async function writeAntigravityCatalogCache(filePath, cache) {
   if (!filePath) return;
-  await mkdir3(dirname3(filePath), { recursive: true, mode: 448 });
+  await mkdir4(dirname3(filePath), { recursive: true, mode: 448 });
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
   const tempPath = `${filePath}.${randomUUID4()}.tmp`;
   try {
-    await writeFile2(tempPath, JSON.stringify({ schema: 1, entries: Object.fromEntries(entries) }), {
+    await writeFile3(tempPath, JSON.stringify({ schema: 1, entries: Object.fromEntries(entries) }), {
       encoding: "utf8",
       mode: 384
     });
     await rename2(tempPath, filePath);
   } finally {
-    await rm3(tempPath, { force: true }).catch(() => {
+    await rm4(tempPath, { force: true }).catch(() => {
     });
   }
 }
@@ -3679,7 +3781,7 @@ function enrichAntigravityModelCatalog(models, registry) {
 function createAntigravityCatalogLoader({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
   env = process.env,
-  home = homedir4(),
+  home = homedir5(),
   cacheFilePath = env.DOCKYARD_ANTIGRAVITY_CATALOG_CACHE ?? defaultAntigravityCatalogCachePath({ env, home }),
   timeoutMs = 3e4,
   cacheTtlMs = Number(process.env.DOCKYARD_ANTIGRAVITY_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS,
@@ -3989,7 +4091,7 @@ function createAntigravityOAuthAuthorizer({
   const sessions = /* @__PURE__ */ new Map();
   async function cleanup(session) {
     if (!session.profileDir) return;
-    await rm3(session.profileDir, { recursive: true, force: true }).catch(() => {
+    await rm4(session.profileDir, { recursive: true, force: true }).catch(() => {
     });
     session.profileDir = null;
   }
@@ -4688,8 +4790,8 @@ function createAntigravityModule({ driver = {} } = {}) {
 
 // modules/provider-grok/src/driver.mjs
 import { createHash as createHash5 } from "node:crypto";
-import { mkdtemp as mkdtemp3, readFile as readFile5, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
-import { homedir as homedir5 } from "node:os";
+import { mkdtemp as mkdtemp3, readFile as readFile6, rm as rm5, writeFile as writeFile4 } from "node:fs/promises";
+import { homedir as homedir6 } from "node:os";
 import { tmpdir as tmpdir3 } from "node:os";
 import { join as join7 } from "node:path";
 var PROVIDER_ID4 = "grok";
@@ -4697,7 +4799,7 @@ var DEFAULT_AUTHORIZATION_URL2 = "https://auth.x.ai/oauth2/authorize";
 var DEFAULT_TOKEN_URL2 = "https://auth.x.ai/oauth2/token";
 var DEFAULT_CLIENT_ID2 = "b1a00492-073a-47ea-816f-4c329264a828";
 var DEFAULT_OAUTH_SCOPE = "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write";
-var DEFAULT_GROK_HOME = join7(homedir5(), ".grok");
+var DEFAULT_GROK_HOME = join7(homedir6(), ".grok");
 var DEFAULT_CATALOG_TTL_MS2 = 6e4;
 var DEFAULT_GROK_USAGE_URL = "https://grok.com/?_s=usage";
 var DEFAULT_GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
@@ -4710,7 +4812,7 @@ function hash3(value) {
 function firstString2(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
-function grokHomePath({ env = process.env, home = homedir5(), grokHome } = {}) {
+function grokHomePath({ env = process.env, home = homedir6(), grokHome } = {}) {
   return grokHome ?? env.GROK_HOME ?? join7(home, ".grok");
 }
 function grokCommandEnvironment(env, grokHome) {
@@ -4945,7 +5047,7 @@ function parseGrokCreditsConfig(body, { now = /* @__PURE__ */ new Date() } = {})
 }
 function createGrokCatalogLoader({
   env = process.env,
-  home = homedir5(),
+  home = homedir6(),
   grokHome,
   cliPath = env.DOCKYARD_GROK_CLI || "grok",
   commandRunner = null,
@@ -5004,7 +5106,7 @@ var GrokOAuthDriver = class {
   constructor({
     authFilePath,
     env = process.env,
-    home = homedir5(),
+    home = homedir6(),
     grokHome,
     catalogLoader = null,
     oauthAuthorizer = null,
@@ -5231,12 +5333,12 @@ var GrokOAuthDriver = class {
         ...credential.expiresAt ? { expires_at: credential.expiresAt } : {}
       }
     };
-    await writeFile3(authPath, JSON.stringify(raw), { mode: 384 });
+    await writeFile4(authPath, JSON.stringify(raw), { mode: 384 });
     return { profileDir, authPath, credential, env: grokCommandEnvironment(this.env, profileDir) };
   }
   async #finishCredentialEnvironment(prepared, account, context = {}) {
     try {
-      const raw = JSON.parse(await readFile5(prepared.authPath, "utf8"));
+      const raw = JSON.parse(await readFile6(prepared.authPath, "utf8"));
       const updated = parseGrokAuth(raw).find((value) => value.accountId === (account.accountId ?? prepared.credential.accountId)) ?? parseGrokAuth(raw)[0];
       if (updated && context.secretStore) {
         const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
@@ -5251,7 +5353,7 @@ var GrokOAuthDriver = class {
       }
       return updated;
     } finally {
-      await rm4(prepared.profileDir, { recursive: true, force: true }).catch(() => {
+      await rm5(prepared.profileDir, { recursive: true, force: true }).catch(() => {
       });
     }
   }
@@ -6516,8 +6618,8 @@ function createClaudeDriver(options = {}) {
 var claudeDriverConstants = Object.freeze({ providerId: PROVIDER_ID6 });
 
 // modules/provider-claude/src/native-transport.mjs
-import { readFile as readFile6 } from "node:fs/promises";
-import { homedir as homedir6 } from "node:os";
+import { readFile as readFile7 } from "node:fs/promises";
+import { homedir as homedir7 } from "node:os";
 import { join as join8 } from "node:path";
 var PROVIDER_ID7 = "claude";
 var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
@@ -6526,7 +6628,7 @@ function firstString5(...values) {
 }
 async function readJson(path) {
   try {
-    return JSON.parse(await readFile6(path, "utf8"));
+    return JSON.parse(await readFile7(path, "utf8"));
   } catch {
     return null;
   }
@@ -6539,7 +6641,7 @@ function oauthTokenFromJson(value) {
 async function resolveClaudeAccessToken({
   credential,
   env = process.env,
-  home = homedir6()
+  home = homedir7()
 } = {}) {
   const stored = firstString5(credential?.access, credential?.token);
   if (stored) return { token: stored, kind: credential?.type === "api_key" ? "apiKey" : "oauth" };
@@ -6786,7 +6888,7 @@ async function* streamClaudeResponse(response) {
 function createClaudeNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_CLAUDE_ENDPOINT || DEFAULT_ENDPOINT3,
   env = process.env,
-  home = homedir6(),
+  home = homedir7(),
   timeoutMs = 3e5,
   fetchImpl = fetch,
   tokenResolver = resolveClaudeAccessToken
@@ -6842,12 +6944,12 @@ function createClaudeModule({ driver = {} } = {}) {
 
 // modules/provider-cursor/src/driver.mjs
 import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as randomUUID9 } from "node:crypto";
-import { homedir as homedir8 } from "node:os";
+import { homedir as homedir9 } from "node:os";
 
 // modules/provider-cursor/src/native-transport.mjs
 import { execFileSync as execFileSync2 } from "node:child_process";
 import * as http2 from "node:http2";
-import { homedir as homedir7 } from "node:os";
+import { homedir as homedir8 } from "node:os";
 import { join as join9 } from "node:path";
 import { randomBytes as randomBytes2, randomUUID as randomUUID8 } from "node:crypto";
 
@@ -7249,7 +7351,7 @@ function createAsyncQueue() {
 function readCursorDesktopSession({
   credential,
   env = process.env,
-  home = homedir7()
+  home = homedir8()
 } = {}) {
   const stored = firstString7(credential?.access, credential?.token);
   if (stored) {
@@ -7481,7 +7583,7 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
 function createCursorNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_CURSOR_ENDPOINT || DEFAULT_ENDPOINT4,
   env = process.env,
-  home = homedir7(),
+  home = homedir8(),
   tokenResolver = resolveCursorAccessToken,
   http2Module = http2
 } = {}) {
@@ -7652,7 +7754,7 @@ function candidateFromStatus2(status, {
 async function resolveCursorBrowserEmail(raw, access2, {
   fetchImpl = null,
   apiBaseUrl = "https://api2.cursor.sh",
-  home = homedir8(),
+  home = homedir9(),
   signal
 } = {}) {
   const payload = decodeJwtPayload(access2) ?? {};
@@ -7921,7 +8023,7 @@ var CursorSubscriptionDriver = class {
   constructor({
     cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
     env = process.env,
-    home = homedir8(),
+    home = homedir9(),
     commandRunner = runCliCommand,
     requestExecutor = null,
     catalogLoader = null,
@@ -8906,7 +9008,7 @@ var DockyardRuntime = class {
 };
 
 // packages/dsh-plugin/src/codex-transport.mjs
-import { access, readFile as readFile7 } from "node:fs/promises";
+import { access, readFile as readFile8 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname as dirname4, join as join10, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8954,7 +9056,7 @@ async function findPackageRoot(startDirectory, packageName) {
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile7(join10(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile8(join10(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -9149,9 +9251,10 @@ function commandError(text2) {
   return { kind: "error", text: text2 };
 }
 function openDefaultBrowser(url) {
-  if (process.platform !== "darwin" || !url) return;
+  if (!url) return;
   try {
-    const child = spawn6("open", [url], { detached: true, stdio: "ignore" });
+    const command = process.platform === "win32" ? { file: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : process.platform === "darwin" ? { file: "open", args: [url] } : { file: "xdg-open", args: [url] };
+    const child = spawn6(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true });
     child.unref();
   } catch {
   }
