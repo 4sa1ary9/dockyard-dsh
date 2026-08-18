@@ -89,10 +89,9 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-chevron{display:inline-flex;width:14px;height:14px;flex:none;align-items:center;justify-content:center;color:var(--dockyard-muted);transition:transform 140ms ease;transform-origin:center}
 .dockyard-dsh-chevron[data-open=true]{transform:rotate(180deg)}
 .dockyard-dsh-chevron svg{display:block;width:14px;height:14px}
-.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,14px);top:var(--dockyard-dsh-popup-top,14px);right:auto;bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;color-scheme:inherit;width:min(1040px,calc(100vw - 28px));max-height:var(--dockyard-dsh-popup-max-height,min(440px,calc(100vh - 28px)));max-height:var(--dockyard-dsh-popup-max-height,min(440px,calc(100dvh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:14px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,Canvas));box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.18));color:var(--dockyard-ink);font:400 12px/18px Inter,var(--dsw-font-family,sans-serif);text-align:left}
+.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,14px);top:var(--dockyard-dsh-popup-top,14px);right:auto;bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;color-scheme:inherit;width:min(1040px,calc(100vw - 28px));max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100vh - 28px)));max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100dvh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:14px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,Canvas));box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.18));color:var(--dockyard-ink);font:400 12px/18px Inter,var(--dsw-font-family,sans-serif);text-align:left}
 .dockyard-dsh-popup-scroll{min-height:0;min-width:0;overflow:auto;display:flex;flex-direction:column;gap:8px;padding-right:1px}
-.dockyard-dsh-key-workspace{display:grid;grid-template-columns:minmax(300px,1.2fr) minmax(280px,1fr);gap:10px;align-items:stretch;width:100%;min-width:0}
-@media (max-width:720px){.dockyard-dsh-key-workspace{grid-template-columns:1fr}}
+.dockyard-dsh-key-workspace{display:flex;flex-direction:column;gap:8px;align-items:stretch;width:100%;min-width:0}
 .dockyard-dsh-provider-list{display:flex;flex-direction:column;gap:6px}
 .dockyard-dsh-provider-row{display:flex;align-items:center;gap:10px;width:100%;min-height:52px;padding:8px 9px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));border-radius:10px;background:rgba(255,255,255,.035);color:inherit;cursor:pointer;font:inherit;text-align:left}
 .dockyard-dsh-provider-row:hover,.dockyard-dsh-provider-row[data-current=true]{border-color:rgba(121,214,200,.5);background:rgba(121,214,200,.08)}
@@ -1067,63 +1066,65 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
       : text(t, "status.nativeSource")))),
       h("div", { className: "dockyard-dsh-popup-scroll" },
       h("div", { className: "dockyard-dsh-toolbar" },
-        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => nativeController.refresh(providerId) }, native.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh")),
-        h("div", { className: "dockyard-dsh-field dockyard-dsh-field-inline" },
-          h("span", { className: "dockyard-dsh-field-label" }, text(t, "native.keyStrategy")),
-          h("select", {
-            className: "dockyard-dsh-select",
-            value: native.policy ?? "manual",
-            disabled: busy,
-            onChange: (event) => { void nativeController.setPolicy(providerId, event.target.value); },
-          },
-            h("option", { value: "manual" }, text(t, "nativePolicy.manual")),
-            h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.round_robin")),
-            h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.failover"))))),
+        h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => nativeController.refresh(providerId) }, native.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh"))),
       h("div", { className: "dockyard-dsh-key-notice" }, native.runtimeMode === "request-key-pool"
         ? text(t, "native.notice.requestPool")
         : text(t, "native.notice.manual")),
-      h("div", { className: "dockyard-dsh-key-workspace" },
-        h("div", { className: "dockyard-dsh-key-form" },
-          h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.addKeyTitle")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.credentialsWrite"))),
+      h("div", { className: "dockyard-dsh-field" },
+        h("span", { className: "dockyard-dsh-field-label" }, text(t, "native.keyStrategy")),
+        h("select", {
+          className: "dockyard-dsh-select",
+          value: native.policy ?? "manual",
+          disabled: busy,
+          onChange: (event) => { void nativeController.setPolicy(providerId, event.target.value); },
+        },
+          h("option", { value: "manual" }, text(t, "nativePolicy.manual")),
+          h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.round_robin")),
+          h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.failover")))),
+      efforts.length > 0 ? h("div", { className: "dockyard-dsh-section" },
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.currentModelTier")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "subscription.liveCatalog"))),
+        h("div", { className: "dockyard-dsh-tier-list" }, efforts.map((effort) => h("button", {
+          type: "button",
+          className: "dockyard-dsh-tier",
+          "data-active": tier === effort.id,
+          disabled: tierBusy,
+          key: effort.id,
+          title: effort.description ?? effort.id,
+          onClick: () => chooseTier(effort.id),
+        }, effort.name ?? effort.id)))) : null,
+      h("div", { className: "dockyard-dsh-key-form" },
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.addKeyTitle")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.credentialsWrite"))),
+        h("input", {
+          className: "dockyard-dsh-key-input",
+          type: "password",
+          value: keyDraft,
+          placeholder: text(t, "native.pasteApiKey"),
+          autoComplete: "off",
+          onChange: (event) => setKeyDraft(event.target.value),
+        }),
+        h("div", { className: "dockyard-dsh-key-form-row" },
           h("input", {
             className: "dockyard-dsh-key-input",
-            type: "password",
-            value: keyDraft,
-            placeholder: text(t, "native.pasteApiKey"),
-            autoComplete: "off",
-            onChange: (event) => setKeyDraft(event.target.value),
+            type: "text",
+            value: labelDraft,
+            placeholder: text(t, "native.optionalName"),
+            onChange: (event) => setLabelDraft(event.target.value),
           }),
-          h("div", { className: "dockyard-dsh-key-form-row" },
-            h("input", {
-              className: "dockyard-dsh-key-input",
-              type: "text",
-              value: labelDraft,
-              placeholder: text(t, "native.optionalName"),
-              onChange: (event) => setLabelDraft(event.target.value),
-            }),
-            h("button", { type: "button", className: "dockyard-dsh-key-save", disabled: busy || !keyDraft.trim(), onClick: addKey }, native.action === "add" ? text(t, "native.saving") : text(t, "native.save"))),
-          efforts.length > 0 ? h("div", { className: "dockyard-dsh-tier-list" }, efforts.map((effort) => h("button", {
-            type: "button",
-            className: "dockyard-dsh-tier",
-            "data-active": tier === effort.id,
-            disabled: tierBusy,
-            key: effort.id,
-            title: effort.description ?? effort.id,
-            onClick: () => chooseTier(effort.id),
-          }, effort.name ?? effort.id))) : null),
-        h("div", { className: "dockyard-dsh-section" },
-          h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.configuredKeys")), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
-          keys.length === 0
-            ? h("div", { className: "dockyard-dsh-muted" }, text(t, "native.noKeys"))
-            : keys.map((entry) => h(NativeKeyCard, { t,
-              key: entry.ref,
-              entry,
-              providerId,
-              controller: nativeController,
-              busy,
-            })),
-          h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.quotaWindow")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.providerRealtime"))),
-          nativeQuotaView(native, t)))));
+          h("button", { type: "button", className: "dockyard-dsh-key-save", disabled: busy || !keyDraft.trim(), onClick: addKey }, native.action === "add" ? text(t, "native.saving") : text(t, "native.save")))),
+      h("div", { className: "dockyard-dsh-section" },
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.configuredKeys")), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
+        keys.length === 0
+          ? h("div", { className: "dockyard-dsh-muted" }, text(t, "native.noKeys"))
+          : keys.map((entry) => h(NativeKeyCard, { t,
+            key: entry.ref,
+            entry,
+            providerId,
+            controller: nativeController,
+            busy,
+          }))),
+      h("div", { className: "dockyard-dsh-section" },
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.quotaWindow")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.providerRealtime"))),
+        nativeQuotaView(native, t))));
 }
 
 function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
@@ -1440,7 +1441,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       const trigger = anchor.querySelector(".dockyard-dsh-trigger") ?? anchor;
       const triggerRect = trigger.getBoundingClientRect();
       const popupWidth = Math.min(1040, Math.max(0, viewportWidth - margin * 2));
-      const maxPopupHeight = 440;
+      const maxPopupHeight = 560;
       const triggerCenter = triggerRect.left + triggerRect.width / 2;
       const left = Math.min(
         Math.max(margin, triggerCenter - popupWidth / 2),
