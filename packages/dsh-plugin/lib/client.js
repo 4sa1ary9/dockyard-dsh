@@ -15585,6 +15585,11 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-candidates{display:flex;flex-direction:column;gap:5px}
 .dockyard-dsh-candidate{display:flex;align-items:center;gap:7px;padding:6px 7px;border-radius:7px;background:rgba(255,255,255,.04)}
 .dockyard-dsh-candidate-copy{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dockyard-muted)}
+.dockyard-dsh-key-meta{display:grid;grid-template-columns:minmax(0,61.8%) minmax(0,38.2%);gap:8px;align-items:stretch;width:100%;flex:0 0 auto}
+@media (max-width:560px){.dockyard-dsh-key-meta{grid-template-columns:1fr}}
+.dockyard-dsh-key-meta>.dockyard-dsh-key-notice,.dockyard-dsh-key-meta>.dockyard-dsh-field{min-width:0;width:auto;height:auto}
+.dockyard-dsh-key-meta>.dockyard-dsh-field{flex-direction:column;align-items:stretch;justify-content:center;gap:4px}
+.dockyard-dsh-key-meta .dockyard-dsh-select{max-width:none;width:100%}
 .dockyard-dsh-key-notice{padding:7px 10px;border-radius:8px;background:color-mix(in srgb,CanvasText 6%,Canvas);color:var(--dockyard-ink);line-height:17px;text-align:left;flex:0 0 auto}
 .dockyard-dsh-key-form{--dockyard-dsh-key-control-height:32px;display:flex;width:100%;box-sizing:border-box;flex:0 0 auto;align-items:stretch;flex-direction:column;gap:6px;padding:9px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.16));border-radius:10px;background:color-mix(in srgb,CanvasText 3.5%,transparent);min-width:0;min-height:min-content;overflow:visible}
 .dockyard-dsh-key-form-row{display:flex;width:100%;min-width:0;min-height:var(--dockyard-dsh-key-control-height);align-items:stretch;gap:6px;flex-wrap:nowrap}
@@ -16443,24 +16448,28 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
         { className: "dockyard-dsh-toolbar" },
         h("button", { type: "button", className: "dockyard-dsh-action dockyard-dsh-action-primary", disabled: busy, onClick: () => nativeController.refresh(providerId) }, native.action === "refresh" ? text(t, "status.refreshing") : text(t, "native.refresh"))
       ),
-      h("div", { className: "dockyard-dsh-key-notice" }, native.runtimeMode === "request-key-pool" ? text(t, "native.notice.requestPool") : text(t, "native.notice.manual")),
       h(
         "div",
-        { className: "dockyard-dsh-field" },
-        h("span", { className: "dockyard-dsh-field-label" }, text(t, "native.keyStrategy")),
+        { className: "dockyard-dsh-key-meta" },
+        h("div", { className: "dockyard-dsh-key-notice" }, native.runtimeMode === "request-key-pool" ? text(t, "native.notice.requestPool") : text(t, "native.notice.manual")),
         h(
-          "select",
-          {
-            className: "dockyard-dsh-select",
-            value: native.policy ?? "manual",
-            disabled: busy,
-            onChange: (event) => {
-              void nativeController.setPolicy(providerId, event.target.value);
-            }
-          },
-          h("option", { value: "manual" }, text(t, "nativePolicy.manual")),
-          h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.round_robin")),
-          h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.failover"))
+          "div",
+          { className: "dockyard-dsh-field" },
+          h("span", { className: "dockyard-dsh-field-label" }, text(t, "native.keyStrategy")),
+          h(
+            "select",
+            {
+              className: "dockyard-dsh-select",
+              value: native.policy ?? "manual",
+              disabled: busy,
+              onChange: (event) => {
+                void nativeController.setPolicy(providerId, event.target.value);
+              }
+            },
+            h("option", { value: "manual" }, text(t, "nativePolicy.manual")),
+            h("option", { value: "round_robin", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.round_robin")),
+            h("option", { value: "failover", disabled: native.runtimeMode !== "request-key-pool" }, text(t, "nativePolicy.failover"))
+          )
         )
       ),
       efforts.length > 0 ? h(
@@ -16505,6 +16514,12 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
       h(
         "div",
         { className: "dockyard-dsh-section" },
+        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.quotaWindow")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.providerRealtime"))),
+        nativeQuotaView(native, t)
+      ),
+      h(
+        "div",
+        { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.configuredKeys")), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
         keys.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, text(t, "native.noKeys")) : keys.map((entry) => h(NativeKeyCard, {
           t,
@@ -16514,12 +16529,6 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
           controller: nativeController,
           busy
         }))
-      ),
-      h(
-        "div",
-        { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.quotaWindow")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.providerRealtime"))),
-        nativeQuotaView(native, t)
       )
     )
   );
