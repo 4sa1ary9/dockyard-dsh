@@ -15503,8 +15503,8 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-chevron{display:inline-flex;width:14px;height:14px;flex:none;align-items:center;justify-content:center;color:var(--dockyard-muted);transition:transform 140ms ease;transform-origin:center}
 .dockyard-dsh-chevron[data-open=true]{transform:rotate(180deg)}
 .dockyard-dsh-chevron svg{display:block;width:14px;height:14px}
-.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,14px);top:var(--dockyard-dsh-popup-top,14px);right:auto;bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;color-scheme:inherit;width:min(1040px,calc(100vw - 28px));max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100vh - 28px)));max-height:var(--dockyard-dsh-popup-max-height,min(560px,calc(100dvh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:14px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,Canvas));box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.18));color:var(--dockyard-ink);font:400 12px/18px Inter,var(--dsw-font-family,sans-serif);text-align:left}
-.dockyard-dsh-popup-scroll{min-height:0;min-width:0;overflow:auto;display:flex;flex-direction:column;gap:8px;padding-right:1px}
+.dockyard-dsh-popup{position:fixed;z-index:1000;left:var(--dockyard-dsh-popup-left,14px);top:var(--dockyard-dsh-popup-top,14px);right:auto;bottom:var(--dockyard-dsh-popup-bottom,auto);box-sizing:border-box;color-scheme:inherit;width:min(720px,calc(100vw - 28px));max-height:var(--dockyard-dsh-popup-max-height,min(640px,calc(100vh - 28px)));max-height:var(--dockyard-dsh-popup-max-height,min(640px,calc(100dvh - 28px)));overflow:hidden;display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:14px;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,Canvas));box-shadow:var(--dsw-shadow-lv3,0 16px 50px rgba(0,0,0,.18));color:var(--dockyard-ink);font:400 13px/20px var(--dsw-font-family,system-ui,sans-serif);-webkit-font-smoothing:auto;text-rendering:geometricPrecision;text-align:left}
+.dockyard-dsh-popup-scroll{flex:1 1 auto;min-height:0;min-width:0;overflow-x:hidden;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding-right:1px}
 .dockyard-dsh-key-workspace{display:flex;flex-direction:column;gap:8px;align-items:stretch;width:100%;min-width:0}
 .dockyard-dsh-provider-list{display:flex;flex-direction:column;gap:6px}
 .dockyard-dsh-provider-row{display:flex;align-items:center;gap:10px;width:100%;min-height:52px;padding:8px 9px;border:1px solid var(--dsw-alias-border-l1,rgba(255,255,255,.1));border-radius:10px;background:rgba(255,255,255,.035);color:inherit;cursor:pointer;font:inherit;text-align:left}
@@ -15514,16 +15514,16 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-provider-row-name{overflow:hidden;color:var(--dockyard-ink);font-size:12px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-provider-row-meta{margin-top:2px;overflow:hidden;color:var(--dockyard-faint);font-size:10px;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-provider-row-arrow{flex:none;color:var(--dockyard-muted);font-size:18px;line-height:18px}
-.dockyard-dsh-head{display:flex;align-items:flex-start;gap:10px;padding-bottom:2px}
+.dockyard-dsh-head{display:flex;align-items:flex-start;gap:10px;padding-bottom:2px;flex:0 0 auto}
 .dockyard-dsh-head-copy{min-width:0;flex:1}
 .dockyard-dsh-eyebrow{color:var(--dockyard-accent-text);font-size:9px;font-weight:700;letter-spacing:2px;text-transform:uppercase}
-.dockyard-dsh-title{margin-top:2px;color:var(--dockyard-ink);font-size:16px;font-weight:650;line-height:22px}
+.dockyard-dsh-title{margin-top:2px;color:var(--dockyard-ink);font-size:16px;font-weight:600;line-height:22px}
 .dockyard-dsh-model{margin-top:2px;overflow:hidden;color:var(--dockyard-muted);text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-model-context{margin-top:2px;color:var(--dockyard-faint);font-size:10px;line-height:15px;text-align:left}
 .dockyard-dsh-close{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;flex:none;padding:0;border:0;border-radius:50%;background:transparent;color:var(--dockyard-muted);cursor:pointer;font-size:0;line-height:0}
-.dockyard-dsh-close::before{content:"\xD7";display:block;font:600 18px/18px Inter,var(--dsw-font-family,sans-serif);transform:translateY(-0.5px)}
+.dockyard-dsh-close::before{content:"\xD7";display:block;font:600 18px/18px var(--dsw-font-family,system-ui,sans-serif)}
 .dockyard-dsh-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.1));color:var(--dockyard-ink)}
-.dockyard-dsh-status{display:flex;align-items:center;gap:0;min-height:28px;padding:6px 10px;border-radius:8px;background:var(--dsw-alias-bg-module-platform,rgba(127,127,127,.08));color:var(--dockyard-muted)}
+.dockyard-dsh-status{display:flex;align-items:center;gap:0;min-height:28px;padding:6px 10px;border-radius:8px;background:var(--dsw-alias-bg-module-platform,rgba(127,127,127,.08));color:var(--dockyard-muted);flex:0 0 auto}
 .dockyard-dsh-status[data-error=true]{background:rgba(255,104,104,.11);color:var(--dsw-alias-state-error-primary,var(--dockyard-danger))}
 .dockyard-dsh-status[data-success=true]{background:var(--dockyard-accent-fill);color:var(--dockyard-accent-text)}
 .dockyard-dsh-status-copy{display:block;align-self:center;min-width:0;flex:1;overflow-wrap:anywhere;white-space:normal;text-align:left}
@@ -15531,7 +15531,7 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-auth-status .dockyard-dsh-status-copy{white-space:normal;overflow-wrap:anywhere;line-height:18px}
 .dockyard-dsh-auth-status .dockyard-dsh-auth-diagnostic{flex-basis:100%;color:var(--dsw-alias-state-error-primary,#ff7a7a)}
 .dockyard-dsh-login-guide{display:flex;flex-direction:column;gap:6px;padding:9px 10px;border:1px solid rgba(121,214,200,.35);border-radius:9px;background:rgba(121,214,200,.07);text-align:left}
-.dockyard-dsh-login-guide-title{color:var(--dockyard-accent-text);font-size:11px;font-weight:650;line-height:17px}
+.dockyard-dsh-login-guide-title{color:var(--dockyard-accent-text);font-size:11px;font-weight:600;line-height:17px}
 .dockyard-dsh-login-guide-copy{color:var(--dockyard-muted);font-size:10px;line-height:15px}
 .dockyard-dsh-login-guide-steps{display:flex;flex-direction:column;gap:5px;margin:1px 0 0;padding:0;list-style:none}
 .dockyard-dsh-login-guide-step{display:flex;align-items:flex-start;gap:7px;color:var(--dockyard-muted);font-size:10px;line-height:15px}
@@ -15540,17 +15540,17 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-login-guide-code{display:flex;align-items:center;gap:6px;margin-top:2px}
 .dockyard-dsh-login-guide-code input{min-width:0;flex:1;height:28px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:7px;background:var(--dsw-alias-bg-input,color-mix(in srgb,CanvasText 6%,Canvas));color:var(--dockyard-ink);font:400 11px/20px Inter,var(--dsw-font-family,sans-serif)}
 .dockyard-dsh-login-guide-code input:focus{border-color:var(--dockyard-accent);outline:0}
-.dockyard-dsh-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.dockyard-dsh-toolbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 auto}
 .dockyard-dsh-action{height:28px;padding:0 9px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:7px;background:transparent;color:var(--dockyard-muted);cursor:pointer;font:500 11px/20px Inter,var(--dsw-font-family,sans-serif);white-space:nowrap;flex:none}
 .dockyard-dsh-action:hover:not(:disabled){border-color:var(--dockyard-accent);background:var(--dockyard-accent-fill);color:var(--dockyard-accent-text)}
 .dockyard-dsh-action:disabled{cursor:default;opacity:.45}
 .dockyard-dsh-action-primary{border-color:color-mix(in srgb,var(--dockyard-accent) 70%,transparent);color:var(--dockyard-accent-text)}
 .dockyard-dsh-action-danger{border-color:color-mix(in srgb,var(--dockyard-danger) 50%,transparent);color:var(--dockyard-danger)}
-.dockyard-dsh-field{display:flex;align-items:center;justify-content:flex-start;gap:10px;padding:6px 9px;border-radius:8px;background:color-mix(in srgb,CanvasText 4%,transparent);text-align:left;width:100%;box-sizing:border-box;min-width:0}
+.dockyard-dsh-field{display:flex;align-items:center;justify-content:flex-start;gap:10px;padding:6px 9px;border-radius:8px;background:color-mix(in srgb,CanvasText 4%,transparent);text-align:left;width:100%;box-sizing:border-box;min-width:0;flex:0 0 auto}
 .dockyard-dsh-field-inline{width:auto;margin-left:auto;flex:0 0 auto}
 .dockyard-dsh-field-label{flex:1;color:var(--dockyard-muted);text-align:left}
 .dockyard-dsh-select{max-width:170px;height:27px;padding:0 7px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:6px;background:var(--dsw-specific-menu,Canvas);color:var(--dockyard-ink);font:500 11px/20px Inter,var(--dsw-font-family,sans-serif)}
-.dockyard-dsh-section{display:flex;flex-direction:column;gap:6px;min-width:0;width:100%;box-sizing:border-box}
+.dockyard-dsh-section{display:flex;flex-direction:column;gap:6px;min-width:0;width:100%;box-sizing:border-box;flex:0 0 auto}
 .dockyard-dsh-section-title{display:flex;width:100%;box-sizing:border-box;flex-direction:column;align-items:flex-start;gap:1px;color:var(--dockyard-muted);font-size:10px;font-weight:700;letter-spacing:1.2px;line-height:18px;text-transform:uppercase;text-align:left}
 .dockyard-dsh-section-title>span:first-child{display:block;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dockyard-dsh-section-value{display:block;min-width:0;max-width:100%;margin:0;color:var(--dockyard-faint);font-size:11px;font-weight:400;letter-spacing:0;line-height:16px;text-transform:none;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -15585,8 +15585,8 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-candidates{display:flex;flex-direction:column;gap:5px}
 .dockyard-dsh-candidate{display:flex;align-items:center;gap:7px;padding:6px 7px;border-radius:7px;background:rgba(255,255,255,.04)}
 .dockyard-dsh-candidate-copy{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dockyard-muted)}
-.dockyard-dsh-key-notice{padding:7px 10px;border-radius:8px;background:color-mix(in srgb,CanvasText 6%,Canvas);color:var(--dockyard-ink);line-height:17px;text-align:left}
-.dockyard-dsh-key-form{--dockyard-dsh-key-control-height:32px;display:flex;width:100%;box-sizing:border-box;align-self:stretch;align-items:stretch;flex-direction:column;gap:6px;padding:9px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.16));border-radius:10px;background:color-mix(in srgb,CanvasText 3.5%,transparent);min-width:0;overflow:hidden}
+.dockyard-dsh-key-notice{padding:7px 10px;border-radius:8px;background:color-mix(in srgb,CanvasText 6%,Canvas);color:var(--dockyard-ink);line-height:17px;text-align:left;flex:0 0 auto}
+.dockyard-dsh-key-form{--dockyard-dsh-key-control-height:32px;display:flex;width:100%;box-sizing:border-box;flex:0 0 auto;align-items:stretch;flex-direction:column;gap:6px;padding:9px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.16));border-radius:10px;background:color-mix(in srgb,CanvasText 3.5%,transparent);min-width:0;min-height:min-content;overflow:visible}
 .dockyard-dsh-key-form-row{display:flex;width:100%;min-width:0;min-height:var(--dockyard-dsh-key-control-height);align-items:stretch;gap:6px;flex-wrap:nowrap}
 .dockyard-dsh-key-input{display:block;box-sizing:border-box;width:100%;min-width:0;height:var(--dockyard-dsh-key-control-height);min-height:var(--dockyard-dsh-key-control-height);margin:0;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:7px;background:var(--dsw-alias-bg-input,color-mix(in srgb,CanvasText 6%,Canvas));color:var(--dockyard-ink);font:400 11px/20px Inter,var(--dsw-font-family,sans-serif)}
 .dockyard-dsh-key-form-row>.dockyard-dsh-key-input{width:auto;flex:1 1 0}
@@ -16846,25 +16846,25 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       const viewportHeight = window.innerHeight;
       const trigger = anchor.querySelector(".dockyard-dsh-trigger") ?? anchor;
       const triggerRect = trigger.getBoundingClientRect();
-      const popupWidth = Math.min(1040, Math.max(0, viewportWidth - margin * 2));
-      const maxPopupHeight = 560;
+      const popupWidth = Math.min(720, Math.max(0, viewportWidth - margin * 2));
+      const maxPopupHeight = 640;
       const triggerCenter = triggerRect.left + triggerRect.width / 2;
-      const left = Math.min(
+      const left = Math.round(Math.min(
         Math.max(margin, triggerCenter - popupWidth / 2),
         Math.max(margin, viewportWidth - popupWidth - margin)
-      );
+      ));
       const availableAbove = Math.max(0, rect.top - gap - margin);
       const availableBelow = Math.max(0, viewportHeight - rect.bottom - margin);
       const openAbove = availableAbove >= 220 || availableAbove >= availableBelow;
       anchor.style.setProperty("--dockyard-dsh-popup-left", `${left}px`);
       if (openAbove) {
         anchor.style.setProperty("--dockyard-dsh-popup-top", "auto");
-        anchor.style.setProperty("--dockyard-dsh-popup-bottom", `${Math.max(margin, viewportHeight - rect.top + gap)}px`);
-        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${Math.max(180, Math.min(maxPopupHeight, availableAbove))}px`);
+        anchor.style.setProperty("--dockyard-dsh-popup-bottom", `${Math.round(Math.max(margin, viewportHeight - rect.top + gap))}px`);
+        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${Math.round(Math.max(180, Math.min(maxPopupHeight, availableAbove)))}px`);
       } else {
-        anchor.style.setProperty("--dockyard-dsh-popup-top", `${Math.max(margin, rect.bottom + gap)}px`);
+        anchor.style.setProperty("--dockyard-dsh-popup-top", `${Math.round(Math.max(margin, rect.bottom + gap))}px`);
         anchor.style.setProperty("--dockyard-dsh-popup-bottom", "auto");
-        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${Math.max(180, Math.min(maxPopupHeight, availableBelow))}px`);
+        anchor.style.setProperty("--dockyard-dsh-popup-max-height", `${Math.round(Math.max(180, Math.min(maxPopupHeight, availableBelow)))}px`);
       }
     };
     updatePopupPosition();
