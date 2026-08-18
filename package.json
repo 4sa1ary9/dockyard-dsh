@@ -1,6 +1,6 @@
 {
   "name": "@dockyard-dsh/plugin",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Windows fork of Dockyard DSH: Codex / Grok / Claude / Cursor / Antigravity account pool for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",

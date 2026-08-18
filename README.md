@@ -4,7 +4,9 @@
 
 Windows 上把 **Codex / Grok / Claude / Cursor / Antigravity** 官方订阅接到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的账号池插件。输入框左边会出现供应商选择条，点开后登录或导入本机官方登录态。
 
-这不是官方插件。它从 [AITabby/dockyard-dsh](https://github.com/AITabby/dockyard-dsh) **fork 后二次开发**。上游当前发布版写明 **macOS only**，Windows EXE 尚未发布。这个仓库补了 Windows 凭据存储和系统浏览器打开，目标是在 Windows 10 / 11 上把同一套输入框供应商选择用起来。
+这不是官方插件。它从 [AITabby/dockyard-dsh](https://github.com/AITabby/dockyard-dsh) **fork 后二次开发**。上游 v0.1.1 已有 macOS DMG，Windows EXE 仍在他们自己的发布流程里。这个仓库补的是：在现有 `dsh web` 里用同一套输入框供应商选择，凭据和浏览器按 Windows 走。
+
+已合入上游 `v0.1.1`。
 
 本仓库与 DeepSeek AI、OpenAI、xAI、Anthropic、Cursor、Google 都没有从属关系。套餐、额度、模型能不能用，由各家账号决定。
 

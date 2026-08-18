@@ -623,6 +623,8 @@ export class GrokOAuthDriver {
       access: tokens.access,
       refresh: tokens.refresh,
       accountId: tokens.accountId,
+      email: tokens.email,
+      displayName: tokens.displayName,
       expiresAt: tokens.expiresAt,
       issuer: tokens.issuer,
       clientId: tokens.clientId,
@@ -738,7 +740,7 @@ export class GrokOAuthDriver {
         key: credential.access,
         ...(credential.refresh ? { refresh_token: credential.refresh } : {}),
         user_id: credential.accountId ?? account.accountId,
-        ...(account.email ? { email: account.email } : {}),
+        ...((credential.email ?? account.email) ? { email: credential.email ?? account.email } : {}),
         ...(account.subscription?.plan ? { subscription_level: account.subscription.plan } : {}),
         ...(credential.expiresAt ? { expires_at: credential.expiresAt } : {}),
       },
@@ -758,6 +760,8 @@ export class GrokOAuthDriver {
           ...prepared.credential,
           access: updated.access,
           ...(updated.refresh ? { refresh: updated.refresh } : {}),
+          ...(updated.email ? { email: updated.email } : prepared.credential.email ? { email: prepared.credential.email } : {}),
+          ...(updated.displayName ? { displayName: updated.displayName } : prepared.credential.displayName ? { displayName: prepared.credential.displayName } : {}),
           ...(updated.expiresAt ? { expiresAt: updated.expiresAt } : {}),
           accountId: updated.accountId,
           lastRefreshedAt: new Date().toISOString(),
@@ -796,6 +800,8 @@ export class GrokOAuthDriver {
     if (finishError) throw finishError;
     const now = context.now instanceof Date ? context.now : new Date();
     return {
+      ...(updated?.email ? { email: updated.email } : {}),
+      ...(updated?.displayName ? { displayName: updated.displayName } : {}),
       refresh: {
         accessTokenExpiresAt: updated?.expiresAt ?? account.refresh?.accessTokenExpiresAt ?? null,
         nextRefreshAt: null,
@@ -824,7 +830,11 @@ export class GrokOAuthDriver {
     if (!response.ok) {
       const error = new Error(`Grok credits request failed (${response.status})`);
       error.status = response.status;
-      error.authExpired = response.status === 401 || response.status === 403;
+      // Billing/credits is an optional quota surface. A 401 here can mean
+      // that the endpoint rejected the CLI billing headers, not that the
+      // OAuth credential cannot invoke Grok. Keep the login state durable;
+      // request authentication remains authoritative in native transport.
+      error.quotaUnavailable = response.status === 401 || response.status === 403;
       throw error;
     }
     const parsed = parseGrokCreditsConfig(body, { now });

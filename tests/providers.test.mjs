@@ -476,6 +476,7 @@ test("Antigravity account discovery keeps provider identity and captures distinc
     type: "official_session",
     providerId: "antigravity",
     access: "session-token-first",
+    email: "first@example.test",
   });
 
   const second = createAntigravityDriver({
@@ -488,6 +489,31 @@ test("Antigravity account discovery keeps provider identity and captures distinc
   const secondCandidate = (await second.discover({ now: new Date("2026-08-14T12:00:00.000Z") })).candidates[0];
   assert.notEqual(secondCandidate.accountId, candidate.accountId);
   assert.notEqual(secondCandidate.resources.sessionFingerprint, candidate.resources.sessionFingerprint);
+});
+
+test("Antigravity resolves the active session email from Google userinfo", async () => {
+  const commandRunner = async () => ({
+    output: JSON.stringify({
+      status: "SUCCESS",
+      command: { data: { groups: [{ buckets: [{ id: "window-live", remaining_fraction: 0.75 }] }] } },
+      response: "",
+    }),
+    errorOutput: "",
+  });
+  let userInfoCalls = 0;
+  const driver = createAntigravityDriver({
+    commandRunner,
+    tokenResolver: () => ({ token: "session-token" }),
+    fetchImpl: async (url) => {
+      userInfoCalls += 1;
+      assert.match(url, /googleapis\.com\/oauth2\/v1\/userinfo/);
+      return response(200, { email: "userinfo@example.test" });
+    },
+  });
+  const found = (await driver.discover({ now: new Date("2026-08-14T12:00:00.000Z") })).candidates[0];
+  assert.equal(found.email, "userinfo@example.test");
+  assert.equal(found.displayName, "userinfo@example.test");
+  assert.equal(userInfoCalls, 1);
 });
 
 test("Antigravity rejects a captured account after the local session changes", async () => {
@@ -1037,6 +1063,7 @@ test("Grok imports every OAuth account in a provider source without exposing tok
     assert.deepEqual(imported.map((account) => account.accountId), ["grok-account-a", "grok-account-b"]);
     assert.equal(imported[0].auth.credentialRef, undefined);
     assert.equal((await secretStore.read(imported[0].credentialRef)).access, "access-a");
+    assert.equal((await secretStore.read(imported[0].credentialRef)).email, "a@example.test");
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -1099,6 +1126,26 @@ test("Grok credits parser keeps an official period when remaining usage is omitt
   assert.equal(parsed.quota.windows.length, 1);
   assert.equal(parsed.quota.windows[0].resetAt, "2026-08-22T22:06:42.000Z");
   assert.match(parsed.resources.quotaDiagnostic, /未返回剩余百分比/);
+});
+
+test("Grok credits authorization failures remain quota errors", async () => {
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://grok/quota-401";
+  await secretStore.write(credentialRef, { access: "grok-access", accountId: "grok-account", email: "grok@example.test" });
+  const driver = createGrokDriver({
+    catalogLoader: async () => ({ models: [] }),
+    creditsUrl: "https://grok.test/v1/billing?format=credits",
+    fetchImpl: async () => response(401, {}),
+  });
+  await assert.rejects(
+    () => driver.getQuota({
+      providerId: "grok",
+      accountId: "grok-account",
+      email: "grok@example.test",
+      auth: { credentialRef },
+    }, { secretStore }),
+    (error) => error.quotaUnavailable === true && error.authExpired !== true,
+  );
 });
 
 test("Grok model metadata comes from the provider cache, including returned reasoning tiers", () => {

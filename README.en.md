@@ -4,7 +4,9 @@
 
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) account-pool plugin that attaches **Codex, Grok, Claude, Cursor, and Antigravity** subscriptions on Windows. A provider picker sits on the left of the composer.
 
-This is not official. It is a **fork** of [AITabby/dockyard-dsh](https://github.com/AITabby/dockyard-dsh). Upstream is **macOS-only** today. This repository adds a Windows credential store and a Windows browser opener so the same composer picker can run on Windows 10 / 11.
+This is not official. It is a **fork** of [AITabby/dockyard-dsh](https://github.com/AITabby/dockyard-dsh). Upstream v0.1.1 ships a macOS DMG; their Windows EXE is a separate release. This repository adds a Windows credential store and a Windows browser opener so the same composer picker can run inside existing `dsh web` on Windows 10 / 11.
+
+Merged upstream `v0.1.1`.
 
 Not affiliated with DeepSeek AI, OpenAI, xAI, Anthropic, Cursor, or Google.
 
