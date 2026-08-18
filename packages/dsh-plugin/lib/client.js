@@ -15586,7 +15586,7 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-candidates{display:flex;flex-direction:column;gap:5px}
 .dockyard-dsh-candidate{display:flex;align-items:center;gap:7px;padding:6px 7px;border-radius:7px;background:rgba(255,255,255,.04)}
 .dockyard-dsh-candidate-copy{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dockyard-muted)}
-.dockyard-dsh-key-notice{padding:6px 8px;border-radius:8px;background:color-mix(in srgb,var(--dockyard-accent) 10%,transparent);color:var(--dockyard-muted);line-height:16px;text-align:left;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.dockyard-dsh-key-notice{padding:7px 10px;border-radius:8px;background:color-mix(in srgb,CanvasText 6%,Canvas);color:var(--dockyard-ink);line-height:17px;text-align:left}
 .dockyard-dsh-key-form{--dockyard-dsh-key-control-height:32px;display:flex;width:100%;box-sizing:border-box;align-self:stretch;align-items:stretch;flex-direction:column;gap:6px;padding:9px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.16));border-radius:10px;background:color-mix(in srgb,CanvasText 3.5%,transparent);min-width:0;overflow:hidden}
 .dockyard-dsh-key-form-row{display:flex;width:100%;min-width:0;min-height:var(--dockyard-dsh-key-control-height);align-items:stretch;gap:6px;flex-wrap:nowrap}
 .dockyard-dsh-key-input{display:block;box-sizing:border-box;width:100%;min-width:0;height:var(--dockyard-dsh-key-control-height);min-height:var(--dockyard-dsh-key-control-height);margin:0;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:7px;background:var(--dsw-alias-bg-input,color-mix(in srgb,CanvasText 6%,Canvas));color:var(--dockyard-ink);font:400 11px/20px Inter,var(--dsw-font-family,sans-serif)}
@@ -16840,10 +16840,13 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       const gap = 9;
       const viewportWidth = window.innerWidth;
       const viewportHeight = window.innerHeight;
+      const trigger = anchor.querySelector(".dockyard-dsh-trigger") ?? anchor;
+      const triggerRect = trigger.getBoundingClientRect();
       const popupWidth = Math.min(1040, Math.max(0, viewportWidth - margin * 2));
       const maxPopupHeight = 440;
+      const triggerCenter = triggerRect.left + triggerRect.width / 2;
       const left = Math.min(
-        Math.max(margin, rect.left),
+        Math.max(margin, triggerCenter - popupWidth / 2),
         Math.max(margin, viewportWidth - popupWidth - margin)
       );
       const availableAbove = Math.max(0, rect.top - gap - margin);
