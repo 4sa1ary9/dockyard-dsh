@@ -244,3 +244,42 @@ test("failover drops a failed partial stream before trying the next Key", async 
   assert.equal(chunks.find((chunk) => chunk.type === "text-delta")?.text, "ok");
   host.dispose();
 });
+
+test("native key pool refreshes OpenCode Go usage and keeps it on the next status", async () => {
+  const originalFetch = globalThis.fetch;
+  const values = new Map([["OPENCODE_GO_API_KEY", "sk-opencode-test"]]);
+  const { ctx, stateStore } = createMemoryHost({
+    providerId: "opencode-go",
+    profile: { apiKeyEnv: "OPENCODE_GO_API_KEY" },
+    adapterConfig: {
+      async resolveApiKey(_provider, profile) {
+        return values.get(profile.apiKeyEnv);
+      },
+    },
+    values,
+  });
+  globalThis.fetch = async (url) => {
+    assert.equal(String(url), "https://opencode.ai/zen/go/v1/usage");
+    return new Response(JSON.stringify({
+      usage: {
+        rolling: { status: "ok", percent: 20, resetsAt: "2026-08-18T12:00:00.000Z" },
+        weekly: { status: "ok", percent: 10, resetsAt: "2026-08-24T00:00:00.000Z" },
+        monthly: { status: "ok", percent: 5, resetsAt: "2026-09-18T00:00:00.000Z" },
+      },
+    }), { status: 200 });
+  };
+  try {
+    const host = new NativeKeyPoolHost(ctx, { stateStore });
+    await host.start();
+    const refreshed = await host.refreshUsage("opencode-go");
+    assert.equal(refreshed.usage.status, "ok");
+    assert.equal(refreshed.quota.windows[0].remaining, 80);
+    assert.equal(refreshed.keys[0].quota.windows.length, 3);
+    const status = await host.status("opencode-go");
+    assert.equal(status.quota.windows[0].remaining, 80);
+    assert.equal(status.usage.status, "ok");
+    host.dispose();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

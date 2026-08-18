@@ -9786,6 +9786,8 @@ import { join as join11 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+var DEFAULT_DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
+var DEFAULT_OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 var builtinBaseUrls = /* @__PURE__ */ new Map();
 for (const provider of builtinProviders()) {
   if (typeof provider?.id === "string" && typeof provider?.baseUrl === "string") {
@@ -9801,6 +9803,56 @@ function endpoint(baseUrl, path) {
   if (!baseUrl) throw new Error("provider \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u7684 base URL");
   const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
   return new URL(path.replace(/^\//, ""), base).toString();
+}
+function pathnameWithoutSlash(url) {
+  return url.pathname.replace(/\/+$/, "");
+}
+function joinPath(basePath, suffix) {
+  const prefix = basePath === "/" ? "" : basePath.replace(/\/+$/, "");
+  return `${prefix}${suffix}`;
+}
+function officialUrl(profile, providerId, fallback, resolvePath) {
+  const configured = typeof profile?.baseURL === "string" ? profile.baseURL.trim() : "";
+  if (!configured) return fallback;
+  const url = new URL(validateNativeEndpoint(configured, { providerId }));
+  url.pathname = resolvePath(pathnameWithoutSlash(url) || "");
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+function deepseekBalanceUrl(providerId, profile) {
+  return officialUrl(profile, providerId, DEFAULT_DEEPSEEK_BALANCE_URL, (path) => {
+    const root = path.endsWith("/v1") ? path.slice(0, -3) : path;
+    return joinPath(root, "/user/balance");
+  });
+}
+function openCodeGoUsageUrl(providerId, profile) {
+  return officialUrl(profile, providerId, DEFAULT_OPENCODE_GO_USAGE_URL, (path) => {
+    if (path.endsWith("/usage")) return path;
+    if (path.endsWith("/v1")) return joinPath(path, "/usage");
+    if (path.endsWith("/go")) return joinPath(path, "/v1/usage");
+    if (path.endsWith("/zen")) return joinPath(path, "/go/v1/usage");
+    return joinPath(path, "/v1/usage");
+  });
+}
+function finiteNumber2(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+function isoDate(value) {
+  if (typeof value === "string" && value.trim() && !Number.isNaN(Date.parse(value))) return value;
+  return null;
+}
+function resetAtFrom(raw, now = Date.now()) {
+  const resetAt = isoDate(raw?.resetsAt ?? raw?.resetAt ?? raw?.reset_time);
+  if (resetAt) return resetAt;
+  const seconds = finiteNumber2(raw?.resetInSec ?? raw?.resets_in_seconds ?? raw?.resetInSeconds);
+  if (seconds === null) return null;
+  return new Date(now + seconds * 1e3).toISOString();
 }
 async function readJson2(response) {
   const raw = await response.text();
@@ -9823,12 +9875,31 @@ function bearerHeaders(apiKey) {
 function updatedAt() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
+function balanceAmount(value) {
+  return typeof value === "string" || typeof value === "number" ? value : null;
+}
+function deepseekBalanceWindows(balance, refreshedAt) {
+  const currency = balance.currency ?? null;
+  const suffix = currency ?? "unknown";
+  const rows = [
+    { id: `balance-${suffix}`, name: "\u8D26\u6237\u4F59\u989D", remaining: balanceAmount(balance.total_balance) },
+    { id: `granted-${suffix}`, name: "\u8D60\u9001\u4F59\u989D", remaining: balanceAmount(balance.granted_balance) },
+    { id: `topped-up-${suffix}`, name: "\u5145\u503C\u4F59\u989D", remaining: balanceAmount(balance.topped_up_balance) }
+  ];
+  return rows.filter((row) => row.remaining !== null).map((row) => ({
+    ...row,
+    limit: null,
+    unit: currency,
+    resetAt: null,
+    updatedAt: refreshedAt
+  }));
+}
 function deepseekBalanceModule() {
   return {
     id: "deepseek-balance",
     supports: ["deepseek", "deepseek-official"],
     async fetch({ providerId, profile, apiKey, signal }) {
-      const body = await readJson2(await fetch(endpoint(baseUrlFor(providerId, profile), "user/balance"), {
+      const body = await readJson2(await fetch(deepseekBalanceUrl(providerId, profile), {
         method: "GET",
         headers: bearerHeaders(apiKey),
         signal
@@ -9841,15 +9912,7 @@ function deepseekBalanceModule() {
         updatedAt: refreshedAt,
         available: body.is_available === true,
         quota: {
-          windows: balances.map((balance) => ({
-            id: `balance-${balance.currency ?? "unknown"}`,
-            name: "\u8D26\u6237\u4F59\u989D",
-            remaining: typeof balance.total_balance === "string" || typeof balance.total_balance === "number" ? balance.total_balance : null,
-            limit: null,
-            unit: balance.currency ?? null,
-            resetAt: null,
-            updatedAt: refreshedAt
-          }))
+          windows: balances.flatMap((balance) => deepseekBalanceWindows(balance, refreshedAt))
         },
         details: balances.map((balance) => ({
           currency: balance.currency ?? null,
@@ -9857,6 +9920,77 @@ function deepseekBalanceModule() {
           grantedBalance: balance.granted_balance ?? null,
           toppedUpBalance: balance.topped_up_balance ?? null
         }))
+      };
+    }
+  };
+}
+function openCodeUsageRoot(body) {
+  if (!body || typeof body !== "object") return null;
+  if (body.usage && typeof body.usage === "object") return body.usage;
+  if (body.windows && typeof body.windows === "object") return body.windows;
+  return body;
+}
+function openCodeWindow(id, name2, raw, refreshedAt) {
+  if (!raw || typeof raw !== "object") return null;
+  const usedUsd = finiteNumber2(raw.usageDollars ?? raw.used);
+  const limitUsd = finiteNumber2(raw.limitDollars ?? raw.limit);
+  const usedPercent = finiteNumber2(raw.percent ?? raw.usagePercent ?? raw.usage_percent);
+  const remainingPercent = finiteNumber2(raw.remaining ?? raw.remainingPercent);
+  const resetAt = resetAtFrom(raw);
+  if (usedUsd !== null && limitUsd !== null) {
+    return {
+      id,
+      name: name2,
+      remaining: Math.max(0, limitUsd - usedUsd),
+      limit: limitUsd,
+      unit: "USD",
+      resetAt,
+      updatedAt: refreshedAt
+    };
+  }
+  const remaining = remainingPercent ?? (usedPercent !== null ? Math.max(0, 100 - usedPercent) : null);
+  if (remaining === null && !resetAt && raw.status == null) return null;
+  return {
+    id,
+    name: name2,
+    remaining,
+    limit: remaining === null ? null : 100,
+    unit: null,
+    resetAt,
+    updatedAt: refreshedAt
+  };
+}
+function openCodeGoUsageModule() {
+  return {
+    id: "opencode-go-usage",
+    supports: ["opencode-go"],
+    async fetch({ providerId, profile, apiKey, signal }) {
+      const body = await readJson2(await fetch(openCodeGoUsageUrl(providerId, profile), {
+        method: "GET",
+        headers: bearerHeaders(apiKey),
+        signal
+      }));
+      const refreshedAt = updatedAt();
+      const usage = openCodeUsageRoot(body);
+      const windows = [
+        openCodeWindow("rolling", "5 \u5C0F\u65F6\u989D\u5EA6", usage?.rolling ?? usage?.rolling5h ?? usage?.["5h"], refreshedAt),
+        openCodeWindow("weekly", "\u672C\u5468\u989D\u5EA6", usage?.weekly, refreshedAt),
+        openCodeWindow("monthly", "\u672C\u6708\u989D\u5EA6", usage?.monthly, refreshedAt)
+      ].filter(Boolean);
+      if (windows.length === 0) {
+        return {
+          status: "error",
+          source: "OpenCode Go /zen/go/v1/usage",
+          updatedAt: refreshedAt,
+          message: "OpenCode Go \u5B98\u65B9 usage \u672A\u8FD4\u56DE\u53EF\u89E3\u6790\u7684\u989D\u5EA6\u7A97\u53E3"
+        };
+      }
+      return {
+        status: "ok",
+        source: "OpenCode Go /zen/go/v1/usage",
+        updatedAt: refreshedAt,
+        quota: { windows },
+        details: usage
       };
     }
   };
@@ -9913,10 +10047,11 @@ function unsupportedModule(providerIds, message, helpUrl = null) {
 }
 var MODULES = [
   deepseekBalanceModule(),
+  openCodeGoUsageModule(),
   openRouterCreditsModule(),
   unsupportedModule(
-    ["opencode", "opencode-go"],
-    "OpenCode \u5B98\u65B9\u76EE\u524D\u516C\u5F00\u6A21\u578B\u76EE\u5F55\u548C\u63A7\u5236\u53F0\u7528\u91CF\uFF0C\u6CA1\u6709\u516C\u5F00\u7ED9 API Key \u8C03\u7528\u7684\u5B9E\u65F6\u4F59\u989D/\u989D\u5EA6\u63A5\u53E3\u3002",
+    ["opencode"],
+    "OpenCode Zen \u76EE\u524D\u516C\u5F00\u6A21\u578B\u76EE\u5F55\u548C\u63A7\u5236\u53F0\u7528\u91CF\uFF0C\u6CA1\u6709\u516C\u5F00\u7ED9 API Key \u8C03\u7528\u7684\u5B9E\u65F6\u4F59\u989D/\u989D\u5EA6\u63A5\u53E3\u3002",
     "https://opencode.ai/zen"
   )
 ];
@@ -9990,6 +10125,7 @@ var NativeKeyPoolHost = class {
   stateStore;
   records = /* @__PURE__ */ new Map();
   cursors = /* @__PURE__ */ new Map();
+  usageCache = /* @__PURE__ */ new Map();
   #failoverExcluded = /* @__PURE__ */ new Map();
   #lastResolvedKey = /* @__PURE__ */ new Map();
   patches = [];
@@ -10146,14 +10282,24 @@ var NativeKeyPoolHost = class {
   async status(providerId) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
+    const cached = this.usageCache.get(providerId);
+    const cachedByRef = new Map((cached?.keys ?? []).map((entry) => [entry.ref, entry]));
     return {
       providerId,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
       runtimeMode: this.patches.length > 0 ? "request-key-pool" : "native-single-key",
-      keys: rows.map((entry) => ({ ...entry, active: entry.ref === synced.activeRef })),
-      quota: null,
-      usage: null
+      keys: rows.map((entry) => {
+        const previous = cachedByRef.get(entry.ref);
+        return {
+          ...entry,
+          active: entry.ref === synced.activeRef,
+          ...previous?.usage ? { usage: previous.usage, quota: previous.quota ?? previous.usage?.quota ?? null } : {}
+        };
+      }),
+      quota: cached?.quota ?? null,
+      usage: cached?.usage ?? null,
+      ...cached?.updatedAt ? { updatedAt: cached.updatedAt } : {}
     };
   }
   async pickKey(providerId, record, activeRef, { excluded = [] } = {}) {
@@ -10278,7 +10424,7 @@ var NativeKeyPoolHost = class {
       nextRows.push({ ...row, active: row.ref === synced.activeRef, usage, quota: usage?.quota ?? null });
     }
     const active = nextRows.find((entry) => entry.active) ?? nextRows[0] ?? null;
-    return {
+    const result = {
       providerId,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
@@ -10288,6 +10434,8 @@ var NativeKeyPoolHost = class {
       quota: active?.quota ?? null,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
+    this.usageCache.set(providerId, result);
+    return result;
   }
 };
 

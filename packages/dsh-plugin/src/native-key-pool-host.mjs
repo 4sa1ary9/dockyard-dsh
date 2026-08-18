@@ -75,6 +75,7 @@ export class NativeKeyPoolHost {
   stateStore;
   records = new Map();
   cursors = new Map();
+  usageCache = new Map();
   #failoverExcluded = new Map();
   #lastResolvedKey = new Map();
   patches = [];
@@ -258,14 +259,24 @@ export class NativeKeyPoolHost {
   async status(providerId) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
+    const cached = this.usageCache.get(providerId);
+    const cachedByRef = new Map((cached?.keys ?? []).map((entry) => [entry.ref, entry]));
     return {
       providerId,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
       runtimeMode: this.patches.length > 0 ? "request-key-pool" : "native-single-key",
-      keys: rows.map((entry) => ({ ...entry, active: entry.ref === synced.activeRef })),
-      quota: null,
-      usage: null,
+      keys: rows.map((entry) => {
+        const previous = cachedByRef.get(entry.ref);
+        return {
+          ...entry,
+          active: entry.ref === synced.activeRef,
+          ...(previous?.usage ? { usage: previous.usage, quota: previous.quota ?? previous.usage?.quota ?? null } : {}),
+        };
+      }),
+      quota: cached?.quota ?? null,
+      usage: cached?.usage ?? null,
+      ...(cached?.updatedAt ? { updatedAt: cached.updatedAt } : {}),
     };
   }
 
@@ -405,7 +416,7 @@ export class NativeKeyPoolHost {
       nextRows.push({ ...row, active: row.ref === synced.activeRef, usage, quota: usage?.quota ?? null });
     }
     const active = nextRows.find((entry) => entry.active) ?? nextRows[0] ?? null;
-    return {
+    const result = {
       providerId,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
@@ -415,5 +426,7 @@ export class NativeKeyPoolHost {
       quota: active?.quota ?? null,
       updatedAt: new Date().toISOString(),
     };
+    this.usageCache.set(providerId, result);
+    return result;
   }
 }

@@ -370,6 +370,15 @@ function formatNumber(value, t) {
   return typeof value === "number" ? new Intl.NumberFormat().format(value) : String(value);
 }
 
+function numericQuotaValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
 function quotaWindowRows(quota, t) {
   if (!quota || typeof quota !== "object") return [];
   if (Array.isArray(quota.windows) && quota.windows.length > 0) return quota.windows;
@@ -390,8 +399,10 @@ function quotaRowsForAccount(account, t) {
 }
 
 function quotaPercent(window) {
-  if (typeof window?.remaining !== "number" || typeof window?.limit !== "number" || window.limit <= 0) return null;
-  return Math.max(0, Math.min(100, Math.round((window.remaining / window.limit) * 100)));
+  const remaining = numericQuotaValue(window?.remaining);
+  const limit = numericQuotaValue(window?.limit);
+  if (remaining === null || limit === null || limit <= 0) return null;
+  return Math.max(0, Math.min(100, Math.round((remaining / limit) * 100)));
 }
 
 function quotaSummary(account, t) {
