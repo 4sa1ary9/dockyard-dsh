@@ -174,8 +174,9 @@ section[data-dockyard-model-group-collapsed="true"]>[role="menuitemradio"]{displ
 .dockyard-dsh-key-meta{display:grid;grid-template-columns:minmax(0,61.8%) minmax(0,38.2%);gap:8px;align-items:stretch;width:100%;flex:0 0 auto}
 @media (max-width:560px){.dockyard-dsh-key-meta{grid-template-columns:1fr}}
 .dockyard-dsh-key-meta>.dockyard-dsh-key-notice,.dockyard-dsh-key-meta>.dockyard-dsh-field{min-width:0;width:auto;height:auto}
-.dockyard-dsh-key-meta>.dockyard-dsh-field{flex-direction:column;align-items:stretch;justify-content:center;gap:4px}
-.dockyard-dsh-key-meta .dockyard-dsh-select{max-width:none;width:100%}
+.dockyard-dsh-key-meta>.dockyard-dsh-field{flex-direction:column;align-items:flex-start;justify-content:center;gap:4px}
+.dockyard-dsh-key-meta .dockyard-dsh-field-label{flex:none}
+.dockyard-dsh-key-meta .dockyard-dsh-select{width:auto;max-width:128px}
 .dockyard-dsh-key-notice{padding:7px 10px;border-radius:8px;background:color-mix(in srgb,CanvasText 6%,Canvas);color:var(--dockyard-ink);line-height:17px;text-align:left;flex:0 0 auto}
 .dockyard-dsh-key-form{--dockyard-dsh-key-control-height:32px;display:flex;width:100%;box-sizing:border-box;flex:0 0 auto;align-items:stretch;flex-direction:column;gap:6px;padding:9px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.16));border-radius:10px;background:color-mix(in srgb,CanvasText 3.5%,transparent);min-width:0;min-height:min-content;overflow:visible}
 .dockyard-dsh-key-form-row{display:flex;width:100%;min-width:0;min-height:var(--dockyard-dsh-key-control-height);align-items:stretch;gap:6px;flex-wrap:nowrap}
@@ -1128,9 +1129,6 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
             onChange: (event) => setLabelDraft(event.target.value),
           }),
           h("button", { type: "button", className: "dockyard-dsh-key-save", disabled: busy || !keyDraft.trim(), onClick: addKey }, native.action === "add" ? text(t, "native.saving") : text(t, "native.save")))),
-      h("div", { className: "dockyard-dsh-section" },
-        h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.quotaWindow")), h("span", { className: "dockyard-dsh-section-value" }, text(t, "native.providerRealtime"))),
-        nativeQuotaView(native, t)),
       h("div", { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-title" }, h("span", null, text(t, "native.configuredKeys")), h("span", { className: "dockyard-dsh-section-value" }, `${configuredCount}`)),
         keys.length === 0
