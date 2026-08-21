@@ -48,7 +48,7 @@ Selection happens in the runtime, not in the menu bar, so concurrent DSH session
 
 ### Provider modules
 
-`provider-codex`, `provider-antigravity`, `provider-grok`, `provider-claude`, and `provider-cursor` are the current modules. Each module receives a provider driver for:
+`provider-codex`, `provider-antigravity`, `provider-grok`, `provider-claude`, `provider-cursor`, and `provider-kiro` are the current modules. Each module receives a provider driver for:
 
 - OAuth discovery and provider-native official authorization;
 - refresh and re-authentication;

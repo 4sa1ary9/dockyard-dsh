@@ -2,13 +2,13 @@
 
 [中文](README.md)
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) account-pool plugin that attaches **Codex, Grok, Claude, Cursor, and Antigravity** subscriptions on Windows. A provider picker sits on the left of the composer.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) account-pool plugin that attaches **Codex, Grok, Claude, Cursor, Antigravity, and Kiro** subscriptions on Windows. A provider picker sits on the left of the composer.
 
 This is not official. It is a **fork** of [AITabby/dockyard-dsh](https://github.com/AITabby/dockyard-dsh). Upstream v0.1.1 ships a macOS DMG; their Windows EXE is a separate release. This repository adds a Windows credential store and a Windows browser opener so the same composer picker can run inside existing `dsh web` on Windows 10 / 11.
 
 Merged upstream `v0.1.1`.
 
-Not affiliated with DeepSeek AI, OpenAI, xAI, Anthropic, Cursor, or Google.
+Not affiliated with DeepSeek AI, OpenAI, xAI, Anthropic, Cursor, Google, Amazon, or Kiro.
 
 ## Changes from upstream
 
@@ -32,6 +32,7 @@ Use the Dockyard control next to the composer, or `/dockyard login <provider>`. 
 - **Claude** — Claude subscription OAuth. Manual callback may need a full URL with `state`, or `code#state`.
 - **Cursor** — official browser login poll; CLI is fallback.
 - **Antigravity** — Google OAuth. Set `DOCKYARD_ANTIGRAVITY_CLIENT_ID` and `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET`; nothing is bundled.
+- **Kiro** — requires the official `kiro-cli`; the Kiro IDE launcher alone cannot return responses to DSH. Dockyard invokes `kiro-cli acp` over ACP JSON-RPC on stdio and reads the official live model catalog. Override the executable with `DOCKYARD_KIRO_CLI` when needed. Kiro currently exposes no structured live-quota command, so Dockyard does not estimate it.
 
 ## Install
 

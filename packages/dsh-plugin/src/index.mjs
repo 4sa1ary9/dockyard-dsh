@@ -8,6 +8,7 @@ import {
 import { createGrokCatalogLoader, createGrokNativeExecutor } from "../../../modules/provider-grok/src/index.mjs";
 import { createClaudeCatalogLoader, createClaudeNativeExecutor } from "../../../modules/provider-claude/src/index.mjs";
 import { createCursorCatalogLoader, createCursorNativeExecutor } from "../../../modules/provider-cursor/src/index.mjs";
+import { createKiroAcpExecutor, createKiroCatalogLoader } from "../../../modules/provider-kiro/src/index.mjs";
 import { runCliCommand } from "../../providers/src/cli-agent-transport.mjs";
 import {
   createCodexDshCatalogLoader,
@@ -65,6 +66,7 @@ export function apply(ctx, config = {}) {
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
       grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
+      kiro: runtimeOptions.requestExecutors?.kiro ?? createKiroAcpExecutor(runtimeOptions.kiro ?? {}),
     };
     runtimeOptions.catalogLoaders = {
       ...(runtimeOptions.catalogLoaders ?? {}),
@@ -76,6 +78,7 @@ export function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
+      kiro: runtimeOptions.catalogLoaders?.kiro ?? createKiroCatalogLoader(runtimeOptions.kiro ?? {}),
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders)

@@ -12,6 +12,7 @@ import {
 import { createGrokDriver, createGrokModule, summarizeGrokCandidate } from "../../../modules/provider-grok/src/index.mjs";
 import { createClaudeDriver, createClaudeModule, summarizeClaudeCandidate } from "../../../modules/provider-claude/src/index.mjs";
 import { createCursorDriver, createCursorModule, summarizeCursorCandidate } from "../../../modules/provider-cursor/src/index.mjs";
+import { createKiroDriver, createKiroModule, summarizeKiroCandidate } from "../../../modules/provider-kiro/src/index.mjs";
 import { redactError } from "../../providers/src/provider-utils.mjs";
 
 const candidateSummarizers = new Map([
@@ -20,6 +21,7 @@ const candidateSummarizers = new Map([
   ["grok", summarizeGrokCandidate],
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate],
+  ["kiro", summarizeKiroCandidate],
 ]);
 
 const DEFAULT_REFRESH_TIMEOUT_MS = 15_000;
@@ -127,6 +129,15 @@ export function createDefaultProviderEntries(options = {}) {
         }),
       }),
       driver: options.cursorDriver,
+    },
+    {
+      module: createKiroModule({
+        driver: options.kiroDriver ?? createKiroDriver({
+          ...withRequestExecutor("kiro", options.kiro, requestExecutors),
+          ...(catalogLoaders.kiro ? { catalogLoader: catalogLoaders.kiro } : {}),
+        }),
+      }),
+      driver: options.kiroDriver,
     },
   ];
 }

@@ -421,6 +421,13 @@ export function createAcpAgentExecutor({
   timeoutMs = 300_000,
   buildArgs = () => ["agent", "stdio"],
   promptBuilder,
+  clientCapabilities = {
+    fs: { readTextFile: true, writeTextFile: true },
+    terminal: true,
+  },
+  clientInfo = null,
+  selectAuthMethod = null,
+  requestHandler = null,
   spawnImpl = spawn,
 } = {}) {
   if (!providerId) throw new Error("ACP agent executor requires providerId");
@@ -460,6 +467,38 @@ export function createAcpAgentExecutor({
         else notifications.push(message);
       };
 
+      const writeMessage = (message) => {
+        if (closed) return;
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+      };
+
+      const respondToRequest = async (message) => {
+        try {
+          if (typeof requestHandler !== "function") {
+            const error = new Error(`Unsupported ACP client method: ${message.method}`);
+            error.code = -32601;
+            throw error;
+          }
+          const result = await requestHandler({
+            method: message.method,
+            params: message.params ?? {},
+            request,
+            invocation,
+            context,
+          });
+          writeMessage({ jsonrpc: "2.0", id: message.id, result: result ?? {} });
+        } catch (error) {
+          writeMessage({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: Number.isInteger(error?.code) ? error.code : -32603,
+              message: String(error?.message ?? `${providerId} ACP client request failed`),
+            },
+          });
+        }
+      };
+
       const onLine = (line) => {
         const message = parseJsonOutput(line);
         if (!message || typeof message !== "object") return;
@@ -468,6 +507,10 @@ export function createAcpAgentExecutor({
           pending.delete(message.id);
           if (message.error) entry.reject(acpError(providerId, message));
           else entry.resolve(message.result ?? {});
+          return;
+        }
+        if (message.id !== undefined && typeof message.method === "string") {
+          void respondToRequest(message);
           return;
         }
         if (typeof message.method === "string") enqueueNotification(message);
@@ -492,7 +535,7 @@ export function createAcpAgentExecutor({
         return new Promise((resolve, reject) => {
           pending.set(id, { resolve, reject });
           try {
-            child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+            writeMessage({ jsonrpc: "2.0", id, method, params });
           } catch (error) {
             pending.delete(id);
             reject(error);
@@ -529,21 +572,23 @@ export function createAcpAgentExecutor({
         yield { type: "block-start", index: 0, blockType: "text" };
         const initialize = await requestRpc("initialize", {
           protocolVersion: 1,
-          clientCapabilities: {
-            fs: { readTextFile: true, writeTextFile: true },
-            terminal: true,
-          },
+          clientCapabilities,
+          ...(clientInfo ? { clientInfo } : {}),
         });
-        const authMethods = new Set((initialize.authMethods ?? []).map((method) => method?.id).filter(Boolean));
-        const methodId = resolvedEnv.XAI_API_KEY && authMethods.has("xai.api_key")
-          ? "xai.api_key"
-          : authMethods.has("cached_token") ? "cached_token" : null;
-        if (!methodId) {
+        const methods = (initialize.authMethods ?? []).filter((method) => method?.id);
+        const authMethods = new Set(methods.map((method) => method.id));
+        const methodId = typeof selectAuthMethod === "function"
+          ? await selectAuthMethod({ methods, env: resolvedEnv, request, invocation, context })
+          : resolvedEnv.XAI_API_KEY && authMethods.has("xai.api_key")
+            ? "xai.api_key"
+            : authMethods.has("cached_token") ? "cached_token" : null;
+        if (methodId) {
+          await requestRpc("authenticate", { methodId, _meta: { headless: true } });
+        } else if (methods.length > 0) {
           const error = new Error(`${providerId} ACP has no usable authentication method`);
           error.code = "AUTH_REQUIRED";
           throw error;
         }
-        await requestRpc("authenticate", { methodId, _meta: { headless: true } });
         const session = await requestRpc("session/new", {
           cwd: context.cwd ?? cwd ?? process.cwd(),
           mcpServers: [],

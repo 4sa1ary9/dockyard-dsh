@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { dirname, join } from "node:path";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -48,6 +49,13 @@ import {
   parseCursorAuthStatus,
 } from "../modules/provider-cursor/src/index.mjs";
 import { frameConnectMessage, decodeCursorConnectTrailer } from "../modules/provider-cursor/src/native-protocol.mjs";
+import {
+  createKiroAcpExecutor,
+  createKiroCatalogLoader,
+  createKiroDriver,
+  parseKiroModelCatalog,
+  parseKiroWhoami,
+} from "../modules/provider-kiro/src/index.mjs";
 import { codexModelToDshCatalog } from "../packages/dsh-plugin/src/codex-transport.mjs";
 
 function jwt(payload) {
@@ -1970,4 +1978,180 @@ test("Grok official CLI executor keeps streaming-json and live model selection",
   assert.ok(calls[0].args.includes("--model") && calls[0].args.includes("grok-live"));
   assert.ok(calls[0].args.includes("--reasoning-effort") && calls[0].args.includes("high"));
   assert.deepEqual(chunks.filter((chunk) => chunk.type === "text-delta").map((chunk) => chunk.text), ["Grok response"]);
+});
+
+test("Kiro parses the official identity and live model catalog", async () => {
+  const identity = parseKiroWhoami(`${JSON.stringify({
+    accountType: "IamIdentityCenter",
+    region: "us-east-1",
+    email: "kiro@example.test",
+  })}\n\nProfile:\nKiroProfile-us-east-1`);
+  assert.equal(identity.loggedIn, true);
+  assert.equal(identity.accountId, "kiro@example.test");
+  assert.equal(identity.plan, "IAM Identity Center");
+  assert.equal(parseKiroWhoami('{"account":null}').loggedIn, false);
+
+  const rawCatalog = JSON.stringify({
+    models: [{
+      model_name: "claude-sonnet-live",
+      model_id: "claude-sonnet-live",
+      description: "Live Kiro model",
+      context_window_tokens: 1_000_000,
+      rate_multiplier: 1.3,
+      rate_unit: "Credit",
+    }],
+    default_model: "claude-sonnet-live",
+  });
+  assert.deepEqual(parseKiroModelCatalog(rawCatalog), {
+    models: [{
+      id: "claude-sonnet-live",
+      name: "claude-sonnet-live",
+      description: "Live Kiro model · 计费倍率 1.3 Credit",
+      contextWindow: 1_000_000,
+    }],
+    defaultModel: "claude-sonnet-live",
+  });
+
+  const calls = [];
+  const loader = createKiroCatalogLoader({
+    cliPath: "kiro-cli",
+    commandRunner: async (command, args, options) => {
+      calls.push({ command, args, options });
+      return { output: rawCatalog, errorOutput: "" };
+    },
+  });
+  assert.equal((await loader()).models[0].id, "claude-sonnet-live");
+  assert.equal((await loader()).models[0].id, "claude-sonnet-live");
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, ["chat", "--list-models", "--format", "json"]);
+});
+
+test("Kiro driver imports only the active official CLI session", async () => {
+  const secretStore = new MemorySecretStore();
+  const status = JSON.stringify({
+    accountType: "IamIdentityCenter",
+    region: "us-east-1",
+    email: "kiro@example.test",
+  });
+  let invoked = false;
+  const driver = createKiroDriver({
+    cliPath: "kiro-cli",
+    commandRunner: async (command, args) => {
+      assert.equal(command, "kiro-cli");
+      assert.deepEqual(args, ["whoami", "--format", "json"]);
+      return { output: status, errorOutput: "" };
+    },
+    catalogLoader: async () => ({ models: [] }),
+    requestExecutor: async () => {
+      invoked = true;
+      return (async function* () {
+        yield { type: "text-delta", index: 0, text: "Kiro response" };
+        yield { type: "finish", reason: { kind: "stop" } };
+      })();
+    },
+  });
+  const discovered = await driver.discover();
+  assert.equal(discovered.candidates.length, 1);
+  const account = await driver.importAccount(discovered.candidates[0], { secretStore });
+  assert.equal(account.providerId, "kiro");
+  assert.equal(account.resources.transport, "agent_client_protocol");
+  assert.equal((await secretStore.read(account.credentialRef)).accountType, "IamIdentityCenter");
+
+  const stream = await driver.stream({ messages: [{ role: "user", content: "Hi" }] }, { account }, { secretStore });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.equal(invoked, true);
+  assert.equal(chunks[0].text, "Kiro response");
+});
+
+test("Kiro ACP executor streams text without re-authenticating and denies nested tools", async () => {
+  const calls = [];
+  let permissionResponse = null;
+  const spawnImpl = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => {
+      queueMicrotask(() => child.emit("close", 0, null));
+      return true;
+    };
+    let buffered = "";
+    let promptRequestId = null;
+    const send = (message) => child.stdout.write(`${JSON.stringify(message)}\n`);
+    child.stdin.on("data", (chunk) => {
+      buffered += String(chunk);
+      while (buffered.includes("\n")) {
+        const newline = buffered.indexOf("\n");
+        const line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        if (!line.trim()) continue;
+        const message = JSON.parse(line);
+        if (message.method === "initialize") {
+          assert.deepEqual(message.params.clientCapabilities, {});
+          assert.equal(message.params.clientInfo.name, "dockyard-dsh");
+          send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: 1, authMethods: [] } });
+        } else if (message.method === "session/new") {
+          send({ jsonrpc: "2.0", id: message.id, result: { sessionId: "kiro-session" } });
+        } else if (message.method === "session/set_model") {
+          send({ jsonrpc: "2.0", id: message.id, result: {} });
+        } else if (message.method === "session/prompt") {
+          promptRequestId = message.id;
+          send({
+            jsonrpc: "2.0",
+            id: 900,
+            method: "session/request_permission",
+            params: {
+              sessionId: "kiro-session",
+              options: [
+                { optionId: "allow_once", kind: "allow_once" },
+                { optionId: "reject_once", kind: "reject_once" },
+              ],
+            },
+          });
+        } else if (message.id === 900) {
+          permissionResponse = message.result;
+          send({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "kiro-session",
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "Kiro response" },
+              },
+            },
+          });
+          send({
+            jsonrpc: "2.0",
+            id: promptRequestId,
+            result: { stopReason: "end_turn", usage: { inputTokens: 2, outputTokens: 3 } },
+          });
+        } else {
+          assert.fail(`Unexpected Kiro ACP message: ${line}`);
+        }
+      }
+    });
+    return child;
+  };
+
+  const executor = createKiroAcpExecutor({ cliPath: "kiro-cli", spawnImpl });
+  const stream = await executor({
+    request: {
+      model: "claude-sonnet-live",
+      reasoningEffort: "high",
+      messages: [{ role: "user", content: "Hello" }],
+    },
+    context: {},
+  });
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(chunk);
+  assert.equal(calls[0].command, "kiro-cli");
+  assert.ok(calls[0].args.includes("acp") && calls[0].args.includes("--trust-tools="));
+  assert.ok(calls[0].args.includes("--model") && calls[0].args.includes("claude-sonnet-live"));
+  assert.ok(calls[0].args.includes("--effort") && calls[0].args.includes("high"));
+  assert.deepEqual(permissionResponse, { outcome: { outcome: "selected", optionId: "reject_once" } });
+  assert.deepEqual(chunks.filter((chunk) => chunk.type === "text-delta").map((chunk) => chunk.text), ["Kiro response"]);
+  assert.deepEqual(chunks.find((chunk) => chunk.type === "usage")?.usage, { inputTokens: 2, outputTokens: 3 });
 });

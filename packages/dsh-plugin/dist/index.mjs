@@ -2715,6 +2715,7 @@ import { dirname as dirname3, join as join6 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
 import { spawn as spawn3 } from "node:child_process";
+import { createInterface } from "node:readline";
 function cliFailure(code, signal, output, errorOutput, providerId) {
   const error = new Error(`${providerId ?? "provider"} CLI failed (${signal ?? code})`);
   error.code = code;
@@ -2794,6 +2795,257 @@ function runCliCommand(command, args, {
       reject(cliFailure(code, timedOut ? "SIGTERM" : closeSignal, output, errorOutput, providerId));
     });
   });
+}
+function unsupportedContentError2(providerId, detail) {
+  const error = new Error(detail ?? `${providerId ?? "provider"} does not support this content through its native transport`);
+  error.code = "UNSUPPORTED_CONTENT";
+  error.providerId = providerId ?? null;
+  return error;
+}
+function appendDelta(current, next) {
+  if (!next) return "";
+  if (!current) return next;
+  if (next.startsWith(current)) return next.slice(current.length);
+  if (current.endsWith(next)) return "";
+  return next;
+}
+function acpError(providerId, payload) {
+  const message = payload?.error?.message ?? payload?.message ?? `${providerId} ACP request failed`;
+  const error = new Error(String(message));
+  error.code = payload?.error?.code ?? "ACP_ERROR";
+  error.providerId = providerId;
+  error.detail = payload?.error?.data ?? null;
+  return error;
+}
+function acpUsage(value) {
+  if (!value || typeof value !== "object") return null;
+  const inputTokens = Number(value.inputTokens ?? value.input_tokens ?? value.input);
+  const outputTokens = Number(value.outputTokens ?? value.output_tokens ?? value.output);
+  const totalTokens = Number(value.totalTokens ?? value.total_tokens ?? value.total);
+  if (!Number.isFinite(inputTokens) && !Number.isFinite(outputTokens) && !Number.isFinite(totalTokens)) return null;
+  return {
+    ...Number.isFinite(inputTokens) ? { inputTokens } : {},
+    ...Number.isFinite(outputTokens) ? { outputTokens } : {},
+    ...Number.isFinite(totalTokens) ? { totalTokens } : {}
+  };
+}
+function createAcpAgentExecutor({
+  providerId,
+  cliPath,
+  env = process.env,
+  cwd,
+  timeoutMs = 3e5,
+  buildArgs = () => ["agent", "stdio"],
+  promptBuilder,
+  clientCapabilities = {
+    fs: { readTextFile: true, writeTextFile: true },
+    terminal: true
+  },
+  clientInfo = null,
+  selectAuthMethod = null,
+  requestHandler = null,
+  spawnImpl = spawn3
+} = {}) {
+  if (!providerId) throw new Error("ACP agent executor requires providerId");
+  if (!cliPath) throw new Error(`ACP agent executor requires a ${providerId} CLI path`);
+  if (typeof promptBuilder !== "function") throw new Error(`ACP agent executor requires a prompt for ${providerId}`);
+  return async function execute({ request = {}, invocation = {}, context = {} } = {}) {
+    const resolvedEnv = { ...env, ...context.env ?? {} };
+    const args = await buildArgs({ request, invocation, context });
+    const prompt = await promptBuilder({ request, invocation, context });
+    return (async function* responseStream() {
+      const child = spawnImpl(cliPath, args, {
+        env: resolvedEnv,
+        cwd: context.cwd ?? cwd,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        ...request.signal ? { signal: request.signal } : {}
+      });
+      const reader = createInterface({ input: child.stdout });
+      const pending = /* @__PURE__ */ new Map();
+      const notifications = [];
+      const notificationWaiters = [];
+      let nextId = 1;
+      let spawnError = null;
+      let closed = false;
+      let timer;
+      const rejectPending = (error) => {
+        for (const entry of pending.values()) entry.reject(error);
+        pending.clear();
+        while (notificationWaiters.length) notificationWaiters.shift().resolve(null);
+      };
+      const enqueueNotification = (message) => {
+        const waiter = notificationWaiters.shift();
+        if (waiter) waiter.resolve(message);
+        else notifications.push(message);
+      };
+      const writeMessage = (message) => {
+        if (closed) return;
+        child.stdin.write(`${JSON.stringify(message)}
+`);
+      };
+      const respondToRequest = async (message) => {
+        try {
+          if (typeof requestHandler !== "function") {
+            const error = new Error(`Unsupported ACP client method: ${message.method}`);
+            error.code = -32601;
+            throw error;
+          }
+          const result = await requestHandler({
+            method: message.method,
+            params: message.params ?? {},
+            request,
+            invocation,
+            context
+          });
+          writeMessage({ jsonrpc: "2.0", id: message.id, result: result ?? {} });
+        } catch (error) {
+          writeMessage({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: Number.isInteger(error?.code) ? error.code : -32603,
+              message: String(error?.message ?? `${providerId} ACP client request failed`)
+            }
+          });
+        }
+      };
+      const onLine = (line) => {
+        const message = parseJsonOutput(line);
+        if (!message || typeof message !== "object") return;
+        if (message.id !== void 0 && pending.has(message.id)) {
+          const entry = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) entry.reject(acpError(providerId, message));
+          else entry.resolve(message.result ?? {});
+          return;
+        }
+        if (message.id !== void 0 && typeof message.method === "string") {
+          void respondToRequest(message);
+          return;
+        }
+        if (typeof message.method === "string") enqueueNotification(message);
+      };
+      reader.on("line", onLine);
+      child.stderr?.on("data", () => {
+      });
+      child.once("error", (error) => {
+        spawnError = error;
+        rejectPending(error);
+      });
+      child.once("close", (code, closeSignal) => {
+        closed = true;
+        if (pending.size > 0) {
+          const error = spawnError ?? new Error(`${providerId} ACP exited (${closeSignal ?? code})`);
+          rejectPending(error);
+        }
+      });
+      const requestRpc = (method, params) => {
+        const id = nextId++;
+        return new Promise((resolve2, reject) => {
+          pending.set(id, { resolve: resolve2, reject });
+          try {
+            writeMessage({ jsonrpc: "2.0", id, method, params });
+          } catch (error) {
+            pending.delete(id);
+            reject(error);
+          }
+        });
+      };
+      const nextNotification = () => {
+        if (notifications.length > 0) {
+          return {
+            promise: Promise.resolve(notifications.shift()),
+            cancel() {
+            }
+          };
+        }
+        let waiter;
+        const promise = new Promise((resolve2) => {
+          waiter = { resolve: resolve2 };
+          notificationWaiters.push(waiter);
+        });
+        return {
+          promise,
+          cancel() {
+            const index = notificationWaiters.indexOf(waiter);
+            if (index >= 0) notificationWaiters.splice(index, 1);
+          }
+        };
+      };
+      const abort = () => {
+        if (!closed) child.kill("SIGTERM");
+      };
+      timer = setTimeout(abort, timeoutMs);
+      try {
+        yield { type: "block-start", index: 0, blockType: "text" };
+        const initialize = await requestRpc("initialize", {
+          protocolVersion: 1,
+          clientCapabilities,
+          ...clientInfo ? { clientInfo } : {}
+        });
+        const methods = (initialize.authMethods ?? []).filter((method) => method?.id);
+        const authMethods = new Set(methods.map((method) => method.id));
+        const methodId = typeof selectAuthMethod === "function" ? await selectAuthMethod({ methods, env: resolvedEnv, request, invocation, context }) : resolvedEnv.XAI_API_KEY && authMethods.has("xai.api_key") ? "xai.api_key" : authMethods.has("cached_token") ? "cached_token" : null;
+        if (methodId) {
+          await requestRpc("authenticate", { methodId, _meta: { headless: true } });
+        } else if (methods.length > 0) {
+          const error = new Error(`${providerId} ACP has no usable authentication method`);
+          error.code = "AUTH_REQUIRED";
+          throw error;
+        }
+        const session = await requestRpc("session/new", {
+          cwd: context.cwd ?? cwd ?? process.cwd(),
+          mcpServers: []
+        });
+        const sessionId = session.sessionId;
+        if (!sessionId) throw new Error(`${providerId} ACP did not return a session id`);
+        if (typeof request.model === "string" && request.model.length > 0) {
+          await requestRpc("session/set_model", { sessionId, modelId: request.model });
+        }
+        if (typeof request.reasoningEffort === "string" && request.reasoningEffort.length > 0) {
+        }
+        const promptResponse = requestRpc("session/prompt", { sessionId, prompt });
+        let text2 = "";
+        let finished = false;
+        while (!finished) {
+          const notification = nextNotification();
+          const event = await Promise.race([
+            promptResponse.then((result) => ({ type: "response", result })),
+            notification.promise.then((message) => ({ type: "notification", message }))
+          ]);
+          if (event.type === "response") {
+            notification.cancel();
+            const stopReason = String(event.result?.stopReason ?? "stop").toLowerCase();
+            if (["error", "failed", "cancelled"].includes(stopReason)) {
+              const error = new Error(`${providerId} ACP request did not complete`);
+              error.code = "UPSTREAM_ERROR";
+              error.detail = event.result;
+              throw error;
+            }
+            const usage = acpUsage(event.result?.usage);
+            if (usage) yield { type: "usage", usage };
+            finished = true;
+            continue;
+          }
+          const update = event.message?.params?.update;
+          if (event.message?.method !== "session/update" || !update) continue;
+          if (update.sessionUpdate !== "agent_message_chunk" || typeof update.content?.text !== "string") continue;
+          const delta = appendDelta(text2, update.content.text);
+          if (!delta) continue;
+          text2 += delta;
+          yield { type: "text-delta", index: 0, text: delta };
+        }
+        yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
+        yield { type: "finish", reason: { kind: "stop" } };
+      } finally {
+        clearTimeout(timer);
+        reader.close();
+        rejectPending(new Error(`${providerId} ACP transport closed`));
+        if (!closed) child.kill("SIGTERM");
+      }
+    })();
+  };
 }
 var cliAgentTransportConstants = Object.freeze({
   defaultOutputFormat: "stream-json"
@@ -8476,13 +8728,475 @@ function createCursorModule({ driver = {} } = {}) {
   });
 }
 
+// modules/provider-kiro/src/driver.mjs
+import { createHash as createHash9 } from "node:crypto";
+import { homedir as homedir10 } from "node:os";
+import { join as join10 } from "node:path";
+var PROVIDER_ID10 = "kiro";
+var DEFAULT_CATALOG_TTL_MS3 = 6e4;
+var CREDENTIAL_SLOT6 = Symbol("dockyard-kiro-session");
+function hash6(value) {
+  return createHash9("sha256").update(String(value)).digest("hex");
+}
+function firstString9(...values) {
+  return values.find((value) => typeof value === "string" && value.trim().length > 0)?.trim() ?? null;
+}
+function finiteInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+function accountTypeName(value) {
+  const normalized = String(value ?? "").toLowerCase();
+  if (normalized.includes("identitycenter") || normalized.includes("identity_center")) return "IAM Identity Center";
+  if (normalized.includes("builder")) return "AWS Builder ID";
+  return firstString9(value);
+}
+function resolveKiroCliPath({ env = process.env, platform = process.platform, home = homedir10() } = {}) {
+  if (env.DOCKYARD_KIRO_CLI) return env.DOCKYARD_KIRO_CLI;
+  if (platform === "win32") {
+    return join10(env.LOCALAPPDATA || join10(home, "AppData", "Local"), "Kiro-Cli", "kiro-cli.exe");
+  }
+  return "kiro-cli";
+}
+function parseKiroWhoami(output = "") {
+  const parsed = parseJsonOutput(output) ?? {};
+  const account = parsed?.account && typeof parsed.account === "object" ? parsed.account : parsed;
+  const email = firstString9(
+    account.email,
+    account.userEmail,
+    parsed.email,
+    String(output).match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]
+  );
+  const accountType = firstString9(account.accountType, account.account_type, parsed.accountType, parsed.account_type);
+  const accountId = firstString9(account.accountId, account.account_id, account.userId, account.user_id, email);
+  const explicitlyLoggedOut = parsed?.account === null || parsed?.loggedIn === false || /not logged in|logged out|unauthenticated/i.test(String(output));
+  const loggedIn = !explicitlyLoggedOut && Boolean(
+    parsed?.loggedIn === true || parsed?.authenticated === true || email || accountType || accountId
+  );
+  return {
+    loggedIn,
+    accountId: accountId ?? "kiro:active",
+    email,
+    displayName: firstString9(account.name, account.displayName, parsed.name, parsed.displayName, email, accountId, "Kiro active session"),
+    accountType,
+    plan: accountTypeName(accountType),
+    region: firstString9(account.region, parsed.region),
+    raw: parsed
+  };
+}
+function candidateFromStatus3(status, { source = "official_kiro_cli" } = {}) {
+  const credentialRef = createCredentialRef(PROVIDER_ID10, status.accountId);
+  const candidate2 = {
+    candidateId: `kiro:${hash6(status.accountId).slice(0, 20)}`,
+    providerId: PROVIDER_ID10,
+    source,
+    accountId: status.accountId,
+    displayName: status.displayName ?? status.email ?? status.accountId,
+    email: status.email,
+    subscription: { plan: status.plan, status: "active", expiresAt: null },
+    refresh: {
+      accessTokenExpiresAt: null,
+      nextRefreshAt: null,
+      lastRefreshedAt: null,
+      refreshable: true
+    },
+    credentialRef,
+    resources: officialSessionResources({
+      sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+      authSource: source,
+      extra: {
+        authMethod: status.accountType ?? null,
+        region: status.region ?? null
+      }
+    }),
+    imported: false,
+    status: "available",
+    diagnostic: null
+  };
+  Object.defineProperty(candidate2, CREDENTIAL_SLOT6, {
+    value: {
+      type: OFFICIAL_SESSION_AUTH_KIND,
+      providerId: PROVIDER_ID10,
+      accountId: status.accountId,
+      accountType: status.accountType,
+      sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI
+    },
+    enumerable: false
+  });
+  return candidate2;
+}
+function summarizeKiroCandidate(candidate2) {
+  return {
+    providerId: PROVIDER_ID10,
+    candidateId: candidate2.candidateId,
+    source: candidate2.source,
+    accountId: candidate2.accountId,
+    displayName: candidate2.displayName,
+    email: candidate2.email,
+    subscription: { ...candidate2.subscription },
+    refresh: { ...candidate2.refresh },
+    imported: Boolean(candidate2.imported),
+    status: candidate2.status ?? "available",
+    diagnostic: candidate2.diagnostic ?? null
+  };
+}
+function parseKiroModelCatalog(output = "") {
+  const parsed = parseJsonOutput(output) ?? {};
+  const rawModels = Array.isArray(parsed) ? parsed : Array.isArray(parsed.models) ? parsed.models : [];
+  const models = rawModels.map((raw) => {
+    const id = firstString9(raw?.model_id, raw?.modelId, raw?.id, raw?.model_name, raw?.name);
+    if (!id) return null;
+    const rate = Number(raw?.rate_multiplier ?? raw?.rateMultiplier);
+    const rateUnit = firstString9(raw?.rate_unit, raw?.rateUnit);
+    const rateText = Number.isFinite(rate) && rateUnit ? `\u8BA1\u8D39\u500D\u7387 ${rate} ${rateUnit}` : null;
+    const description = [firstString9(raw?.description), rateText].filter(Boolean).join(" \xB7 ");
+    const contextWindow = finiteInteger(raw?.context_window_tokens ?? raw?.contextWindowTokens ?? raw?.contextWindow);
+    return {
+      id,
+      name: firstString9(raw?.display_name, raw?.displayName, raw?.model_name, raw?.name, id),
+      ...description ? { description } : {},
+      ...contextWindow ? { contextWindow } : {}
+    };
+  }).filter(Boolean);
+  return {
+    models,
+    defaultModel: firstString9(parsed.default_model, parsed.defaultModel)
+  };
+}
+function createKiroCatalogLoader({
+  env = process.env,
+  cliPath = resolveKiroCliPath({ env }),
+  commandRunner = runCliCommand,
+  timeoutMs = 3e4,
+  cacheTtlMs = Number(env.DOCKYARD_KIRO_CATALOG_TTL_MS) || DEFAULT_CATALOG_TTL_MS3
+} = {}) {
+  let cached = null;
+  let cachedAt = 0;
+  let pending = null;
+  return async function loadCatalog({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && cached && now - cachedAt < cacheTtlMs) return cached;
+    if (pending) return pending;
+    pending = (async () => {
+      try {
+        const result = await commandRunner(cliPath, ["chat", "--list-models", "--format", "json"], {
+          env,
+          timeoutMs,
+          providerId: PROVIDER_ID10
+        });
+        const parsed = parseKiroModelCatalog(result.output);
+        cached = {
+          ...parsed,
+          source: "official_kiro_cli",
+          ...parsed.models.length ? {} : { diagnostics: ["Kiro \u5B98\u65B9 CLI \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u6A21\u578B"] }
+        };
+      } catch (error) {
+        cached = {
+          models: [],
+          source: "official_kiro_cli",
+          diagnostics: [`Kiro \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BFB\u53D6\u5931\u8D25\uFF1A${error.message}`]
+        };
+      }
+      cachedAt = Date.now();
+      return cached;
+    })().finally(() => {
+      pending = null;
+    });
+    return pending;
+  };
+}
+async function kiroPromptContent(value, attachments, result = []) {
+  if (typeof value === "string") {
+    if (value.length > 0) result.push({ type: "text", text: value });
+    return result;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) await kiroPromptContent(item, attachments, result);
+    return result;
+  }
+  if (!value || typeof value !== "object") return result;
+  if (value.type === "text") return kiroPromptContent(value.text ?? value.content, attachments, result);
+  if (value.type === "image") {
+    if (typeof value.data === "string" && value.data.length > 0) {
+      const mimeType2 = firstString9(value.mimeType, value.mediaType);
+      if (!mimeType2) throw unsupportedContentError2(PROVIDER_ID10, "Kiro image input is missing its media type");
+      result.push({ type: "image", data: value.data, mimeType: mimeType2 });
+      return result;
+    }
+    if (!value.attachment || typeof attachments?.readImage !== "function") {
+      throw unsupportedContentError2(PROVIDER_ID10, "Kiro image input requires DSH's durable attachment service");
+    }
+    const stored = await attachments.readImage(value.attachment);
+    const bytes = stored?.data;
+    const mimeType = firstString9(stored?.ref?.mediaType, value.attachment?.mediaType, value.mimeType);
+    if (!bytes || !mimeType) throw unsupportedContentError2(PROVIDER_ID10, "Kiro could not read the durable image attachment");
+    result.push({ type: "image", data: Buffer.from(bytes).toString("base64"), mimeType });
+    return result;
+  }
+  if (value.type === "tool-call") {
+    const args = typeof value.arguments === "string" ? value.arguments : JSON.stringify(value.arguments ?? {});
+    result.push({ type: "text", text: `[tool call: ${value.name ?? "unknown"}] ${args}` });
+    return result;
+  }
+  if (value.type === "tool-result") return kiroPromptContent(value.content, attachments, result);
+  return kiroPromptContent(value.text ?? value.content, attachments, result);
+}
+async function kiroRequestPromptBlocks(request = {}, attachments) {
+  const blocks = [];
+  if (typeof request.system === "string" && request.system.length > 0) {
+    blocks.push({ type: "text", text: `system:
+${request.system}` });
+  }
+  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+    blocks.push({ type: "text", text: `${message?.role ?? "message"}:
+` });
+    await kiroPromptContent(message?.content ?? message?.text, attachments, blocks);
+  }
+  return blocks.length > 0 ? blocks : [{ type: "text", text: "Continue the conversation." }];
+}
+function rejectKiroPermission({ method, params }) {
+  if (method !== "session/request_permission") {
+    const error = new Error(`Unsupported Kiro ACP client method: ${method}`);
+    error.code = -32601;
+    throw error;
+  }
+  const options = Array.isArray(params?.options) ? params.options : [];
+  const rejected = options.find((option) => /reject|deny/i.test(String(
+    option?.kind ?? option?.name ?? option?.optionId
+  )));
+  return rejected ? { outcome: { outcome: "selected", optionId: rejected.optionId } } : { outcome: { outcome: "cancelled" } };
+}
+function createKiroAcpExecutor({
+  env = process.env,
+  cliPath = resolveKiroCliPath({ env }),
+  timeoutMs = 3e5,
+  spawnImpl
+} = {}) {
+  return createAcpAgentExecutor({
+    providerId: PROVIDER_ID10,
+    cliPath,
+    env,
+    timeoutMs,
+    clientCapabilities: {},
+    clientInfo: { name: "dockyard-dsh", version: "0.1.0" },
+    requestHandler: rejectKiroPermission,
+    ...spawnImpl ? { spawnImpl } : {},
+    buildArgs: ({ request }) => {
+      const args = ["acp", "--trust-tools="];
+      const agent = firstString9(env.DOCKYARD_KIRO_AGENT);
+      const engine = firstString9(env.DOCKYARD_KIRO_AGENT_ENGINE);
+      if (agent) args.push("--agent", agent);
+      if (engine) args.push("--agent-engine", engine);
+      if (typeof request.model === "string" && request.model.length > 0) args.push("--model", request.model);
+      if (typeof request.reasoningEffort === "string" && request.reasoningEffort.length > 0) {
+        args.push("--effort", request.reasoningEffort);
+      }
+      return args;
+    },
+    promptBuilder: ({ request, context }) => kiroRequestPromptBlocks(request, context.attachments)
+  });
+}
+function activeSessionError4(message, { mismatch = false } = {}) {
+  const error = new Error(message);
+  error.authExpired = true;
+  if (mismatch) error.accountMismatch = true;
+  return error;
+}
+var KiroSubscriptionDriver = class {
+  constructor({
+    env = process.env,
+    cliPath = resolveKiroCliPath({ env }),
+    commandRunner = runCliCommand,
+    requestExecutor = null,
+    catalogLoader = null,
+    oauthAuthorizer = null,
+    timeoutMs = 3e4
+  } = {}) {
+    this.env = env;
+    this.cliPath = cliPath;
+    this.commandRunner = commandRunner;
+    this.requestExecutor = requestExecutor;
+    this.timeoutMs = timeoutMs;
+    this.catalogLoader = catalogLoader ?? createKiroCatalogLoader({
+      env,
+      cliPath,
+      commandRunner,
+      timeoutMs
+    });
+    this.oauthAuthorizer = oauthAuthorizer ?? createCliStatusAuthorizer({
+      providerId: PROVIDER_ID10,
+      cliPath,
+      loginArgs: ["login"],
+      environment: env,
+      browserOpened: true,
+      instructions: "\u5DF2\u542F\u52A8\u5B98\u65B9 Kiro CLI \u767B\u5F55\u3002\u8BF7\u5728 Kiro \u5B98\u65B9\u7F51\u9875\u5B8C\u6210\u6388\u6743\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
+      importStatus: async (context) => {
+        const status = await this.#activeStatus(context?.signal);
+        return [await this.importAccount(candidateFromStatus3(status), context)];
+      }
+    });
+  }
+  async #activeStatus(signal) {
+    const result = await this.commandRunner(this.cliPath, ["whoami", "--format", "json"], {
+      env: this.env,
+      timeoutMs: this.timeoutMs,
+      providerId: PROVIDER_ID10,
+      ...signal ? { signal } : {}
+    });
+    const status = parseKiroWhoami(result.output);
+    if (!status.loggedIn) throw activeSessionError4("Kiro CLI \u5F53\u524D\u672A\u767B\u5F55\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743");
+    return status;
+  }
+  async #assertActiveSession(account, signal) {
+    const status = await this.#activeStatus(signal);
+    if (account?.accountId && account.accountId !== "kiro:active" && account.accountId !== status.accountId) {
+      throw activeSessionError4(
+        "Kiro CLI \u53EA\u66B4\u9732\u5F53\u524D\u6D3B\u52A8\u8D26\u53F7\uFF1B\u8BF7\u9009\u62E9\u5F53\u524D\u8D26\u53F7\u6216\u91CD\u65B0\u6388\u6743",
+        { mismatch: true }
+      );
+    }
+    return status;
+  }
+  async discover() {
+    try {
+      const status = await this.#activeStatus();
+      return { candidates: [candidateFromStatus3(status)], source: "official_kiro_cli", diagnostics: [] };
+    } catch (error) {
+      return {
+        candidates: [],
+        source: "official_kiro_cli",
+        diagnostics: [`\u65E0\u6CD5\u8BFB\u53D6 Kiro \u5B98\u65B9 CLI \u4F1A\u8BDD\uFF1A${error.message}`]
+      };
+    }
+  }
+  async importAccount(candidate2, context = {}) {
+    const session = candidate2?.[CREDENTIAL_SLOT6];
+    if (!session) throw new Error("Kiro candidate is no longer available; scan again");
+    if (!context.secretStore) throw new Error("A secure credential store is required");
+    await context.secretStore.write(candidate2.credentialRef, session);
+    return {
+      providerId: PROVIDER_ID10,
+      accountId: candidate2.accountId,
+      credentialRef: candidate2.credentialRef,
+      displayName: candidate2.displayName,
+      email: candidate2.email,
+      auth: { kind: OFFICIAL_SESSION_AUTH_KIND, scopes: [] },
+      subscription: { ...candidate2.subscription },
+      refresh: { ...candidate2.refresh },
+      resources: {
+        ...candidate2.resources,
+        transport: "agent_client_protocol",
+        quotaSource: "official_kiro_cli"
+      }
+    };
+  }
+  async getActiveSession(context = {}) {
+    try {
+      const status = await this.#activeStatus(context.signal);
+      const account = await this.importAccount(candidateFromStatus3(status), context);
+      return {
+        status: "completed",
+        providerId: PROVIDER_ID10,
+        instructions: "\u5DF2\u68C0\u6D4B\u5230 Kiro CLI \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
+        accounts: [account],
+        diagnostic: null
+      };
+    } catch {
+      return null;
+    }
+  }
+  async startAuthorization(context = {}) {
+    return this.oauthAuthorizer.begin(context);
+  }
+  async pollAuthorization(sessionId, context = {}) {
+    return this.oauthAuthorizer.poll(sessionId, context);
+  }
+  async cancelAuthorization(sessionId, context = {}) {
+    return this.oauthAuthorizer.cancel(sessionId, context);
+  }
+  async submitAuthorizationCode() {
+    throw new Error("Kiro CLI \u767B\u5F55\u6D41\u7A0B\u4E0D\u63A5\u6536\u624B\u52A8\u6388\u6743\u7801");
+  }
+  async refreshAccount(account, context = {}) {
+    const status = await this.#assertActiveSession(account, context.signal);
+    return {
+      identity: { email: status.email, displayName: status.displayName },
+      subscription: { plan: status.plan, status: "active", expiresAt: null },
+      refresh: {
+        accessTokenExpiresAt: null,
+        nextRefreshAt: null,
+        lastRefreshedAt: (context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()).toISOString(),
+        refreshable: true
+      },
+      resources: {
+        authMethod: status.accountType ?? null,
+        region: status.region ?? null
+      }
+    };
+  }
+  async getQuota(account, context = {}) {
+    await this.#assertActiveSession(account, context.signal);
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    return {
+      quota: {
+        remaining: null,
+        limit: null,
+        unit: null,
+        resetAt: null,
+        windows: [],
+        updatedAt: now.toISOString(),
+        source: "official_kiro_cli"
+      },
+      resources: {
+        quotaDiagnostic: "Kiro \u5B98\u65B9 CLI \u5F53\u524D\u672A\u63D0\u4F9B\u7ED3\u6784\u5316\u5B9E\u65F6\u989D\u5EA6\u547D\u4EE4\uFF1BDockyard \u4E0D\u663E\u793A\u4F30\u7B97\u503C"
+      }
+    };
+  }
+  async getCatalog(context = {}) {
+    return this.catalogLoader({ force: Boolean(context.force) });
+  }
+  async invoke(request, invocation, context = {}) {
+    await this.#assertActiveSession(invocation?.account, context.signal);
+    const executor = context.requestExecutor ?? this.requestExecutor;
+    if (typeof executor !== "function") throw new Error("Kiro ACP invocation transport is not mounted");
+    return executor({ request, invocation, context });
+  }
+  async stream(request, invocation, context = {}) {
+    return this.invoke(request, invocation, context);
+  }
+};
+function createKiroDriver(options = {}) {
+  return new KiroSubscriptionDriver(options);
+}
+var kiroDriverConstants = Object.freeze({ providerId: PROVIDER_ID10 });
+
+// modules/provider-kiro/src/index.mjs
+function createKiroModule({ driver = {} } = {}) {
+  return defineProviderModule({
+    id: "kiro",
+    displayName: "Kiro",
+    capabilities: [
+      "oauth_discovery",
+      "oauth_import",
+      "oauth_authorization",
+      "oauth_refresh",
+      "quota",
+      "catalog",
+      "invoke",
+      "stream"
+    ],
+    driver
+  });
+}
+
 // packages/runtime/src/dockyard-runtime.mjs
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
   ["antigravity", summarizeAntigravityCandidate],
   ["grok", summarizeGrokCandidate],
   ["claude", summarizeClaudeCandidate],
-  ["cursor", summarizeCursorCandidate]
+  ["cursor", summarizeCursorCandidate],
+  ["kiro", summarizeKiroCandidate]
 ]);
 var DEFAULT_REFRESH_TIMEOUT_MS = 15e3;
 function numericOption(value, fallback) {
@@ -8577,6 +9291,15 @@ function createDefaultProviderEntries(options = {}) {
         })
       }),
       driver: options.cursorDriver
+    },
+    {
+      module: createKiroModule({
+        driver: options.kiroDriver ?? createKiroDriver({
+          ...withRequestExecutor("kiro", options.kiro, requestExecutors),
+          ...catalogLoaders.kiro ? { catalogLoader: catalogLoaders.kiro } : {}
+        })
+      }),
+      driver: options.kiroDriver
     }
   ];
 }
@@ -9072,7 +9795,7 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile8 } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname as dirname4, join as join10, resolve } from "node:path";
+import { dirname as dirname4, join as join11, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 var DSH_LLM_PI_AI = "@deepseek-ai/dsh-llm-pi-ai";
 var PI_AI = "@earendil-works/pi-ai";
@@ -9110,15 +9833,15 @@ async function findPackageRoot(startDirectory, packageName) {
   const packageParts = packageName.split("/");
   let current = resolve(startDirectory);
   while (true) {
-    const candidate2 = join10(current, "node_modules", ...packageParts);
-    if (await isFile(join10(candidate2, "package.json"))) return candidate2;
+    const candidate2 = join11(current, "node_modules", ...packageParts);
+    if (await isFile(join11(candidate2, "package.json"))) return candidate2;
     const parent = dirname4(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 async function packageImportUrl(packageRoot, subpath = null) {
-  const packageJson = JSON.parse(await readFile8(join10(packageRoot, "package.json"), "utf8"));
+  const packageJson = JSON.parse(await readFile8(join11(packageRoot, "package.json"), "utf8"));
   const exports = packageJson.exports;
   let target = null;
   if (!subpath) {
@@ -9140,7 +9863,7 @@ async function packageImportUrl(packageRoot, subpath = null) {
   if (typeof target !== "string") {
     throw new Error(`Cannot resolve ${subpath ?? "."} from ${packageRoot}`);
   }
-  return pathToFileURL(join10(packageRoot, target)).href;
+  return pathToFileURL(join11(packageRoot, target)).href;
 }
 async function importFromDshInstall(moduleAnchor) {
   const anchor = moduleAnchor ?? process.env.DOCKYARD_DSH_CLI_PATH ?? process.argv[1] ?? import.meta.url;
@@ -9742,9 +10465,9 @@ var dockyardDshConstants = Object.freeze({
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
-import { createHash as createHash9 } from "node:crypto";
+import { createHash as createHash10 } from "node:crypto";
 function dshCredentialRef(ref) {
-  const digest = createHash9("sha256").update(String(ref)).digest("hex");
+  const digest = createHash10("sha256").update(String(ref)).digest("hex");
   return `DOCKYARD_DSH_${digest}`;
 }
 function parseCredential(value) {
@@ -9782,7 +10505,7 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 }
 
 // packages/dsh-plugin/src/native-key-pool-host.mjs
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -10139,7 +10862,7 @@ var NativeKeyPoolHost = class {
     this.llm = null;
     this.logger = logger ?? console;
     this.stateStore = stateStore ?? new JsonStateStore({
-      filePath: join11(defaultDockyardHome(), "native-key-pools.json")
+      filePath: join12(defaultDockyardHome(), "native-key-pools.json")
     });
     this.readyPromise = this.loadState();
   }
@@ -10469,7 +11192,8 @@ function apply(ctx, config = {}) {
       }),
       claude: runtimeOptions.requestExecutors?.claude ?? createClaudeNativeExecutor(runtimeOptions.claude ?? {}),
       cursor: runtimeOptions.requestExecutors?.cursor ?? createCursorNativeExecutor(runtimeOptions.cursor ?? {}),
-      grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {})
+      grok: runtimeOptions.requestExecutors?.grok ?? createGrokNativeExecutor(runtimeOptions.grok ?? {}),
+      kiro: runtimeOptions.requestExecutors?.kiro ?? createKiroAcpExecutor(runtimeOptions.kiro ?? {})
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
@@ -10480,7 +11204,8 @@ function apply(ctx, config = {}) {
         commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand
       }),
       claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
-      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {})
+      cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
+      kiro: runtimeOptions.catalogLoaders?.kiro ?? createKiroCatalogLoader(runtimeOptions.kiro ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
     catalogWarmers = Object.entries(runtimeOptions.catalogLoaders).filter(([, loader]) => typeof loader === "function");
