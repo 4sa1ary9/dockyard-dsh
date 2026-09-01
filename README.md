@@ -29,7 +29,7 @@ Linux 默认仍 fail closed，与上游一致。
 |---|---|
 | 系统 | Windows 10 / 11 |
 | Node.js | `^22.19.0` 或 `>=24` |
-| DeepSeek Harness | `npx @deepseek-ai/dsh`，按上游 `0.1.1-rc.2` 验证过 |
+| DeepSeek Harness | `npx @deepseek-ai/dsh`；依赖按上游 `0.1.1-rc.2` 构建，已在 `0.1.2-alpha.3` 实测加载 |
 | pnpm | `dsh plugin add` 会转给 pnpm：`npm install -g pnpm` |
 
 ## 认证条件
