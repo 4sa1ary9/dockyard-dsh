@@ -38,9 +38,9 @@ Browser-imported accounts are stored as provider-owned official OAuth sessions w
 Do not change the normal DSH profile while testing. Install the local bundle into a temporary Web profile/home, then boot the actual Web runner:
 
 ```sh
-DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add /Users/aitabby/projects/Dockyard\ DSH
+DSH_HOME=/tmp/dockyard-dsh-home dsh plugin --profile web add "$PWD"   # 仓库根目录
 DSH_HOME=/tmp/dockyard-dsh-home dsh web --dump-config
 DSH_HOME=/tmp/dockyard-dsh-home dsh web
 ```
 
-The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.0` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.
+The repository root and `packages/dsh-plugin` both expose the same `@dockyard-dsh/plugin@0.1.2` bundle. `npm run build:plugin` produces the self-contained Node entry and browser client bundle; `npm pack --dry-run` should show only the release entry, client bundle, patch file, and package metadata. GitHub/npm installs use the prebuilt entry or the package `prepare` script.

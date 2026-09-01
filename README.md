@@ -6,7 +6,7 @@ Windows 上把 **Codex / Grok / Claude / Cursor / Antigravity / Kiro** 官方订
 
 这不是官方插件。它从 [AITabby/dockyard-dsh](https://github.com/AITabby/dockyard-dsh) **fork 后二次开发**。上游 v0.1.1 已有 macOS DMG，Windows EXE 仍在他们自己的发布流程里。这个仓库补的是：在现有 `dsh web` 里用同一套输入框供应商选择，凭据和浏览器按 Windows 走。
 
-已合入上游 `v0.1.1`。
+已合入上游 `v0.1.2`。
 
 本仓库与 DeepSeek AI、OpenAI、xAI、Anthropic、Cursor、Google、Amazon、Kiro 都没有从属关系。套餐、额度、模型能不能用，由各家账号决定。
 
@@ -29,7 +29,7 @@ Linux 默认仍 fail closed，与上游一致。
 |---|---|
 | 系统 | Windows 10 / 11 |
 | Node.js | `^22.19.0` 或 `>=24` |
-| DeepSeek Harness | `npx @deepseek-ai/dsh`，按上游 `0.1.0-rc.6` 验证过 |
+| DeepSeek Harness | `npx @deepseek-ai/dsh`，按上游 `0.1.1-rc.2` 验证过 |
 | pnpm | `dsh plugin add` 会转给 pnpm：`npm install -g pnpm` |
 
 ## 认证条件
@@ -79,6 +79,8 @@ npx @deepseek-ai/dsh web
 ```
 
 打开 `http://127.0.0.1:3080`。输入框左侧会出现 Dockyard 供应商条。改完前端后要重启 `dsh web`。
+
+上游另提供了预构建的一条命令安装器 `npx -y @dockyard-dsh/install@latest`，但它安装的是上游 bundle，不是本 fork；Windows fork 请按上面的方式从本仓库安装。当前 bundle 已按 `@deepseek-ai/dsh@0.1.1-rc.2` 验证。
 
 命令：
 
