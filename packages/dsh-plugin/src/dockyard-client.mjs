@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
+import { createSnapshotStore } from "@deepseek-ai/dsh-client-store";
 
 import { TYPERT_REMOTE } from "./dockyard-typert.remote.mjs";
 import {
