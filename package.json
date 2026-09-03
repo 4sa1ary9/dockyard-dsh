@@ -1,7 +1,7 @@
 {
   "name": "@dockyard-dsh/plugin",
   "version": "0.1.2",
-  "description": "Windows fork of Dockyard DSH: Codex / Grok / Claude / Cursor / Antigravity / Kiro account pool for DeepSeek Harness.",
+  "description": "Windows fork of Dockyard DSH: Codex / Grok / Claude / Cursor / Antigravity account pool for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -42,7 +42,7 @@
     "client": {
       "inject": [
         "@deepseek-ai/dsh-api-remotes",
-        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-store",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-model-selection"
       ],
@@ -51,7 +51,7 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-api-remotes": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-client-store": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",

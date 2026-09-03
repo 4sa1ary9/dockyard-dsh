@@ -8,7 +8,6 @@ import { createAntigravityModule } from "../modules/provider-antigravity/src/ind
 import { createGrokModule } from "../modules/provider-grok/src/index.mjs";
 import { createClaudeModule } from "../modules/provider-claude/src/index.mjs";
 import { createCursorModule } from "../modules/provider-cursor/src/index.mjs";
-import { createKiroModule } from "../modules/provider-kiro/src/index.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -43,10 +42,9 @@ await runtime.register(createAntigravityModule());
 await runtime.register(createGrokModule());
 await runtime.register(createClaudeModule());
 await runtime.register(createCursorModule());
-await runtime.register(createKiroModule());
 
 const ids = runtime.list().map((module) => module.id);
-if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor") || !ids.includes("kiro")) {
+if (!ids.includes("openai-codex") || !ids.includes("antigravity") || !ids.includes("grok") || !ids.includes("claude") || !ids.includes("cursor")) {
   throw new Error("Initial provider modules are not registered");
 }
 

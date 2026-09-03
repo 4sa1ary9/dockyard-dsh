@@ -1,4 +1,4 @@
-import { createSnapshotStore } from "@deepseek-ai/dsh-client-runtime/client";
+import { createSnapshotStore } from "@deepseek-ai/dsh-client-store";
 
 const STORAGE_PREFIX = "dockyard-dsh.native-key-pool";
 
