@@ -12,7 +12,7 @@
 export const NATIVE_KEY_PRESETS = Object.freeze([
   Object.freeze({
     id: "glm-coding-plan",
-    name: "GLM Coding Plan（智谱 BigModel）",
+    name: "GLM Coding Plan（智谱）",
     provider: "glm-coding-plan",
     baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
     api: "openai-completions",
@@ -42,7 +42,7 @@ export const NATIVE_KEY_PRESETS = Object.freeze([
   }),
   Object.freeze({
     id: "qwen-coding-plan",
-    name: "ModelStudio Coding Plan（阿里云百炼）",
+    name: "ModelStudio（阿里百炼）",
     provider: "qwen-coding-plan",
     baseURL: "https://coding.dashscope.aliyuncs.com/v1",
     api: "openai-completions",

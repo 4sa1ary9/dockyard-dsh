@@ -19580,7 +19580,7 @@ function keyRows(metadata, credentials, activeRef, t) {
   return rows;
 }
 var NativeKeyPoolController = class {
-  constructor(api, remote2 = null, t = null) {
+  constructor(api, remote = null, t = null) {
     __publicField(this, "api");
     __publicField(this, "store", (0, import_dsh_client_store.createSnapshotStore)({
       status: "idle",
@@ -19602,7 +19602,7 @@ var NativeKeyPoolController = class {
     }));
     __publicField(this, "generation", 0);
     this.api = api;
-    this.remote = remote2;
+    this.remote = remote;
     this.t = t;
   }
   operation(key, fallback) {
@@ -20352,7 +20352,7 @@ function healthLabel(status, t) {
   return status === "healthy" ? text(t, "health.healthy") : status === "degraded" ? text(t, "health.degraded") : status === "cooldown" ? text(t, "health.cooldown") : status === "expired" ? text(t, "health.expired") : status === "exhausted" ? text(t, "health.exhausted") : status ?? text(t, "health.unknown");
 }
 var DockyardClientController = class {
-  constructor(remote2, t) {
+  constructor(remote, t) {
     __publicField(this, "remote");
     __publicField(this, "store", (0, import_dsh_client_store2.createSnapshotStore)({
       snapshot: null,
@@ -20371,7 +20371,7 @@ var DockyardClientController = class {
     // generation so an in-flight poll RPC can no longer apply its stale result
     // over the cancelled/newer state.
     __publicField(this, "authGenerations", /* @__PURE__ */ new Map());
-    this.remote = remote2;
+    this.remote = remote;
     this.t = t;
   }
   setState(next) {
@@ -20690,7 +20690,7 @@ function normalizeDraftContextWindow(value) {
   const numeric = Number(String(value).replaceAll(",", "").trim());
   return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : null;
 }
-function ContextWindowSection({ providerId, current, model, accountId = null, keyRef = null, remote: remote2, t }) {
+function ContextWindowSection({ providerId, current, model, accountId = null, keyRef = null, remote, t }) {
   const modelId = current?.model ?? null;
   const detected = modelContextWindow(model);
   const scope = {
@@ -20710,11 +20710,11 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
     setMode("auto");
     setDraft("");
     setMessage(null);
-    if (!modelId || typeof remote2?.getContextWindowOverride !== "function") {
+    if (!modelId || typeof remote?.getContextWindowOverride !== "function") {
       setState({ status: "ready", override: null, effectiveOverride: null, source: "auto" });
       return void 0;
     }
-    Promise.resolve(remote2.getContextWindowOverride(scope)).then((response) => unwrapRemote(response, t)).then((value) => {
+    Promise.resolve(remote.getContextWindowOverride(scope)).then((response) => unwrapRemote(response, t)).then((value) => {
       if (cancelled) return;
       const override = normalizeDraftContextWindow(value?.override);
       const effectiveOverride = normalizeDraftContextWindow(value?.effectiveOverride);
@@ -20734,7 +20734,7 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
     return () => {
       cancelled = true;
     };
-  }, [remote2, providerId, modelId, accountId, keyRef]);
+  }, [remote, providerId, modelId, accountId, keyRef]);
   if (!modelId) return null;
   const effective = state.effectiveOverride ?? detected;
   const modeValue = state.source === "inherited" && state.override === null ? "auto" : mode;
@@ -20744,14 +20744,14 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
       setMessage({ error: true, text: text(t, "contextWindow.invalid") });
       return;
     }
-    if (typeof remote2?.setContextWindowOverride !== "function") {
+    if (typeof remote?.setContextWindowOverride !== "function") {
       setMessage({ error: true, text: text(t, "error.remoteNotMounted", { method: "setContextWindowOverride" }) });
       return;
     }
     setBusy(true);
     setMessage(null);
     try {
-      const saved = unwrapRemote(await remote2.setContextWindowOverride({ ...scope, value }), t);
+      const saved = unwrapRemote(await remote.setContextWindowOverride({ ...scope, value }), t);
       const override = normalizeDraftContextWindow(saved?.override);
       const effectiveOverride = normalizeDraftContextWindow(saved?.effectiveOverride);
       setState({
@@ -21067,7 +21067,7 @@ function NativeKeyCard({ entry, providerId, controller, busy, t }) {
     entry?.usage ? nativeQuotaView(entry, t) : null
   );
 }
-function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, remote: remote2, onClose, t }) {
+function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, remote, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [labelDraft, setLabelDraft] = useState("");
@@ -21196,7 +21196,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
         current,
         model,
         keyRef: activeKeyRef,
-        remote: remote2,
+        remote,
         t
       }),
       h(
@@ -21221,7 +21221,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
     )
   );
 }
-function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
+function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, remote, selectedProviderId, onSelect, onClose, t }) {
   const busy = controlState.action !== null;
   const [presets, setPresets] = useState(null);
   const [presetFailure, setPresetFailure] = useState(null);
@@ -21363,7 +21363,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
         h("span", null, text(t, "preset.title")),
         h("span", { className: "dockyard-dsh-section-value" }, text(t, "preset.subtitle"))
       ),
-      presets === null ? h("div", { className: "dockyard-dsh-muted" }, text(t, "status.loading")) : presets.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, presetFailure ?? text(t, "preset.none")) : h("div", { className: "dockyard-dsh-provider-list" }, presets.map((preset) => {
+      presets === null ? h("div", { className: "dockyard-dsh-muted" }, text(t, "status.reading")) : presets.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, presetFailure ?? text(t, "preset.none")) : h("div", { className: "dockyard-dsh-provider-list" }, presets.map((preset) => {
         const open2 = openPresetId === preset.id;
         const keyState = preset.credentialConfigured ? text(t, "preset.keyReady") : text(t, "preset.keyMissing");
         const routeState = preset.declared ? text(t, "preset.routeReady") : text(t, "preset.routeMissing");
@@ -21383,9 +21383,15 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
               },
               "aria-label": text(t, "preset.configure", { name: preset.name })
             },
+            // Plan names are longer than the OAuth provider names, so the
+            // copy stacks instead of sharing one baseline row and
+            // ellipsizing both halves.
             h(
               "span",
-              { className: "dockyard-dsh-provider-row-copy" },
+              {
+                className: "dockyard-dsh-provider-row-copy",
+                style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "2px" }
+              },
               h("span", { className: "dockyard-dsh-provider-row-name" }, preset.name),
               h(
                 "span",
@@ -21395,6 +21401,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
             ),
             h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, open2 ? "\u2304" : "\u203A")
           ),
+          open2 ? h("div", { className: "dockyard-dsh-muted" }, `${preset.baseURL} \xB7 ${preset.credentialRef}`) : null,
           open2 ? h(
             "div",
             { className: "dockyard-dsh-key-form-row" },
@@ -21427,7 +21434,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
     )
   );
 }
-function SubscriptionSettingsSection({ close, controller, remote: remote2, t }) {
+function SubscriptionSettingsSection({ close, controller, remote, t }) {
   const controlState = useSnapshot(controller.store);
   const [selectedProviderId, setSelectedProviderId] = useState(null);
   const providers = controlState.snapshot?.providers ?? [];
@@ -21457,7 +21464,7 @@ function SubscriptionSettingsSection({ close, controller, remote: remote2, t }) 
       directoryState: null,
       controlState,
       controller,
-      remote: remote2,
+      remote,
       onOpenOverview: () => setSelectedProviderId(null),
       onClose: close,
       t
@@ -21466,6 +21473,7 @@ function SubscriptionSettingsSection({ close, controller, remote: remote2, t }) 
       directoryState: null,
       controlState,
       controller,
+      remote,
       selectedProviderId: null,
       onSelect: setSelectedProviderId,
       onClose: close,
@@ -21473,7 +21481,7 @@ function SubscriptionSettingsSection({ close, controller, remote: remote2, t }) 
     })
   );
 }
-function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, remote: remote2, onOpenOverview, onClose, t }) {
+function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, remote, onOpenOverview, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
   const modelLabel = model?.name ?? current?.model ?? text(t, "title.noModel");
@@ -21575,7 +21583,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         current,
         model,
         accountId: contextAccountId,
-        remote: remote2,
+        remote,
         t
       }),
       h(
@@ -21601,7 +21609,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
     )
   );
 }
-function DockyardAccountControl({ directory, modelDirectory, controller, nativeController, remote: remote2, t }) {
+function DockyardAccountControl({ directory, modelDirectory, controller, nativeController, remote, t }) {
   const directoryState = useSnapshot(directory);
   const controlState = useSnapshot(controller.store);
   const nativeState = useSnapshot(nativeController.store);
@@ -21816,6 +21824,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directoryState,
       controlState,
       controller,
+      remote,
       selectedProviderId: currentProviderId,
       t,
       onSelect: (selectedProviderId) => {
@@ -21833,7 +21842,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directoryState,
       controlState,
       controller,
-      remote: remote2,
+      remote,
       t,
       onOpenOverview: openSubscriptionOverview,
       onClose: () => setOpen(false)
@@ -21844,23 +21853,23 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directory: modelDirectory,
       directoryState,
       nativeController,
-      remote: remote2,
+      remote,
       onClose: () => setOpen(false)
     }) : null
   );
 }
-var inject = ["slots", "modelDirectories", "remote", "connection", "locale"];
+var inject = ["slots", "modelDirectories", "remote", "remote.session", "connection", "locale"];
 async function apply(ctx) {
   installStyles();
   const disposeModelMenuFolding = installModelMenuFolding();
   const disposeLocale = ctx.locale.register(DOCKYARD_LOCALE_NS, DOCKYARD_LOCALES);
   const t = ctx.locale.bind(DOCKYARD_LOCALE_NS);
   const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
-  const remote2 = ctx.get("remote.dockyard");
-  const controller = new DockyardClientController(remote2, t);
-  ctx.inject(["slots", "modelDirectories", "connection"], (scope) => {
+  const remote = ctx.get("remote.dockyard");
+  const controller = new DockyardClientController(remote, t);
+  ctx.inject(["slots", "modelDirectories", "remote.session", "connection"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
-    const nativeController = new NativeKeyPoolController(connection?.api, remote2, t);
+    const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
     scope.slots.inject("conversation.input.right", () => scope.slots.register({
       name: "conversation.input.right",
       id: "dockyard-account-control",
@@ -21873,7 +21882,7 @@ async function apply(ctx) {
           modelDirectory,
           controller,
           nativeController,
-          remote: remote2
+          remote
         };
       }
     }, DockyardAccountControl));
@@ -21883,7 +21892,7 @@ async function apply(ctx) {
       order: 15,
       label: () => text(t, "settings.subscriptionSection"),
       locale: DOCKYARD_LOCALE_NS,
-      inject: () => ({ controller, remote: remote2 })
+      inject: () => ({ controller, remote })
     }, SubscriptionSettingsSection));
   });
   return async () => {

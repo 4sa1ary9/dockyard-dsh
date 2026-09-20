@@ -1337,7 +1337,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
         nativeQuotaView(native, t))));
 }
 
-function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
+function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, remote, selectedProviderId, onSelect, onClose, t }) {
   const busy = controlState.action !== null;
   // Domestic coding plans are DSH-native API-key routes, not Dockyard OAuth
   // accounts, so they get their own section here: the host declares the
@@ -1468,7 +1468,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
           h("span", null, text(t, "preset.title")),
           h("span", { className: "dockyard-dsh-section-value" }, text(t, "preset.subtitle"))),
         presets === null
-          ? h("div", { className: "dockyard-dsh-muted" }, text(t, "status.loading"))
+          ? h("div", { className: "dockyard-dsh-muted" }, text(t, "status.reading"))
           : presets.length === 0
             ? h("div", { className: "dockyard-dsh-muted" }, presetFailure ?? text(t, "preset.none"))
             : h("div", { className: "dockyard-dsh-provider-list" }, presets.map((preset) => {
@@ -1491,11 +1491,20 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
                   },
                   "aria-label": text(t, "preset.configure", { name: preset.name }),
                 },
-                  h("span", { className: "dockyard-dsh-provider-row-copy" },
+                  // Plan names are longer than the OAuth provider names, so the
+                  // copy stacks instead of sharing one baseline row and
+                  // ellipsizing both halves.
+                  h("span", {
+                    className: "dockyard-dsh-provider-row-copy",
+                    style: { display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "2px" },
+                  },
                     h("span", { className: "dockyard-dsh-provider-row-name" }, preset.name),
                     h("span", { className: "dockyard-dsh-provider-row-meta" },
                       `${keyState} · ${routeState} · ${text(t, "preset.modelCount", { count: preset.modelCount })}`)),
                   h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, open ? "⌄" : "›")),
+                open
+                  ? h("div", { className: "dockyard-dsh-muted" }, `${preset.baseURL} · ${preset.credentialRef}`)
+                  : null,
                 open
                   ? h("div", { className: "dockyard-dsh-key-form-row" },
                     h("input", {
@@ -1570,6 +1579,7 @@ function SubscriptionSettingsSection({ close, controller, remote, t }) {
         directoryState: null,
         controlState,
         controller,
+        remote,
         selectedProviderId: null,
         onSelect: setSelectedProviderId,
         onClose: close,
@@ -1961,6 +1971,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directoryState,
       controlState,
       controller,
+      remote,
       selectedProviderId: currentProviderId,
        t,
       onSelect: (selectedProviderId) => {
@@ -1996,7 +2007,11 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
 // `remote.dockyard` is created by this plugin's own `$mount` call below. It
 // must not be a top-level dependency, otherwise Cordis waits for the service
 // before running this plugin and the plugin can never create it.
-export const inject = ["slots", "modelDirectories", "remote", "connection", "locale"];
+// `remote.session` is declared because `modelDirectories.directoryFor()` builds
+// dsh's ModelDirectory, which reads that face while this plugin's fiber is the
+// active one; without the declaration the composer slot throws
+// `cannot get property "remote.session" without inject`.
+export const inject = ["slots", "modelDirectories", "remote", "remote.session", "connection", "locale"];
 
 /** Mount the provider-aware account control in the native DSH composer. */
 export async function apply(ctx) {
@@ -2010,7 +2025,7 @@ export async function apply(ctx) {
   // would reintroduce the self-dependency deadlock above.
   const remote = ctx.get("remote.dockyard");
   const controller = new DockyardClientController(remote, t);
-  ctx.inject(["slots", "modelDirectories", "connection"], (scope) => {
+  ctx.inject(["slots", "modelDirectories", "remote.session", "connection"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
     const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
     scope.slots.inject("conversation.input.right", () => scope.slots.register({

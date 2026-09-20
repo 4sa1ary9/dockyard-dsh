@@ -39,7 +39,7 @@ var init_native_key_presets = __esm({
     NATIVE_KEY_PRESETS = Object.freeze([
       Object.freeze({
         id: "glm-coding-plan",
-        name: "GLM Coding Plan\uFF08\u667A\u8C31 BigModel\uFF09",
+        name: "GLM Coding Plan\uFF08\u667A\u8C31\uFF09",
         provider: "glm-coding-plan",
         baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
         api: "openai-completions",
@@ -69,7 +69,7 @@ var init_native_key_presets = __esm({
       }),
       Object.freeze({
         id: "qwen-coding-plan",
-        name: "ModelStudio Coding Plan\uFF08\u963F\u91CC\u4E91\u767E\u70BC\uFF09",
+        name: "ModelStudio\uFF08\u963F\u91CC\u767E\u70BC\uFF09",
         provider: "qwen-coding-plan",
         baseURL: "https://coding.dashscope.aliyuncs.com/v1",
         api: "openai-completions",
