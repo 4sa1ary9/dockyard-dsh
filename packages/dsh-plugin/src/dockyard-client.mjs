@@ -1339,6 +1339,73 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
 
 function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
   const busy = controlState.action !== null;
+  // Domestic coding plans are DSH-native API-key routes, not Dockyard OAuth
+  // accounts, so they get their own section here: the host declares the
+  // `llm-pi-ai` route and stores the key, and the models then show up in DSH's
+  // model picker. The list is secret-free — it reports whether a route and a
+  // key already exist, never the key itself.
+  const [presets, setPresets] = useState(null);
+  const [presetFailure, setPresetFailure] = useState(null);
+  const [presetNotice, setPresetNotice] = useState(null);
+  const [openPresetId, setOpenPresetId] = useState(null);
+  const [presetKey, setPresetKey] = useState("");
+  const [presetBusy, setPresetBusy] = useState(false);
+
+  useEffect(() => {
+    if (typeof remote?.nativeKeyPresets !== "function") {
+      setPresets([]);
+      return undefined;
+    }
+    let cancelled = false;
+    Promise.resolve(remote.nativeKeyPresets())
+      .then((response) => unwrapRemote(response, t))
+      .then((value) => {
+        if (cancelled) return;
+        setPresets(Array.isArray(value?.presets) ? value.presets : []);
+        setPresetFailure(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setPresets([]);
+        setPresetFailure(errorText(error, t));
+      });
+    return () => { cancelled = true; };
+  }, [remote, t]);
+
+  const reopenPresets = () => {
+    if (typeof remote?.nativeKeyPresets !== "function") return;
+    Promise.resolve(remote.nativeKeyPresets())
+      .then((response) => unwrapRemote(response, t))
+      .then((value) => setPresets(Array.isArray(value?.presets) ? value.presets : []))
+      .catch(() => {});
+  };
+
+  const importPreset = async (presetId) => {
+    setPresetBusy(true);
+    setPresetNotice(null);
+    try {
+      const key = presetKey.trim();
+      const result = unwrapRemote(await remote.nativeKeyImportPreset({
+        presetId,
+        ...(key.length > 0 ? { apiKey: key } : {}),
+      }), t);
+      const name = result?.preset?.name ?? presetId;
+      setPresetNotice({
+        error: false,
+        text: result?.credentialConfigured
+          ? text(t, "preset.imported", { name })
+          : text(t, "preset.importedNoKey", { name }),
+      });
+      setPresetKey("");
+      setOpenPresetId(null);
+      reopenPresets();
+    } catch (error) {
+      setPresetNotice({ error: true, text: errorText(error, t) });
+    } finally {
+      setPresetBusy(false);
+    }
+  };
+
   return h("div", {
     className: "dockyard-dsh-popup",
     role: "dialog",
@@ -1395,7 +1462,69 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
                 h("span", { className: "dockyard-dsh-provider-row-name" }, displayName),
                 h("span", { className: "dockyard-dsh-provider-row-meta" }, `${providerOverviewSummary(provider, t)}${modelCount ? ` · ${modelCount}` : ""}`)),
               h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, "›"));
-         })))));
+         })))),
+      h("div", { className: "dockyard-dsh-section" },
+        h("div", { className: "dockyard-dsh-section-title" },
+          h("span", null, text(t, "preset.title")),
+          h("span", { className: "dockyard-dsh-section-value" }, text(t, "preset.subtitle"))),
+        presets === null
+          ? h("div", { className: "dockyard-dsh-muted" }, text(t, "status.loading"))
+          : presets.length === 0
+            ? h("div", { className: "dockyard-dsh-muted" }, presetFailure ?? text(t, "preset.none"))
+            : h("div", { className: "dockyard-dsh-provider-list" }, presets.map((preset) => {
+              const open = openPresetId === preset.id;
+              const keyState = preset.credentialConfigured
+                ? text(t, "preset.keyReady")
+                : text(t, "preset.keyMissing");
+              const routeState = preset.declared
+                ? text(t, "preset.routeReady")
+                : text(t, "preset.routeMissing");
+              return h("div", { key: preset.id, className: "dockyard-dsh-key-form" },
+                h("button", {
+                  type: "button",
+                  className: "dockyard-dsh-provider-row",
+                  "data-current": open,
+                  "aria-expanded": open,
+                  onClick: () => {
+                    setPresetKey("");
+                    setOpenPresetId(open ? null : preset.id);
+                  },
+                  "aria-label": text(t, "preset.configure", { name: preset.name }),
+                },
+                  h("span", { className: "dockyard-dsh-provider-row-copy" },
+                    h("span", { className: "dockyard-dsh-provider-row-name" }, preset.name),
+                    h("span", { className: "dockyard-dsh-provider-row-meta" },
+                      `${keyState} · ${routeState} · ${text(t, "preset.modelCount", { count: preset.modelCount })}`)),
+                  h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, open ? "⌄" : "›")),
+                open
+                  ? h("div", { className: "dockyard-dsh-key-form-row" },
+                    h("input", {
+                      className: "dockyard-dsh-key-input",
+                      type: "password",
+                      value: presetKey,
+                      placeholder: text(t, "preset.pasteKey", { ref: preset.credentialRef }),
+                      autoComplete: "off",
+                      onChange: (event) => setPresetKey(event.target.value),
+                    }),
+                    h("button", {
+                      type: "button",
+                      className: "dockyard-dsh-key-save",
+                      disabled: presetBusy,
+                      onClick: () => { void importPreset(preset.id); },
+                    }, presetBusy ? text(t, "native.saving") : text(t, "preset.import")))
+                  : null,
+                open && preset.notice
+                  ? h("div", { className: "dockyard-dsh-key-notice" }, preset.notice)
+                  : null);
+            })),
+        presetNotice
+          ? h("div", {
+            className: "dockyard-dsh-status",
+            "data-error": Boolean(presetNotice.error),
+            "data-success": !presetNotice.error,
+            role: presetNotice.error ? "alert" : "status",
+          }, h("span", { className: "dockyard-dsh-status-copy" }, presetNotice.text))
+          : null));
 }
 
 function SubscriptionSettingsSection({ close, controller, remote, t }) {

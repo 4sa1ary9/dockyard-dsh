@@ -19155,6 +19155,19 @@ var DOCKYARD_LOCALES = Object.freeze({
     "subscription.modelPending": "\u6A21\u578B\u76EE\u5F55\u5F85\u52A0\u8F7D",
     "subscription.none": "\u6682\u672A\u53D1\u73B0\u53EF\u7528\u7684\u8BA2\u9605\u5382\u5546\u3002",
     "subscription.configure": "\u914D\u7F6E{provider}",
+    "preset.title": "\u56FD\u4EA7\u8BA2\u9605\u5957\u9910",
+    "preset.subtitle": "GLM \xB7 Kimi \xB7 ModelStudio",
+    "preset.none": "\u5F53\u524D DSH \u6CA1\u6709\u53EF\u5BFC\u5165\u7684\u56FD\u4EA7\u5957\u9910\u9884\u8BBE\u3002",
+    "preset.configure": "\u914D\u7F6E{name}",
+    "preset.keyReady": "Key \u5DF2\u914D\u7F6E",
+    "preset.keyMissing": "Key \u672A\u914D\u7F6E",
+    "preset.routeReady": "\u8DEF\u7531\u5DF2\u58F0\u660E",
+    "preset.routeMissing": "\u8DEF\u7531\u672A\u58F0\u660E",
+    "preset.modelCount": "{count} \u4E2A\u6A21\u578B",
+    "preset.pasteKey": "\u7C98\u8D34 {ref} \u7684 API Key",
+    "preset.import": "\u5BFC\u5165",
+    "preset.imported": "\u5DF2\u5BFC\u5165{name}\uFF0C\u6A21\u578B\u5DF2\u52A0\u5165\u6A21\u578B\u9009\u62E9\u5668\u3002",
+    "preset.importedNoKey": "\u5DF2\u58F0\u660E{name}\u8DEF\u7531\uFF0C\u4F46\u8FD8\u6CA1\u6709 Key\u2014\u2014\u586B\u5165\u540E\u5373\u53EF\u4F7F\u7528\u3002",
     "subscription.aria": "\u8BA2\u9605\u7BA1\u7406",
     "subscription.noAccountsOAuth": "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u70B9\u51FB\u201C\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u201D\u540E\u4F1A\u6253\u5F00 provider \u5B98\u65B9\u9A8C\u8BC1\u9875\u3002",
     "subscription.noAccountsScan": "\u8FD8\u6CA1\u6709\u8D26\u53F7\uFF1B\u8BF7\u5148\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u6216\u5B98\u65B9\u73AF\u5883\u5B8C\u6210\u767B\u5F55\uFF0C\u518D\u626B\u63CF\u672C\u673A\u767B\u5F55\u6001\u5E76\u6DFB\u52A0\u5019\u9009\u3002",
@@ -19351,6 +19364,19 @@ var DOCKYARD_LOCALES = Object.freeze({
     "subscription.modelPending": "Model catalog loading",
     "subscription.none": "No subscription providers are currently available.",
     "subscription.configure": "Configure {provider}",
+    "preset.title": "Domestic coding plans",
+    "preset.subtitle": "GLM \xB7 Kimi \xB7 ModelStudio",
+    "preset.none": "No domestic coding-plan presets are available in this DSH build.",
+    "preset.configure": "Configure {name}",
+    "preset.keyReady": "Key stored",
+    "preset.keyMissing": "No key yet",
+    "preset.routeReady": "route declared",
+    "preset.routeMissing": "route missing",
+    "preset.modelCount": "{count} models",
+    "preset.pasteKey": "Paste the {ref} API key",
+    "preset.import": "Import",
+    "preset.imported": "Imported {name}; its models are now in the model picker.",
+    "preset.importedNoKey": "Declared the {name} route; add a key to start using it.",
     "subscription.aria": "Subscription management",
     "subscription.noAccountsOAuth": "No accounts yet. Click \u201CLog in to add an account\u201D to open the provider's official verification page.",
     "subscription.noAccountsScan": "No accounts yet. Sign in through the official client or environment, then scan local login state and add a candidate.",
@@ -19554,7 +19580,7 @@ function keyRows(metadata, credentials, activeRef, t) {
   return rows;
 }
 var NativeKeyPoolController = class {
-  constructor(api, remote = null, t = null) {
+  constructor(api, remote2 = null, t = null) {
     __publicField(this, "api");
     __publicField(this, "store", (0, import_dsh_client_store.createSnapshotStore)({
       status: "idle",
@@ -19576,7 +19602,7 @@ var NativeKeyPoolController = class {
     }));
     __publicField(this, "generation", 0);
     this.api = api;
-    this.remote = remote;
+    this.remote = remote2;
     this.t = t;
   }
   operation(key, fallback) {
@@ -20326,7 +20352,7 @@ function healthLabel(status, t) {
   return status === "healthy" ? text(t, "health.healthy") : status === "degraded" ? text(t, "health.degraded") : status === "cooldown" ? text(t, "health.cooldown") : status === "expired" ? text(t, "health.expired") : status === "exhausted" ? text(t, "health.exhausted") : status ?? text(t, "health.unknown");
 }
 var DockyardClientController = class {
-  constructor(remote, t) {
+  constructor(remote2, t) {
     __publicField(this, "remote");
     __publicField(this, "store", (0, import_dsh_client_store2.createSnapshotStore)({
       snapshot: null,
@@ -20345,7 +20371,7 @@ var DockyardClientController = class {
     // generation so an in-flight poll RPC can no longer apply its stale result
     // over the cancelled/newer state.
     __publicField(this, "authGenerations", /* @__PURE__ */ new Map());
-    this.remote = remote;
+    this.remote = remote2;
     this.t = t;
   }
   setState(next) {
@@ -20664,7 +20690,7 @@ function normalizeDraftContextWindow(value) {
   const numeric = Number(String(value).replaceAll(",", "").trim());
   return Number.isSafeInteger(numeric) && numeric > 0 ? numeric : null;
 }
-function ContextWindowSection({ providerId, current, model, accountId = null, keyRef = null, remote, t }) {
+function ContextWindowSection({ providerId, current, model, accountId = null, keyRef = null, remote: remote2, t }) {
   const modelId = current?.model ?? null;
   const detected = modelContextWindow(model);
   const scope = {
@@ -20684,11 +20710,11 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
     setMode("auto");
     setDraft("");
     setMessage(null);
-    if (!modelId || typeof remote?.getContextWindowOverride !== "function") {
+    if (!modelId || typeof remote2?.getContextWindowOverride !== "function") {
       setState({ status: "ready", override: null, effectiveOverride: null, source: "auto" });
       return void 0;
     }
-    Promise.resolve(remote.getContextWindowOverride(scope)).then((response) => unwrapRemote(response, t)).then((value) => {
+    Promise.resolve(remote2.getContextWindowOverride(scope)).then((response) => unwrapRemote(response, t)).then((value) => {
       if (cancelled) return;
       const override = normalizeDraftContextWindow(value?.override);
       const effectiveOverride = normalizeDraftContextWindow(value?.effectiveOverride);
@@ -20708,7 +20734,7 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
     return () => {
       cancelled = true;
     };
-  }, [remote, providerId, modelId, accountId, keyRef]);
+  }, [remote2, providerId, modelId, accountId, keyRef]);
   if (!modelId) return null;
   const effective = state.effectiveOverride ?? detected;
   const modeValue = state.source === "inherited" && state.override === null ? "auto" : mode;
@@ -20718,14 +20744,14 @@ function ContextWindowSection({ providerId, current, model, accountId = null, ke
       setMessage({ error: true, text: text(t, "contextWindow.invalid") });
       return;
     }
-    if (typeof remote?.setContextWindowOverride !== "function") {
+    if (typeof remote2?.setContextWindowOverride !== "function") {
       setMessage({ error: true, text: text(t, "error.remoteNotMounted", { method: "setContextWindowOverride" }) });
       return;
     }
     setBusy(true);
     setMessage(null);
     try {
-      const saved = unwrapRemote(await remote.setContextWindowOverride({ ...scope, value }), t);
+      const saved = unwrapRemote(await remote2.setContextWindowOverride({ ...scope, value }), t);
       const override = normalizeDraftContextWindow(saved?.override);
       const effectiveOverride = normalizeDraftContextWindow(saved?.effectiveOverride);
       setState({
@@ -21041,7 +21067,7 @@ function NativeKeyCard({ entry, providerId, controller, busy, t }) {
     entry?.usage ? nativeQuotaView(entry, t) : null
   );
 }
-function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, remote, onClose, t }) {
+function NativeKeyPopup({ providerId, native, directory, directoryState, nativeController, remote: remote2, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const [keyDraft, setKeyDraft] = useState("");
   const [labelDraft, setLabelDraft] = useState("");
@@ -21170,7 +21196,7 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
         current,
         model,
         keyRef: activeKeyRef,
-        remote,
+        remote: remote2,
         t
       }),
       h(
@@ -21197,6 +21223,59 @@ function NativeKeyPopup({ providerId, native, directory, directoryState, nativeC
 }
 function SubscriptionOverviewPopup({ providers, directoryState, controlState, controller, selectedProviderId, onSelect, onClose, t }) {
   const busy = controlState.action !== null;
+  const [presets, setPresets] = useState(null);
+  const [presetFailure, setPresetFailure] = useState(null);
+  const [presetNotice, setPresetNotice] = useState(null);
+  const [openPresetId, setOpenPresetId] = useState(null);
+  const [presetKey, setPresetKey] = useState("");
+  const [presetBusy, setPresetBusy] = useState(false);
+  useEffect(() => {
+    if (typeof remote?.nativeKeyPresets !== "function") {
+      setPresets([]);
+      return void 0;
+    }
+    let cancelled = false;
+    Promise.resolve(remote.nativeKeyPresets()).then((response) => unwrapRemote(response, t)).then((value) => {
+      if (cancelled) return;
+      setPresets(Array.isArray(value?.presets) ? value.presets : []);
+      setPresetFailure(null);
+    }).catch((error61) => {
+      if (cancelled) return;
+      setPresets([]);
+      setPresetFailure(errorText(error61, t));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [remote, t]);
+  const reopenPresets = () => {
+    if (typeof remote?.nativeKeyPresets !== "function") return;
+    Promise.resolve(remote.nativeKeyPresets()).then((response) => unwrapRemote(response, t)).then((value) => setPresets(Array.isArray(value?.presets) ? value.presets : [])).catch(() => {
+    });
+  };
+  const importPreset = async (presetId) => {
+    setPresetBusy(true);
+    setPresetNotice(null);
+    try {
+      const key = presetKey.trim();
+      const result = unwrapRemote(await remote.nativeKeyImportPreset({
+        presetId,
+        ...key.length > 0 ? { apiKey: key } : {}
+      }), t);
+      const name = result?.preset?.name ?? presetId;
+      setPresetNotice({
+        error: false,
+        text: result?.credentialConfigured ? text(t, "preset.imported", { name }) : text(t, "preset.importedNoKey", { name })
+      });
+      setPresetKey("");
+      setOpenPresetId(null);
+      reopenPresets();
+    } catch (error61) {
+      setPresetNotice({ error: true, text: errorText(error61, t) });
+    } finally {
+      setPresetBusy(false);
+    }
+  };
   return h(
     "div",
     {
@@ -21274,10 +21353,81 @@ function SubscriptionOverviewPopup({ providers, directoryState, controlState, co
           );
         }))
       )
+    ),
+    h(
+      "div",
+      { className: "dockyard-dsh-section" },
+      h(
+        "div",
+        { className: "dockyard-dsh-section-title" },
+        h("span", null, text(t, "preset.title")),
+        h("span", { className: "dockyard-dsh-section-value" }, text(t, "preset.subtitle"))
+      ),
+      presets === null ? h("div", { className: "dockyard-dsh-muted" }, text(t, "status.loading")) : presets.length === 0 ? h("div", { className: "dockyard-dsh-muted" }, presetFailure ?? text(t, "preset.none")) : h("div", { className: "dockyard-dsh-provider-list" }, presets.map((preset) => {
+        const open2 = openPresetId === preset.id;
+        const keyState = preset.credentialConfigured ? text(t, "preset.keyReady") : text(t, "preset.keyMissing");
+        const routeState = preset.declared ? text(t, "preset.routeReady") : text(t, "preset.routeMissing");
+        return h(
+          "div",
+          { key: preset.id, className: "dockyard-dsh-key-form" },
+          h(
+            "button",
+            {
+              type: "button",
+              className: "dockyard-dsh-provider-row",
+              "data-current": open2,
+              "aria-expanded": open2,
+              onClick: () => {
+                setPresetKey("");
+                setOpenPresetId(open2 ? null : preset.id);
+              },
+              "aria-label": text(t, "preset.configure", { name: preset.name })
+            },
+            h(
+              "span",
+              { className: "dockyard-dsh-provider-row-copy" },
+              h("span", { className: "dockyard-dsh-provider-row-name" }, preset.name),
+              h(
+                "span",
+                { className: "dockyard-dsh-provider-row-meta" },
+                `${keyState} \xB7 ${routeState} \xB7 ${text(t, "preset.modelCount", { count: preset.modelCount })}`
+              )
+            ),
+            h("span", { className: "dockyard-dsh-provider-row-arrow", "aria-hidden": true }, open2 ? "\u2304" : "\u203A")
+          ),
+          open2 ? h(
+            "div",
+            { className: "dockyard-dsh-key-form-row" },
+            h("input", {
+              className: "dockyard-dsh-key-input",
+              type: "password",
+              value: presetKey,
+              placeholder: text(t, "preset.pasteKey", { ref: preset.credentialRef }),
+              autoComplete: "off",
+              onChange: (event) => setPresetKey(event.target.value)
+            }),
+            h("button", {
+              type: "button",
+              className: "dockyard-dsh-key-save",
+              disabled: presetBusy,
+              onClick: () => {
+                void importPreset(preset.id);
+              }
+            }, presetBusy ? text(t, "native.saving") : text(t, "preset.import"))
+          ) : null,
+          open2 && preset.notice ? h("div", { className: "dockyard-dsh-key-notice" }, preset.notice) : null
+        );
+      })),
+      presetNotice ? h("div", {
+        className: "dockyard-dsh-status",
+        "data-error": Boolean(presetNotice.error),
+        "data-success": !presetNotice.error,
+        role: presetNotice.error ? "alert" : "status"
+      }, h("span", { className: "dockyard-dsh-status-copy" }, presetNotice.text)) : null
     )
   );
 }
-function SubscriptionSettingsSection({ close, controller, remote, t }) {
+function SubscriptionSettingsSection({ close, controller, remote: remote2, t }) {
   const controlState = useSnapshot(controller.store);
   const [selectedProviderId, setSelectedProviderId] = useState(null);
   const providers = controlState.snapshot?.providers ?? [];
@@ -21307,7 +21457,7 @@ function SubscriptionSettingsSection({ close, controller, remote, t }) {
       directoryState: null,
       controlState,
       controller,
-      remote,
+      remote: remote2,
       onOpenOverview: () => setSelectedProviderId(null),
       onClose: close,
       t
@@ -21323,7 +21473,7 @@ function SubscriptionSettingsSection({ close, controller, remote, t }) {
     })
   );
 }
-function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, remote, onOpenOverview, onClose, t }) {
+function DockyardPopup({ providerId, provider, directory, directoryState, controlState, controller, remote: remote2, onOpenOverview, onClose, t }) {
   const [tierBusy, setTierBusy] = useState(false);
   const { current, group, model, efforts } = modelDetails(directoryState, providerId);
   const modelLabel = model?.name ?? current?.model ?? text(t, "title.noModel");
@@ -21425,7 +21575,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
         current,
         model,
         accountId: contextAccountId,
-        remote,
+        remote: remote2,
         t
       }),
       h(
@@ -21451,7 +21601,7 @@ function DockyardPopup({ providerId, provider, directory, directoryState, contro
     )
   );
 }
-function DockyardAccountControl({ directory, modelDirectory, controller, nativeController, remote, t }) {
+function DockyardAccountControl({ directory, modelDirectory, controller, nativeController, remote: remote2, t }) {
   const directoryState = useSnapshot(directory);
   const controlState = useSnapshot(controller.store);
   const nativeState = useSnapshot(nativeController.store);
@@ -21683,7 +21833,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directoryState,
       controlState,
       controller,
-      remote,
+      remote: remote2,
       t,
       onOpenOverview: openSubscriptionOverview,
       onClose: () => setOpen(false)
@@ -21694,7 +21844,7 @@ function DockyardAccountControl({ directory, modelDirectory, controller, nativeC
       directory: modelDirectory,
       directoryState,
       nativeController,
-      remote,
+      remote: remote2,
       onClose: () => setOpen(false)
     }) : null
   );
@@ -21706,11 +21856,11 @@ async function apply(ctx) {
   const disposeLocale = ctx.locale.register(DOCKYARD_LOCALE_NS, DOCKYARD_LOCALES);
   const t = ctx.locale.bind(DOCKYARD_LOCALE_NS);
   const disposeRemote = await ctx.remote.$mount(TYPERT_REMOTE);
-  const remote = ctx.get("remote.dockyard");
-  const controller = new DockyardClientController(remote, t);
+  const remote2 = ctx.get("remote.dockyard");
+  const controller = new DockyardClientController(remote2, t);
   ctx.inject(["slots", "modelDirectories", "connection"], (scope) => {
     const connection = scope.connection ?? ctx.get("connection");
-    const nativeController = new NativeKeyPoolController(connection?.api, remote, t);
+    const nativeController = new NativeKeyPoolController(connection?.api, remote2, t);
     scope.slots.inject("conversation.input.right", () => scope.slots.register({
       name: "conversation.input.right",
       id: "dockyard-account-control",
@@ -21723,7 +21873,7 @@ async function apply(ctx) {
           modelDirectory,
           controller,
           nativeController,
-          remote
+          remote: remote2
         };
       }
     }, DockyardAccountControl));
@@ -21733,7 +21883,7 @@ async function apply(ctx) {
       order: 15,
       label: () => text(t, "settings.subscriptionSection"),
       locale: DOCKYARD_LOCALE_NS,
-      inject: () => ({ controller, remote })
+      inject: () => ({ controller, remote: remote2 })
     }, SubscriptionSettingsSection));
   });
   return async () => {
