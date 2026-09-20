@@ -135,6 +135,7 @@ export class DockyardDshService {
     refreshIntervalMs = numericOption(process.env.DOCKYARD_DSH_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_INTERVAL_MS),
     autoRefresh = true,
     openBrowser = openDefaultBrowser,
+    nativeKeyPool = null,
     logger = console,
   } = {}) {
     if (!runtime) throw new Error("Dockyard DSH service requires a runtime");
@@ -142,8 +143,37 @@ export class DockyardDshService {
     this.refreshIntervalMs = refreshIntervalMs;
     this.autoRefresh = autoRefresh;
     this.openBrowser = openBrowser;
+    this.nativeKeyPool = nativeKeyPool;
     this.logger = logger;
     this.ready = runtime.init();
+  }
+
+  /**
+   * The native Key pool is started after this service, so the DSH plugin entry
+   * hands it over once the Cordis fiber is active instead of at construction.
+   */
+  setNativeKeyPool(nativeKeyPool) {
+    this.nativeKeyPool = nativeKeyPool ?? null;
+    return this;
+  }
+
+  #requireNativeKeyPool() {
+    if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool 尚未挂载");
+    return this.nativeKeyPool;
+  }
+
+  /** Secret-free list of the domestic coding-plan presets Dockyard can import. */
+  async keyPresets() {
+    if (!this.nativeKeyPool) {
+      const { NATIVE_KEY_PRESETS, nativeKeyPresetView } = await import("./native-key-presets.mjs");
+      return { presets: NATIVE_KEY_PRESETS.map((preset) => ({ ...nativeKeyPresetView(preset), declared: false, credentialConfigured: false })) };
+    }
+    return this.nativeKeyPool.listKeyPresets();
+  }
+
+  /** Import one preset: store its Key in DSH and declare its `llm-pi-ai` route. */
+  async importKeyPreset(presetId, options = {}) {
+    return this.#requireNativeKeyPool().importKeyPreset(presetId, options);
   }
 
   async start() {
@@ -419,6 +449,7 @@ export class DockyardDshService {
       "/dockyard use <provider> <accountId>      手动指定账号",
       "/dockyard remove <provider> <accountId>   从账号池移除账号并清理本机 Keychain 引用",
       "/dockyard cancel <provider> <sessionId>  取消 OAuth 登录",
+      "/dockyard import [预设] [API Key]        导入国产订阅套餐（GLM Coding Plan / Kimi Code / ModelStudio）",
       `当前 providers：${providers.length ? providers.join("、") : "暂无"}`,
     ].join("\n");
   }
@@ -482,7 +513,7 @@ export function createDockyardCommand(service) {
   return {
     name: "dockyard",
     description: "Manage Dockyard DSH providers, OAuth accounts, quotas, models, and account selection",
-    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel" },
+    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel | import" },
     handler: async ({ rawInput, signal }) => {
       if (signal?.aborted) return commandError("Dockyard 命令已取消。");
       const [verb = "help", ...args] = commandTokens(rawInput);
@@ -575,6 +606,36 @@ export function createDockyardCommand(service) {
             if (!args[0] || !args[1]) return commandError("用法：/dockyard cancel <provider> <sessionId>");
             const result = await service.cancelAuthorization(args[0], args[1]);
             return commandSuccess(`OAuth 会话 ${result.sessionId}：${result.status}`);
+          }
+          // Domestic coding plans that DSH itself serves as `llm-pi-ai` routes.
+          // Listed without any key so a bare `/dockyard import` is a safe read.
+          case "import": {
+            if (!args[0]) {
+              const { presets } = await service.keyPresets();
+              const lines = ["可导入的国产订阅套餐（写入 DSH 凭据库 + 声明 llm-pi-ai 路由）："];
+              for (const preset of presets) {
+                lines.push(`- ${preset.id}：${preset.name}`);
+                lines.push(`  端点 ${preset.baseURL}；模型 ${preset.modelCount} 个；路由${preset.declared ? "已声明" : "未声明"}；Key ${preset.credentialConfigured ? "已配置" : "未配置"}`);
+                if (preset.notice) lines.push(`  提示：${preset.notice}`);
+              }
+              lines.push("");
+              lines.push("用法：/dockyard import <预设 id> [API Key]");
+              lines.push("不带 Key 时复用 DSH 凭据库里已有的同名引用（例如 dsh-AuthInOne 写过的 Key）。");
+              return commandSuccess(lines.join("\n"));
+            }
+            const presetId = args[0];
+            const apiKey = args.slice(1).join(" ").trim();
+            const result = await service.importKeyPreset(presetId, { apiKey });
+            const lines = [
+              `已导入 ${result.preset.name}（${result.preset.id}）`,
+              `provider 路由：${result.providerId}`,
+              `凭据引用：${result.credentialRef}${result.credentialWritten ? "（本次已写入 Key）" : ""}`,
+              `Key 状态：${result.credentialConfigured ? "已配置" : "未配置"}`,
+              `路由状态：${result.declared ? `已声明（${result.declaration}）` : `未声明（${result.declaration}）`}`,
+            ];
+            if (!result.credentialConfigured) lines.push(`补 Key：/dockyard import ${result.preset.id} <API Key>`);
+            lines.push("在「设置 → 模型」的模型选择器里选择该 provider 的模型即可使用。");
+            return commandSuccess(lines.join("\n"));
           }
           default:
             return commandError(`未知 Dockyard 子命令：${verb}\n\n${service.helpText()}`);

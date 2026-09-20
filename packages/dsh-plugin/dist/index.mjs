@@ -8,6 +8,88 @@ var __export = (target, all) => {
     __defProp(target, name2, { get: all[name2], enumerable: true });
 };
 
+// packages/dsh-plugin/src/native-key-presets.mjs
+var native_key_presets_exports = {};
+__export(native_key_presets_exports, {
+  NATIVE_KEY_PRESETS: () => NATIVE_KEY_PRESETS,
+  nativeKeyPreset: () => nativeKeyPreset,
+  nativeKeyPresetView: () => nativeKeyPresetView
+});
+function nativeKeyPreset(presetId) {
+  const id = typeof presetId === "string" ? presetId.trim().toLowerCase() : "";
+  if (id.length === 0) return null;
+  return NATIVE_KEY_PRESETS.find((preset) => preset.id === id) ?? NATIVE_KEY_PRESETS.find((preset) => preset.provider === id) ?? null;
+}
+function nativeKeyPresetView(preset) {
+  return {
+    id: preset.id,
+    name: preset.name,
+    provider: preset.provider,
+    baseURL: preset.baseURL,
+    api: preset.api,
+    modelCount: preset.models.length,
+    models: preset.models.map((model) => model.id),
+    sourceUrl: preset.sourceUrl,
+    notice: preset.notice
+  };
+}
+var NATIVE_KEY_PRESETS;
+var init_native_key_presets = __esm({
+  "packages/dsh-plugin/src/native-key-presets.mjs"() {
+    NATIVE_KEY_PRESETS = Object.freeze([
+      Object.freeze({
+        id: "glm-coding-plan",
+        name: "GLM Coding Plan\uFF08\u667A\u8C31 BigModel\uFF09",
+        provider: "glm-coding-plan",
+        baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+        api: "openai-completions",
+        credentialRef: "GLM_CODING_PLAN_API_KEY",
+        sourceUrl: "https://docs.bigmodel.cn/cn/coding-plan/quick-start",
+        notice: "\u5382\u5546\u628A Coding Plan \u9650\u5B9A\u5728\u53D7\u652F\u6301\u7684\u7F16\u7A0B\u5DE5\u5177\u4E0E\u4EA7\u54C1\u73AF\u5883\uFF0C\u63A5\u5165\u524D\u8BF7\u786E\u8BA4\u5F53\u524D\u7528\u9014\u7B26\u5408\u89C4\u5219\u3002",
+        models: Object.freeze([
+          Object.freeze({ id: "glm-5.2", name: "GLM-5.2" }),
+          Object.freeze({ id: "glm-5-turbo", name: "GLM-5-Turbo" }),
+          Object.freeze({ id: "glm-4.7", name: "GLM-4.7" })
+        ])
+      }),
+      Object.freeze({
+        id: "kimi-code-plan",
+        name: "Kimi Code\uFF08\u6708\u4E4B\u6697\u9762\uFF09",
+        provider: "kimi-code-plan",
+        baseURL: "https://api.kimi.com/coding/v1",
+        api: "openai-completions",
+        credentialRef: "KIMI_CODE_PLAN_API_KEY",
+        sourceUrl: "https://www.kimi.com/help/kimi-code/membership-guide",
+        notice: "\u4F7F\u7528 Kimi Code \u8BA2\u9605\u914D\u5957\u7684 API Key\uFF1B\u8FD9\u4E0D\u662F Kimi \u5F00\u653E\u5E73\u53F0\u7684\u901A\u7528 API Key\u3002",
+        models: Object.freeze([
+          Object.freeze({ id: "k3", name: "K3" }),
+          Object.freeze({ id: "kimi-for-coding", name: "Kimi for Coding" }),
+          Object.freeze({ id: "kimi-for-coding-highspeed", name: "Kimi for Coding HighSpeed" })
+        ])
+      }),
+      Object.freeze({
+        id: "qwen-coding-plan",
+        name: "ModelStudio Coding Plan\uFF08\u963F\u91CC\u4E91\u767E\u70BC\uFF09",
+        provider: "qwen-coding-plan",
+        baseURL: "https://coding.dashscope.aliyuncs.com/v1",
+        api: "openai-completions",
+        credentialRef: "QWEN_CODING_PLAN_API_KEY",
+        sourceUrl: "https://help.aliyun.com/zh/model-studio/coding-plan",
+        notice: "\u4E13\u7528 Key \u9762\u5411\u4EA4\u4E92\u5F0F\u7F16\u7A0B\u5DE5\u5177\uFF0C\u5382\u5546\u7981\u6B62\u81EA\u5B9A\u4E49\u540E\u7AEF\u3001\u81EA\u52A8\u5316\u811A\u672C\u548C\u975E\u4EA4\u4E92\u6279\u5904\u7406\u3002",
+        models: Object.freeze([
+          Object.freeze({ id: "qwen3.7-plus", name: "Qwen 3.7 Plus" }),
+          Object.freeze({ id: "qwen3.6-plus", name: "Qwen 3.6 Plus" }),
+          Object.freeze({ id: "qwen3-coder-next", name: "Qwen 3 Coder Next" }),
+          Object.freeze({ id: "qwen3-coder-plus", name: "Qwen 3 Coder Plus" }),
+          Object.freeze({ id: "kimi-k2.5", name: "Kimi K2.5" }),
+          Object.freeze({ id: "glm-5", name: "GLM-5" }),
+          Object.freeze({ id: "MiniMax-M2.5", name: "MiniMax M2.5" })
+        ])
+      })
+    ]);
+  }
+});
+
 // packages/dsh-plugin/src/dockyard-remote-host.mjs
 var dockyard_remote_host_exports = {};
 __export(dockyard_remote_host_exports, {
@@ -52,6 +134,8 @@ function markRemoteMethods() {
     "nativeKeyRegister",
     "nativeKeyUnregister",
     "nativeKeySetPolicy",
+    "nativeKeyPresets",
+    "nativeKeyImportPreset",
     "getContextWindowOverride",
     "setContextWindowOverride"
   ]) {
@@ -146,6 +230,19 @@ var init_dockyard_remote_host = __esm({
       async nativeKeySetPolicy(request = {}) {
         if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool \u5C1A\u672A\u6302\u8F7D");
         return this.nativeKeyPool.setPolicy(request.providerId, request.policy);
+      }
+      // Domestic coding-plan presets. The Key rides only through the host-side
+      // credential write; the browser receives the secret-free status envelope.
+      async nativeKeyPresets() {
+        if (!this.nativeKeyPool) return { presets: [] };
+        return this.nativeKeyPool.listKeyPresets();
+      }
+      async nativeKeyImportPreset(request = {}) {
+        if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool \u5C1A\u672A\u6302\u8F7D");
+        return this.nativeKeyPool.importKeyPreset(request.presetId, {
+          apiKey: request.apiKey ?? "",
+          label: request.label ?? ""
+        });
       }
       async getContextWindowOverride(request = {}) {
         return this.dockyard.getContextWindowOverride(request);
@@ -11602,6 +11699,7 @@ var DockyardDshService = class {
     refreshIntervalMs = numericOption2(process.env.DOCKYARD_DSH_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_INTERVAL_MS),
     autoRefresh = true,
     openBrowser = openDefaultBrowser,
+    nativeKeyPool = null,
     logger = console
   } = {}) {
     if (!runtime) throw new Error("Dockyard DSH service requires a runtime");
@@ -11609,8 +11707,33 @@ var DockyardDshService = class {
     this.refreshIntervalMs = refreshIntervalMs;
     this.autoRefresh = autoRefresh;
     this.openBrowser = openBrowser;
+    this.nativeKeyPool = nativeKeyPool;
     this.logger = logger;
     this.ready = runtime.init();
+  }
+  /**
+   * The native Key pool is started after this service, so the DSH plugin entry
+   * hands it over once the Cordis fiber is active instead of at construction.
+   */
+  setNativeKeyPool(nativeKeyPool) {
+    this.nativeKeyPool = nativeKeyPool ?? null;
+    return this;
+  }
+  #requireNativeKeyPool() {
+    if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool \u5C1A\u672A\u6302\u8F7D");
+    return this.nativeKeyPool;
+  }
+  /** Secret-free list of the domestic coding-plan presets Dockyard can import. */
+  async keyPresets() {
+    if (!this.nativeKeyPool) {
+      const { NATIVE_KEY_PRESETS: NATIVE_KEY_PRESETS2, nativeKeyPresetView: nativeKeyPresetView2 } = await Promise.resolve().then(() => (init_native_key_presets(), native_key_presets_exports));
+      return { presets: NATIVE_KEY_PRESETS2.map((preset) => ({ ...nativeKeyPresetView2(preset), declared: false, credentialConfigured: false })) };
+    }
+    return this.nativeKeyPool.listKeyPresets();
+  }
+  /** Import one preset: store its Key in DSH and declare its `llm-pi-ai` route. */
+  async importKeyPreset(presetId, options = {}) {
+    return this.#requireNativeKeyPool().importKeyPreset(presetId, options);
   }
   async start() {
     await this.ready;
@@ -11857,6 +11980,7 @@ var DockyardDshService = class {
       "/dockyard use <provider> <accountId>      \u624B\u52A8\u6307\u5B9A\u8D26\u53F7",
       "/dockyard remove <provider> <accountId>   \u4ECE\u8D26\u53F7\u6C60\u79FB\u9664\u8D26\u53F7\u5E76\u6E05\u7406\u672C\u673A Keychain \u5F15\u7528",
       "/dockyard cancel <provider> <sessionId>  \u53D6\u6D88 OAuth \u767B\u5F55",
+      "/dockyard import [\u9884\u8BBE] [API Key]        \u5BFC\u5165\u56FD\u4EA7\u8BA2\u9605\u5957\u9910\uFF08GLM Coding Plan / Kimi Code / ModelStudio\uFF09",
       `\u5F53\u524D providers\uFF1A${providers.length ? providers.join("\u3001") : "\u6682\u65E0"}`
     ].join("\n");
   }
@@ -11907,7 +12031,7 @@ function createDockyardCommand(service) {
   return {
     name: "dockyard",
     description: "Manage Dockyard DSH providers, OAuth accounts, quotas, models, and account selection",
-    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel" },
+    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel | import" },
     handler: async ({ rawInput, signal }) => {
       if (signal?.aborted) return commandError("Dockyard \u547D\u4EE4\u5DF2\u53D6\u6D88\u3002");
       const [verb = "help", ...args] = commandTokens(rawInput);
@@ -12000,6 +12124,36 @@ ${providerName(provider.manifest)} [${provider.providerId}]`);
             if (!args[0] || !args[1]) return commandError("\u7528\u6CD5\uFF1A/dockyard cancel <provider> <sessionId>");
             const result = await service.cancelAuthorization(args[0], args[1]);
             return commandSuccess(`OAuth \u4F1A\u8BDD ${result.sessionId}\uFF1A${result.status}`);
+          }
+          // Domestic coding plans that DSH itself serves as `llm-pi-ai` routes.
+          // Listed without any key so a bare `/dockyard import` is a safe read.
+          case "import": {
+            if (!args[0]) {
+              const { presets } = await service.keyPresets();
+              const lines2 = ["\u53EF\u5BFC\u5165\u7684\u56FD\u4EA7\u8BA2\u9605\u5957\u9910\uFF08\u5199\u5165 DSH \u51ED\u636E\u5E93 + \u58F0\u660E llm-pi-ai \u8DEF\u7531\uFF09\uFF1A"];
+              for (const preset of presets) {
+                lines2.push(`- ${preset.id}\uFF1A${preset.name}`);
+                lines2.push(`  \u7AEF\u70B9 ${preset.baseURL}\uFF1B\u6A21\u578B ${preset.modelCount} \u4E2A\uFF1B\u8DEF\u7531${preset.declared ? "\u5DF2\u58F0\u660E" : "\u672A\u58F0\u660E"}\uFF1BKey ${preset.credentialConfigured ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}`);
+                if (preset.notice) lines2.push(`  \u63D0\u793A\uFF1A${preset.notice}`);
+              }
+              lines2.push("");
+              lines2.push("\u7528\u6CD5\uFF1A/dockyard import <\u9884\u8BBE id> [API Key]");
+              lines2.push("\u4E0D\u5E26 Key \u65F6\u590D\u7528 DSH \u51ED\u636E\u5E93\u91CC\u5DF2\u6709\u7684\u540C\u540D\u5F15\u7528\uFF08\u4F8B\u5982 dsh-AuthInOne \u5199\u8FC7\u7684 Key\uFF09\u3002");
+              return commandSuccess(lines2.join("\n"));
+            }
+            const presetId = args[0];
+            const apiKey = args.slice(1).join(" ").trim();
+            const result = await service.importKeyPreset(presetId, { apiKey });
+            const lines = [
+              `\u5DF2\u5BFC\u5165 ${result.preset.name}\uFF08${result.preset.id}\uFF09`,
+              `provider \u8DEF\u7531\uFF1A${result.providerId}`,
+              `\u51ED\u636E\u5F15\u7528\uFF1A${result.credentialRef}${result.credentialWritten ? "\uFF08\u672C\u6B21\u5DF2\u5199\u5165 Key\uFF09" : ""}`,
+              `Key \u72B6\u6001\uFF1A${result.credentialConfigured ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}`,
+              `\u8DEF\u7531\u72B6\u6001\uFF1A${result.declared ? `\u5DF2\u58F0\u660E\uFF08${result.declaration}\uFF09` : `\u672A\u58F0\u660E\uFF08${result.declaration}\uFF09`}`
+            ];
+            if (!result.credentialConfigured) lines.push(`\u8865 Key\uFF1A/dockyard import ${result.preset.id} <API Key>`);
+            lines.push("\u5728\u300C\u8BBE\u7F6E \u2192 \u6A21\u578B\u300D\u7684\u6A21\u578B\u9009\u62E9\u5668\u91CC\u9009\u62E9\u8BE5 provider \u7684\u6A21\u578B\u5373\u53EF\u4F7F\u7528\u3002");
+            return commandSuccess(lines.join("\n"));
           }
           default:
             return commandError(`\u672A\u77E5 Dockyard \u5B50\u547D\u4EE4\uFF1A${verb}
@@ -12343,6 +12497,7 @@ function usageModuleFor(providerId) {
 }
 
 // packages/dsh-plugin/src/native-key-pool-host.mjs
+init_native_key_presets();
 var POLICIES = /* @__PURE__ */ new Set(["manual", "round_robin", "failover"]);
 var PATCH_MARK = Symbol("dockyard-native-key-pool");
 var VISIBLE_STREAM_CHUNKS = /* @__PURE__ */ new Set(["text-delta", "reasoning-delta", "tool-call-delta"]);
@@ -12637,6 +12792,99 @@ var NativeKeyPoolHost = class {
     this.cursors.delete(providerId);
     await this.saveState();
     return this.status(providerId);
+  }
+  /** One `llm-pi-ai` provider profile from the live settings document, if declared. */
+  nativeProfile(providerId) {
+    try {
+      if (typeof this.settings?.get !== "function") return null;
+      const namespace = this.settings.get("llm-pi-ai");
+      const profile = namespace && typeof namespace === "object" ? namespace.providers?.[providerId] : null;
+      return profile && typeof profile === "object" ? profile : null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Declare the preset's `llm-pi-ai` route when the profile does not have one.
+   *
+   * `settings.update` merges plain objects recursively, so writing one entry
+   * under `providers` never touches the routes the user already configured. An
+   * existing profile is left exactly as it is — it may carry a different
+   * endpoint, model list, or credential reference this import has no business
+   * rewriting.
+   */
+  async declarePresetProfile(preset) {
+    if (this.nativeProfile(preset.provider)) {
+      return { declared: true, written: false, reason: "already-declared" };
+    }
+    if (typeof this.settings?.update !== "function") {
+      return { declared: false, written: false, reason: "settings-read-only" };
+    }
+    await this.settings.update("llm-pi-ai", {
+      providers: {
+        [preset.provider]: {
+          displayName: preset.name,
+          apiKeyEnv: preset.credentialRef,
+          api: preset.api,
+          baseURL: preset.baseURL,
+          models: preset.models.map((model) => ({ ...model }))
+        }
+      }
+    });
+    return { declared: true, written: true, reason: "written" };
+  }
+  /** Secret-free preset list plus whether each route and Key already exist. */
+  async listKeyPresets() {
+    await this.readyPromise;
+    this.resolveServices();
+    const presets = [];
+    for (const preset of NATIVE_KEY_PRESETS) {
+      const profile = this.nativeProfile(preset.provider);
+      const credential = await this.credentialInfo(preset.credentialRef);
+      presets.push({
+        ...nativeKeyPresetView(preset),
+        credentialRef: preset.credentialRef,
+        credentialConfigured: credential.configured === true,
+        declared: profile !== null
+      });
+    }
+    return { presets };
+  }
+  /**
+   * Import one domestic coding-plan preset into DSH.
+   *
+   * Either half may already exist: a key the user stored earlier (or that
+   * `dsh-AuthInOne` wrote under the same reference) is reused when no key is
+   * supplied, and an already-declared route keeps its own profile. The Key
+   * itself only ever travels through `credentials.set`.
+   */
+  async importKeyPreset(presetId, { apiKey = "", label = "" } = {}) {
+    await this.readyPromise;
+    this.resolveServices();
+    const preset = nativeKeyPreset(presetId);
+    if (!preset) throw new Error(`\u672A\u77E5\u7684\u56FD\u4EA7\u5957\u9910\u9884\u8BBE\uFF1A${String(presetId ?? "")}`);
+    const key = text2(apiKey);
+    let credentialWritten = false;
+    if (key) {
+      if (typeof this.credentials?.set !== "function") {
+        throw new Error("\u5F53\u524D DSH \u672A\u63D0\u4F9B\u53EF\u5199\u5165\u7684\u51ED\u636E\u670D\u52A1\uFF0C\u65E0\u6CD5\u4FDD\u5B58 API Key");
+      }
+      await this.credentials.set(preset.credentialRef, key);
+      credentialWritten = true;
+    }
+    const declaration = await this.declarePresetProfile(preset);
+    const status = await this.register(preset.provider, preset.credentialRef, text2(label) ?? preset.name);
+    const credential = await this.credentialInfo(preset.credentialRef);
+    return {
+      preset: nativeKeyPresetView(preset),
+      providerId: preset.provider,
+      credentialRef: preset.credentialRef,
+      credentialWritten,
+      credentialConfigured: credential.configured === true,
+      declared: declaration.declared,
+      declaration: declaration.reason,
+      status
+    };
   }
   async credentialInfo(ref) {
     try {
@@ -12964,6 +13212,7 @@ function apply(ctx, config = {}) {
         logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
         contextWindowOverrides: runtime.contextWindowOverrides
       });
+      service.setNativeKeyPool?.(nativeKeyPool);
       const nativeKeyPoolReady = nativeKeyPool.start();
       void nativeKeyPoolReady.catch((error) => {
         contextLogger(ctx, "dockyard-dsh").warn?.(error);

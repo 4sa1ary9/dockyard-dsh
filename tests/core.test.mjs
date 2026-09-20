@@ -875,6 +875,54 @@ test("DSH native service exposes live account, quota, model, and OAuth commands"
   await service.dispose();
 });
 
+test("DSH native command lists and imports a domestic coding-plan preset", async () => {
+  const runtime = createCommandRuntime();
+  const calls = [];
+  const preset = {
+    id: "glm-coding-plan",
+    name: "GLM Coding Plan（智谱 BigModel）",
+    provider: "glm-coding-plan",
+    baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+    modelCount: 3,
+    declared: false,
+    credentialConfigured: false,
+    credentialRef: "GLM_CODING_PLAN_API_KEY",
+    notice: "厂商把 Coding Plan 限定在受支持的编程工具与产品环境。",
+  };
+  const nativeKeyPool = {
+    async listKeyPresets() {
+      return { presets: [preset] };
+    },
+    async importKeyPreset(presetId, options) {
+      calls.push([presetId, options]);
+      return {
+        preset: { id: presetId, name: preset.name },
+        providerId: presetId,
+        credentialRef: "GLM_CODING_PLAN_API_KEY",
+        credentialWritten: Boolean(options.apiKey),
+        credentialConfigured: true,
+        declared: true,
+        declaration: "written",
+      };
+    },
+  };
+  const service = new DockyardDshService({ runtime, autoRefresh: false, nativeKeyPool });
+  const command = createDockyardCommand(service);
+  const signal = new AbortController().signal;
+  const invoke = (rawInput) => command.handler({ rawInput, signal });
+
+  const listed = await invoke("import");
+  assert.match(listed.text, /glm-coding-plan/);
+  assert.match(listed.text, /未声明/);
+  assert.match(listed.text, /用法：\/dockyard import <预设 id> \[API Key\]/);
+
+  const imported = await invoke("import glm-coding-plan bigmodel-secret");
+  assert.deepEqual(calls, [["glm-coding-plan", { apiKey: "bigmodel-secret" }]]);
+  assert.match(imported.text, /已导入 GLM Coding Plan/);
+  assert.match(imported.text, /GLM_CODING_PLAN_API_KEY（本次已写入 Key）/);
+  await service.dispose();
+});
+
 test("DSH service does not duplicate a direct browser OAuth tab", async () => {
   const runtime = createCommandRuntime({ browserSession: true });
   const opened = [];

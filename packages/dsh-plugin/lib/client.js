@@ -18915,7 +18915,8 @@ var typeSymbol = (name) => `${PACKAGE}/client#${name}`;
 var codec2 = (schema, name) => ({
   mode: "strict",
   typeSymbol: typeSymbol(name),
-  schema
+  schema,
+  create: () => schema
 });
 var providerRequest = external_exports.object({
   providerId: external_exports.string().min(1).optional()
@@ -18965,6 +18966,11 @@ var nativeKeyPolicyRequest = external_exports.object({
   providerId: external_exports.string().min(1),
   policy: external_exports.enum(["manual", "round_robin", "failover"])
 });
+var nativeKeyImportPresetRequest = external_exports.object({
+  presetId: external_exports.string().min(1),
+  apiKey: external_exports.string().optional(),
+  label: external_exports.string().max(120).optional()
+});
 var contextWindowRequest = external_exports.object({
   providerId: external_exports.string().min(1),
   modelId: external_exports.string().min(1),
@@ -19010,6 +19016,8 @@ var TYPERT_DESCRIPTORS = Object.freeze([
   descriptor("nativeKeyRegister", requestParameter(nativeKeyRegisterRequest, "DockyardNativeKeyRegisterRequest"), "DockyardNativeKeyRegister"),
   descriptor("nativeKeyUnregister", requestParameter(nativeKeyRefRequest, "DockyardNativeKeyRefRequest"), "DockyardNativeKeyUnregister"),
   descriptor("nativeKeySetPolicy", requestParameter(nativeKeyPolicyRequest, "DockyardNativeKeyPolicyRequest"), "DockyardNativeKeySetPolicy"),
+  descriptor("nativeKeyPresets", void 0, "DockyardNativeKeyPresets"),
+  descriptor("nativeKeyImportPreset", requestParameter(nativeKeyImportPresetRequest, "DockyardNativeKeyImportPresetRequest"), "DockyardNativeKeyImportPreset"),
   descriptor("getContextWindowOverride", requestParameter(contextWindowRequest, "DockyardContextWindowRequest"), "DockyardContextWindowOverride"),
   descriptor("setContextWindowOverride", requestParameter(contextWindowSetRequest, "DockyardContextWindowSetRequest"), "DockyardContextWindowOverride")
 ]);

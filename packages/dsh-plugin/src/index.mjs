@@ -170,6 +170,9 @@ export function apply(ctx, config = {}) {
         logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
         contextWindowOverrides: runtime.contextWindowOverrides,
       });
+      // The `/dockyard import` verb reads and writes through the same pool the
+      // composer control uses, so one in-process controller owns the state.
+      service.setNativeKeyPool?.(nativeKeyPool);
       const nativeKeyPoolReady = nativeKeyPool.start();
       void nativeKeyPoolReady.catch((error) => {
         contextLogger(ctx, "dockyard-dsh").warn?.(error);

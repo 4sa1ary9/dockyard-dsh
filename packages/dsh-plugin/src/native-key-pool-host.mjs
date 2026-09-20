@@ -3,6 +3,7 @@ import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
 import { JsonStateStore, defaultDockyardHome } from "../../runtime/src/state-store.mjs";
 import { join } from "node:path";
 import { usageModuleFor } from "./native-usage.mjs";
+import { NATIVE_KEY_PRESETS, nativeKeyPreset, nativeKeyPresetView } from "./native-key-presets.mjs";
 
 const POLICIES = new Set(["manual", "round_robin", "failover"]);
 const PATCH_MARK = Symbol("dockyard-native-key-pool");
@@ -366,6 +367,107 @@ export class NativeKeyPoolHost {
     this.cursors.delete(providerId);
     await this.saveState();
     return this.status(providerId);
+  }
+
+  /** One `llm-pi-ai` provider profile from the live settings document, if declared. */
+  nativeProfile(providerId) {
+    try {
+      if (typeof this.settings?.get !== "function") return null;
+      const namespace = this.settings.get("llm-pi-ai");
+      const profile = namespace && typeof namespace === "object"
+        ? namespace.providers?.[providerId]
+        : null;
+      return profile && typeof profile === "object" ? profile : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Declare the preset's `llm-pi-ai` route when the profile does not have one.
+   *
+   * `settings.update` merges plain objects recursively, so writing one entry
+   * under `providers` never touches the routes the user already configured. An
+   * existing profile is left exactly as it is — it may carry a different
+   * endpoint, model list, or credential reference this import has no business
+   * rewriting.
+   */
+  async declarePresetProfile(preset) {
+    if (this.nativeProfile(preset.provider)) {
+      return { declared: true, written: false, reason: "already-declared" };
+    }
+    if (typeof this.settings?.update !== "function") {
+      return { declared: false, written: false, reason: "settings-read-only" };
+    }
+    await this.settings.update("llm-pi-ai", {
+      providers: {
+        [preset.provider]: {
+          displayName: preset.name,
+          apiKeyEnv: preset.credentialRef,
+          api: preset.api,
+          baseURL: preset.baseURL,
+          models: preset.models.map((model) => ({ ...model })),
+        },
+      },
+    });
+    return { declared: true, written: true, reason: "written" };
+  }
+
+  /** Secret-free preset list plus whether each route and Key already exist. */
+  async listKeyPresets() {
+    await this.readyPromise;
+    this.resolveServices();
+    const presets = [];
+    for (const preset of NATIVE_KEY_PRESETS) {
+      const profile = this.nativeProfile(preset.provider);
+      const credential = await this.credentialInfo(preset.credentialRef);
+      presets.push({
+        ...nativeKeyPresetView(preset),
+        credentialRef: preset.credentialRef,
+        credentialConfigured: credential.configured === true,
+        declared: profile !== null,
+      });
+    }
+    return { presets };
+  }
+
+  /**
+   * Import one domestic coding-plan preset into DSH.
+   *
+   * Either half may already exist: a key the user stored earlier (or that
+   * `dsh-AuthInOne` wrote under the same reference) is reused when no key is
+   * supplied, and an already-declared route keeps its own profile. The Key
+   * itself only ever travels through `credentials.set`.
+   */
+  async importKeyPreset(presetId, { apiKey = "", label = "" } = {}) {
+    await this.readyPromise;
+    this.resolveServices();
+    const preset = nativeKeyPreset(presetId);
+    if (!preset) throw new Error(`未知的国产套餐预设：${String(presetId ?? "")}`);
+
+    const key = text(apiKey);
+    let credentialWritten = false;
+    if (key) {
+      if (typeof this.credentials?.set !== "function") {
+        throw new Error("当前 DSH 未提供可写入的凭据服务，无法保存 API Key");
+      }
+      await this.credentials.set(preset.credentialRef, key);
+      credentialWritten = true;
+    }
+
+    const declaration = await this.declarePresetProfile(preset);
+    const status = await this.register(preset.provider, preset.credentialRef, text(label) ?? preset.name);
+    const credential = await this.credentialInfo(preset.credentialRef);
+    return {
+      preset: nativeKeyPresetView(preset),
+      providerId: preset.provider,
+      credentialRef: preset.credentialRef,
+      credentialWritten,
+      credentialConfigured: credential.configured === true,
+      declared: declaration.declared,
+      declaration: declaration.reason,
+      status,
+    };
   }
 
   async credentialInfo(ref) {

@@ -123,6 +123,21 @@ export class DockyardRemoteService extends TypertRemoteService {
     return this.nativeKeyPool.setPolicy(request.providerId, request.policy);
   }
 
+  // Domestic coding-plan presets. The Key rides only through the host-side
+  // credential write; the browser receives the secret-free status envelope.
+  async nativeKeyPresets() {
+    if (!this.nativeKeyPool) return { presets: [] };
+    return this.nativeKeyPool.listKeyPresets();
+  }
+
+  async nativeKeyImportPreset(request = {}) {
+    if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool 尚未挂载");
+    return this.nativeKeyPool.importKeyPreset(request.presetId, {
+      apiKey: request.apiKey ?? "",
+      label: request.label ?? "",
+    });
+  }
+
   async getContextWindowOverride(request = {}) {
     return this.dockyard.getContextWindowOverride(request);
   }
@@ -137,6 +152,7 @@ function markRemoteMethods() {
   for (const name of [
     "snapshot", "refresh", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
     "nativeKeyStatus", "nativeKeyRefresh", "nativeKeyRegister", "nativeKeyUnregister", "nativeKeySetPolicy",
+    "nativeKeyPresets", "nativeKeyImportPreset",
     "getContextWindowOverride", "setContextWindowOverride",
   ]) {
     let initializer;

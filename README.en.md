@@ -21,7 +21,7 @@ Linux still fail-closes, same as upstream.
 
 ## Requirements
 
-Windows 10 / 11, Node.js `^22.19.0` or `>=24`, DeepSeek Harness (`0.1.0-rc.6`), and pnpm.
+Windows 10 / 11, Node.js `^22.19.0` or `>=24`, DeepSeek Harness (dependencies aligned with `0.1.6-alpha.2`, verified loading on `0.1.6-alpha.2`), and pnpm.
 
 ## Auth conditions
 
@@ -39,6 +39,32 @@ Use the Dockyard control next to the composer, or `/dockyard login <provider>`. 
 npx @deepseek-ai/dsh plugin --profile web add github:4sa1ary9/dockyard-dsh
 npx @deepseek-ai/dsh web
 ```
+
+## Domestic coding-plan import
+
+`/dockyard import` connects a mainland-China coding plan as a native DSH
+API-key provider: the key goes into the DSH credential store, the `llm-pi-ai`
+route is declared only when it is missing, and the models show up in
+Settings → Models. The presets mirror the ones `dsh-AuthInOne` ships for the
+same plans (same endpoint, same credential reference), so either plugin can
+reuse what the other wrote.
+
+| Preset id | Plan | Endpoint | Credential reference |
+|---|---|---|---|
+| `glm-coding-plan` | GLM Coding Plan (Zhipu BigModel) | `https://open.bigmodel.cn/api/coding/paas/v4` | `GLM_CODING_PLAN_API_KEY` |
+| `kimi-code-plan` | Kimi Code (Moonshot) | `https://api.kimi.com/coding/v1` | `KIMI_CODE_PLAN_API_KEY` |
+| `qwen-coding-plan` | ModelStudio Coding Plan (Alibaba Cloud) | `https://coding.dashscope.aliyuncs.com/v1` | `QWEN_CODING_PLAN_API_KEY` |
+
+```text
+/dockyard import                            list presets and their current state (reads no key)
+/dockyard import glm-coding-plan <API key>  store the key and declare the route
+/dockyard import glm-coding-plan            reuse an existing key under the same reference
+```
+
+The import merges: it only fills in the missing half, never rewrites an existing
+route profile or key, and never touches sibling provider routes. Zhipu and
+ModelStudio restrict their Coding Plans to supported coding tools and product
+environments, so confirm your use is permitted first.
 
 ## License
 

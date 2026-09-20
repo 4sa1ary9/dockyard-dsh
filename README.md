@@ -29,7 +29,7 @@ Linux 默认仍 fail closed，与上游一致。
 |---|---|
 | 系统 | Windows 10 / 11 |
 | Node.js | `^22.19.0` 或 `>=24` |
-| DeepSeek Harness | `npx @deepseek-ai/dsh`；依赖按上游 `0.1.1-rc.2` 构建，已在 `0.1.2-alpha.3` 实测加载 |
+| DeepSeek Harness | `npx @deepseek-ai/dsh`；依赖按 `0.1.6-alpha.2` 对齐，已在 `0.1.6-alpha.2` 实测加载（网页端与插件客户端入口都能加载） |
 | pnpm | `dsh plugin add` 会转给 pnpm：`npm install -g pnpm` |
 
 ## 认证条件
@@ -76,7 +76,7 @@ npx @deepseek-ai/dsh web
 
 打开 `http://127.0.0.1:3080`。输入框左侧会出现 Dockyard 供应商条。改完前端后要重启 `dsh web`。
 
-上游另提供了预构建的一条命令安装器 `npx -y @dockyard-dsh/install@latest`，但它安装的是上游 bundle，不是本 fork；Windows fork 请按上面的方式从本仓库安装。当前 bundle 已按 `@deepseek-ai/dsh@0.1.1-rc.2` 验证。
+上游另提供了预构建的一条命令安装器 `npx -y @dockyard-dsh/install@latest`，但它安装的是上游 bundle，不是本 fork；Windows fork 请按上面的方式从本仓库安装。当前 bundle 已按 `@deepseek-ai/dsh@0.1.6-alpha.2` 验证。
 
 命令：
 
@@ -86,9 +86,28 @@ npx @deepseek-ai/dsh web
 /dockyard add [provider] [candidateId]
 /dockyard login <provider>
 /dockyard models <provider>
+/dockyard import [预设] [API Key]
 ```
 
 `provider` 常见为 `openai-codex`、`grok`、`claude`、`cursor`、`antigravity`。
+
+## 国产订阅套餐导入
+
+`/dockyard import` 把国内 coding plan 的 API Key 提供商直接接进 DSH：Key 写进 DSH 凭据库，`llm-pi-ai` 路由按需声明，之后在「设置 → 模型」的模型选择器里就能选到对应的模型。内置预设与 `dsh-AuthInOne` 的同名套餐保持一致（同一端点、同一凭据引用），任一边配过都能复用。
+
+| 预设 id | 套餐 | 端点 | 凭据引用 |
+|---|---|---|---|
+| `glm-coding-plan` | GLM Coding Plan（智谱 BigModel） | `https://open.bigmodel.cn/api/coding/paas/v4` | `GLM_CODING_PLAN_API_KEY` |
+| `kimi-code-plan` | Kimi Code（月之暗面） | `https://api.kimi.com/coding/v1` | `KIMI_CODE_PLAN_API_KEY` |
+| `qwen-coding-plan` | ModelStudio Coding Plan（阿里云百炼） | `https://coding.dashscope.aliyuncs.com/v1` | `QWEN_CODING_PLAN_API_KEY` |
+
+```text
+/dockyard import                          列出预设与当前状态（不读取任何 Key）
+/dockyard import glm-coding-plan <API Key> 写入 Key 并声明路由
+/dockyard import glm-coding-plan           复用 DSH 凭据库里已有的同名 Key
+```
+
+导入是 merge 语义：只补缺失的那一半，已经存在的路由 profile 和 Key 都不会被覆盖，其它 provider 路由也不受影响。GLM 与 ModelStudio 的套餐被厂商限定在受支持的编程工具与产品环境，请先确认用途合规。
 
 ## 开发
 

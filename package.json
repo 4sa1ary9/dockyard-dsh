@@ -33,7 +33,7 @@
     "build:plugin": "node packages/dsh-plugin/scripts/build-package.mjs",
     "build:macos": "./apps/macos/build-dmg.sh",
     "prepack": "node packages/dsh-plugin/scripts/build-package.mjs",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "dsh": {
     "bundle": {
@@ -50,13 +50,13 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/dsh-api-remotes": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-store": "^0.1.2-alpha.2",
-    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.1-rc.2",
-    "@deepseek-ai/dsh-typert-protocol": "^0.1.1-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-client-store": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-client-ui-model-selection": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-llm": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.6-alpha.2",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.6-alpha.2",
     "@earendil-works/pi-ai": "^0.82.1",
     "react": "^18.3.1",
     "zod": "^4.4.3"
