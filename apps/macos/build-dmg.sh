@@ -4,11 +4,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MACOS_ROOT="$REPO_ROOT/apps/macos"
 DIST_ROOT="${DIST_ROOT:-$REPO_ROOT/dist/macos}"
-STAGE="$DIST_ROOT/.stage"
 APP_NAME="Dockyard DSH"
 APP="$DIST_ROOT/$APP_NAME.app"
 DMG="$DIST_ROOT/Dockyard-DSH-macos-universal.dmg"
-DSH_VERSION="${DSH_VERSION:-0.1.0-rc.6}"
+# Unique per-run staging directory; the EXIT trap removes it on success,
+# failure, or interruption (no fixed .stage path left behind).
+STAGE="$(mktemp -d "${TMPDIR:-/tmp}/dockyard-dsh-stage.XXXXXXXX")"
+trap 'rm -rf "$STAGE"' EXIT
+DSH_VERSION="${DSH_VERSION:-0.1.1-rc.2}"
 PNPM_VERSION="${PNPM_VERSION:-10.12.4}"
 NODE_VERSION="${NODE_VERSION:-22.19.0}"
 read -r -a TARGET_ARCHES <<< "${TARGET_ARCHES:-arm64 x64}"
@@ -27,8 +30,8 @@ command -v npm >/dev/null || fail "npm is required"
 [[ -x "$NODE_FOR_BUILD" ]] || fail "build Node runtime not found: $NODE_FOR_BUILD"
 [[ " ${TARGET_ARCHES[*]} " == *" arm64 "* && " ${TARGET_ARCHES[*]} " == *" x64 "* ]] || fail "universal builds require both arm64 and x64 Node runtimes"
 
-mkdir -p "$DIST_ROOT" "$STAGE" "$NPM_CACHE"
-rm -rf "$APP" "$STAGE" "$DIST_ROOT/dmg-root" "$DMG"
+mkdir -p "$DIST_ROOT" "$NPM_CACHE"
+rm -rf "$APP" "$DIST_ROOT/dmg-root" "$DMG"
 mkdir -p "$STAGE/runtime/dsh" "$STAGE/dsh-home" "$STAGE/tools"
 
 log "build the Dockyard plugin bundle"
@@ -42,8 +45,13 @@ log "pack the Dockyard plugin"
 PLUGIN_NAME="$({ cd "$REPO_ROOT" && npm_config_cache="$NPM_CACHE" npm pack --pack-destination "$STAGE" 2>"$STAGE/npm-pack.log"; } | tail -n 1)"
 PLUGIN_TGZ="$STAGE/$PLUGIN_NAME"
 [[ -f "$PLUGIN_TGZ" ]] || fail "npm pack did not produce a plugin tarball"
+PLUGIN_VERSION="$($NODE_FOR_BUILD -p "require('$REPO_ROOT/package.json').version")"
 
-log "download the pinned Node runtimes"
+log "download and verify the pinned Node runtimes"
+NODE_SHASUMS="$STAGE/SHASUMS256-${NODE_VERSION}.txt"
+if [[ ! -f "$NODE_SHASUMS" ]]; then
+  curl --fail --location --retry 3 --output "$NODE_SHASUMS" "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+fi
 rm -rf "$STAGE/node-unpacked"
 mkdir -p "$STAGE/node-unpacked"
 for node_arch in "${TARGET_ARCHES[@]}"; do
@@ -57,6 +65,10 @@ for node_arch in "${TARGET_ARCHES[@]}"; do
   if [[ ! -f "$node_archive" ]]; then
     curl --fail --location --retry 3 --output "$node_archive" "$node_url"
   fi
+  expected_sha="$(awk -v archive="$node_tarball" '$2 == archive { print $1 }' "$NODE_SHASUMS")"
+  [[ "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]] || fail "Node checksum is missing for $node_tarball"
+  actual_sha="$(shasum -a 256 "$node_archive" | awk '{ print $1 }')"
+  [[ "$actual_sha" == "$expected_sha" ]] || fail "Node checksum mismatch for $node_tarball"
   tar -xzf "$node_archive" -C "$STAGE/node-unpacked"
   node_root="$STAGE/node-unpacked/node-v${NODE_VERSION}-darwin-${node_arch}"
   [[ -x "$node_root/bin/node" ]] || fail "downloaded Node archive does not contain node ($node_arch)"
@@ -71,6 +83,11 @@ npm_config_cache="$NPM_CACHE" npm install \
   --omit=dev \
   --ignore-scripts \
   "@deepseek-ai/dsh@$DSH_VERSION"
+"$NODE_FOR_BUILD" "$REPO_ROOT/scripts/patch-dsh-local-auth.mjs" \
+  "$STAGE/runtime/dsh/node_modules/@deepseek-ai/dsh-client-connection/lib/index.js"
+"$NODE_FOR_BUILD" "$REPO_ROOT/scripts/patch-dsh-latency.mjs" \
+  "$STAGE/runtime/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js" \
+  "$STAGE/runtime/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js"
 
 log "install pnpm for build-time profile assembly"
 npm_config_cache="$NPM_CACHE" npm install \
@@ -91,12 +108,12 @@ PATH="$STAGE/tools/node_modules/.bin:$PATH" \
 # The dependency is already materialized in the profile. Replace the build-only
 # absolute tarball reference so the copied profile does not retain a temp path.
 PROFILE_MANIFEST="$STAGE/dsh-home/profiles/web/package.json"
-PROFILE_MANIFEST="$PROFILE_MANIFEST" "$NODE_FOR_BUILD" <<'NODE'
+PROFILE_MANIFEST="$PROFILE_MANIFEST" PLUGIN_VERSION="$PLUGIN_VERSION" "$NODE_FOR_BUILD" <<'NODE'
 const fs = require("node:fs");
 const file = process.env.PROFILE_MANIFEST;
 const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
 if (manifest.dependencies?.["@dockyard-dsh/plugin"]) {
-  manifest.dependencies["@dockyard-dsh/plugin"] = "0.1.1";
+  manifest.dependencies["@dockyard-dsh/plugin"] = process.env.PLUGIN_VERSION;
 }
 fs.writeFileSync(file, `${JSON.stringify(manifest, null, 2)}\n`);
 NODE
@@ -116,7 +133,11 @@ const occurrences = source.split(oldText).length - 1;
 if (occurrences !== 1) throw new Error(`unexpected model-selection client layout (${occurrences} matches)`);
 fs.writeFileSync(file, source.replace(oldText, newText));
 NODE
+"$NODE_FOR_BUILD" "$REPO_ROOT/scripts/patch-dsh-latency.mjs" \
+  "$STAGE/dsh-home/profiles/web/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js" \
+  "$STAGE/dsh-home/profiles/web/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js"
 rm -f "$STAGE/dsh-home/profiles/web/pnpm-lock.yaml"
+printf '%s\n' "$DSH_VERSION" > "$STAGE/dsh-home/dockyard-dsh-runtime-version"
 
 log "copy the embedded runtime into the application bundle"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/runtime" "$APP/Contents/Resources"
@@ -167,8 +188,9 @@ if [[ "$CODESIGN_IDENTITY" != "-" ]]; then
   codesign --force --sign "$CODESIGN_IDENTITY" "$DMG"
 fi
 
-rm -rf "$DIST_ROOT/dmg-root" "$STAGE/node-unpacked" "$STAGE/tools" "$STAGE/npm-pack.log"
-rm -f "$STAGE"/node-v*.tar.gz
+rm -rf "$DIST_ROOT/dmg-root"
+# Intermediate artifacts inside $STAGE (node unpack dirs, tools, tarballs, pack
+# logs) are removed wholesale by the EXIT trap.
 
 printf '\nBuilt:\n  %s\n  %s\n' "$APP" "$DMG"
 printf 'Size:\n  app: %s\n  dmg: %s\n' \

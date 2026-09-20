@@ -133,11 +133,33 @@ function jsonBlob(store, value) {
   return putBlob(store, textEncoder.encode(JSON.stringify(value)));
 }
 
+function isInlineBase64(value) {
+  const compact = value.replace(/\s+/g, "");
+  return compact.length > 0 && compact.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(compact);
+}
+
 function normalizeText(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map(normalizeText).filter(Boolean).join("");
   if (!content || typeof content !== "object") return "";
-  if (content.type === "image") return "[image attachment]";
+  if (content.type === "image") {
+    const mimeType = String(content.mimeType ?? content.mediaType ?? content.source?.media_type ?? "image/png");
+    const raw = content.data ?? content.source?.data ?? content.source?.url ?? null;
+    if (raw instanceof Uint8Array || Buffer.isBuffer(raw)) {
+      return `[Image ${mimeType}] data:${mimeType};base64,${Buffer.from(raw).toString("base64")}`;
+    }
+    if (typeof raw === "string" && raw.length > 0) {
+      // A remote reference is not inline pixel data: folding it into a data
+      // URI would fabricate an invalid base64 payload. Keep the explicit URL
+      // reference form instead.
+      if (/^https?:\/\//i.test(raw)) return `[Image ${mimeType}] ${raw}`;
+      if (raw.startsWith("data:")) return `[Image ${mimeType}] ${raw}`;
+      // Only compose a base64 data URI from bytes that actually are base64.
+      if (!isInlineBase64(raw)) return "[image attachment without inline data]";
+      return `[Image ${mimeType}] data:${mimeType};base64,${raw}`;
+    }
+    return "[image attachment without inline data]";
+  }
   if (content.type === "tool-result" || content.type === "tool_result") {
     return `[Tool Result]\n${normalizeText(content.content ?? content.output ?? content.result ?? content.text)}`;
   }
@@ -324,26 +346,138 @@ export function cursorFrameMetadata(message, flags = null) {
 }
 
 /**
- * Connect's end-stream frame is a JSON envelope for this Cursor endpoint.
- * Older code treated every trailer as a successful turn, which made upstream
- * quota errors appear in the UI as an empty assistant message.
+ * Connect's end-stream frame is either a JSON envelope or a binary
+ * google.rpc.Status protobuf for this Cursor endpoint. Older code treated
+ * every trailer as a successful turn, which made upstream quota errors appear
+ * in the UI as an empty assistant message.
  */
 export function decodeCursorConnectTrailer(payload) {
-  const text = textDecoder.decode(payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? [])).trim();
+  const bytes = payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? []);
+  const text = textDecoder.decode(bytes).trim();
   if (!text) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return { code: "CURSOR_CONNECT_ERROR", message: text.slice(0, 500) };
+  if (text.startsWith("{")) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      // Not JSON after all; fall through and try the binary Status shape.
+      parsed = null;
+    }
+    if (parsed && typeof parsed === "object") {
+      const error = parsed.error && typeof parsed.error === "object" ? parsed.error : null;
+      const rawCode = error ? error.code : (parsed.status ?? parsed.code);
+      const label = rawCode === undefined || rawCode === null || !String(rawCode).trim()
+        ? null
+        : grpcStatusLabel(rawCode);
+      if (!label) {
+        // An explicit error envelope without a usable code keeps the generic
+        // error; a payload without any error/status field is not an error.
+        if (!error) return null;
+        const fallbackMessage = typeof error.message === "string" && error.message.trim()
+          ? error.message.trim().slice(0, 500)
+          : "CURSOR_CONNECT_ERROR";
+        return { code: "CURSOR_CONNECT_ERROR", message: fallbackMessage };
+      }
+      const messageSource = error?.message ?? parsed.message;
+      return {
+        code: label,
+        message: typeof messageSource === "string" && messageSource.trim()
+          ? messageSource.trim().slice(0, 500)
+          : label,
+      };
+    }
   }
-  const error = parsed?.error && typeof parsed.error === "object" ? parsed.error : null;
-  if (!error) return null;
-  const code = typeof error.code === "string" && error.code.trim() ? error.code.trim() : "CURSOR_CONNECT_ERROR";
-  const message = typeof error.message === "string" && error.message.trim()
-    ? error.message.trim().slice(0, 500)
-    : code;
-  return { code, message };
+  const status = decodeGoogleRpcStatus(bytes);
+  if (status) {
+    const code = grpcStatusLabel(status.code);
+    return {
+      code,
+      message: status.message.trim() ? status.message.trim().slice(0, 500) : code,
+    };
+  }
+  return { code: "CURSOR_CONNECT_ERROR", message: text.slice(0, 500) };
+}
+
+const GRPC_STATUS_NAMES = new Map([
+  [0, "OK"],
+  [1, "CANCELLED"],
+  [2, "UNKNOWN"],
+  [3, "INVALID_ARGUMENT"],
+  [4, "DEADLINE_EXCEEDED"],
+  [5, "NOT_FOUND"],
+  [6, "ALREADY_EXISTS"],
+  [7, "PERMISSION_DENIED"],
+  [8, "RESOURCE_EXHAUSTED"],
+  [9, "FAILED_PRECONDITION"],
+  [10, "ABORTED"],
+  [11, "OUT_OF_RANGE"],
+  [12, "UNIMPLEMENTED"],
+  [13, "INTERNAL"],
+  [14, "UNAVAILABLE"],
+  [15, "DATA_LOSS"],
+  [16, "UNAUTHENTICATED"],
+]);
+
+function grpcStatusLabel(value) {
+  const text = String(value ?? "").trim();
+  if (/^\d+$/.test(text)) return GRPC_STATUS_NAMES.get(Number(text)) ?? text;
+  return text;
+}
+
+/**
+ * Map a decoded trailer/gRPC code onto the account-pool markers DSH already
+ * understands, so binary google.rpc.Status trailers no longer degrade into a
+ * generic CURSOR_CONNECT_ERROR.
+ */
+export function cursorGrpcStatusFlags(code) {
+  const label = grpcStatusLabel(code).toUpperCase();
+  const flags = {};
+  if (label === "UNAUTHENTICATED") flags.authExpired = true;
+  else if (label === "PERMISSION_DENIED") flags.authForbidden = true;
+  if (label === "RESOURCE_EXHAUSTED") flags.quotaExhausted = true;
+  return flags;
+}
+
+/**
+ * Minimal hand-rolled decoder for a binary google.rpc.Status:
+ * field 1 code = varint int32, field 2 message = string, field 3 details =
+ * repeated Any (skipped). Returns null for anything that does not parse
+ * cleanly so callers can keep their previous fallback behavior.
+ */
+export function decodeGoogleRpcStatus(payload) {
+  const bytes = payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? []);
+  let offset = 0;
+  let code = null;
+  let message = "";
+  while (offset < bytes.length) {
+    const key = readVarint(bytes, offset);
+    if (!key) return null;
+    offset = key.offset;
+    const field = Number(key.value >> 3n);
+    const wireType = Number(key.value & 7n);
+    if (field === 1 && wireType === 0) {
+      const value = readVarint(bytes, offset);
+      if (!value) return null;
+      const numeric = Number(BigInt.asIntN(32, value.value));
+      // gRPC status codes are 0..16; anything else is not a Status.
+      if (!Number.isInteger(numeric) || numeric < 0 || numeric > 16) return null;
+      code = numeric;
+      offset = value.offset;
+      continue;
+    }
+    if ((field === 2 || field === 3) && wireType === 2) {
+      const length = readVarint(bytes, offset);
+      if (!length) return null;
+      const end = length.offset + Number(length.value);
+      if (end > bytes.length) return null;
+      if (field === 2) message = textDecoder.decode(bytes.slice(length.offset, end));
+      offset = end;
+      continue;
+    }
+    return null;
+  }
+  if (code === null && message.length === 0) return null;
+  return { code: code ?? 2, message };
 }
 
 export function decodeCursorText(message) {
@@ -394,11 +528,86 @@ export function decodeCursorKvRequest(message) {
   return decodeKvRequest(message);
 }
 
-export function decodeCursorToolMessage(_message) {
-  // AgentService can ask the desktop client to execute native tools. DSH's
-  // provider-neutral tool loop owns those tools, so this first transport
-  // intentionally does not advertise tool schemas or synthesize tool text.
-  return null;
+// agent.v1.InteractionUpdate oneof members that carry server-side tool calls.
+// DSH's Cursor transport never advertises tool schemas, so a compliant turn
+// only contains text/thinking/turn-end updates; these fields mean the server
+// is asking the desktop client to execute a native tool.
+const CURSOR_TOOL_CALL_UPDATE_FIELDS = new Map([
+  [2, "tool_call_started"],
+  [3, "tool_call_completed"],
+  [7, "partial_tool_call"],
+  [15, "tool_call_delta"],
+]);
+
+// agent.v1.ToolCall oneof discriminators, used for diagnostic labels only.
+const CURSOR_TOOL_KINDS = new Map([
+  [1, "shell"],
+  [3, "delete"],
+  [4, "glob"],
+  [5, "grep"],
+  [8, "read"],
+  [9, "update-todos"],
+  [10, "read-todos"],
+  [12, "edit"],
+  [13, "ls"],
+  [14, "read-lints"],
+  [15, "mcp"],
+  [16, "sem-search"],
+  [17, "create-plan"],
+  [18, "web-search"],
+  [19, "task"],
+  [20, "list-mcp-resources"],
+  [21, "read-mcp-resource"],
+  [22, "apply-agent-diff"],
+  [23, "ask-question"],
+  [24, "fetch"],
+  [25, "switch-mode"],
+  [26, "exa-search"],
+  [27, "exa-fetch"],
+  [28, "generate-image"],
+  [29, "record-screen"],
+  [30, "computer-use"],
+  [31, "write-shell-stdin"],
+  [32, "reflect"],
+  [33, "setup-vm-environment"],
+  [34, "truncated-tool-call"],
+]);
+
+/**
+ * Detect AgentService frames that request a native tool execution. Returns a
+ * small descriptor for diagnostics (or null when the frame carries no tool
+ * call), so the transport can fail loudly instead of silently dropping the
+ * server's tool traffic and fabricating an empty success.
+ */
+export function decodeCursorToolMessage(message) {
+  try {
+    // AgentServerMessage.interaction_update (field 1).
+    const interaction = firstBytes(decodeProtoFields(message), 1);
+    if (!interaction) return null;
+    const updates = decodeProtoFields(interaction)
+      .filter((field) => field.wireType === 2 && CURSOR_TOOL_CALL_UPDATE_FIELDS.has(field.field));
+    if (updates.length === 0) return null;
+    let callId = "";
+    let toolKind = null;
+    for (const update of updates.slice(0, 8)) {
+      const fields = decodeProtoFields(update.value);
+      callId = callId || firstString(fields, 1);
+      // Started/completed/partial updates embed agent.v1.ToolCall (field 2);
+      // its oneof discriminator names the concrete tool.
+      const toolCall = firstBytes(fields, 2);
+      const kindField = toolCall
+        ? decodeProtoFields(toolCall).find((field) => CURSOR_TOOL_KINDS.has(field.field))
+        : null;
+      if (kindField) toolKind = CURSOR_TOOL_KINDS.get(kindField.field);
+    }
+    return {
+      updates: updates.map((update) => CURSOR_TOOL_CALL_UPDATE_FIELDS.get(update.field)),
+      ...(callId ? { callId } : {}),
+      ...(toolKind ? { toolKind } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export const cursorNativeProtocolConstants = Object.freeze({

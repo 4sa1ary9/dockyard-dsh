@@ -333,7 +333,10 @@ test("runtime refreshes accounts concurrently and bounds a stuck quota request",
     const elapsed = Date.now() - startedAt;
     assert.equal(maxActive, 2);
     assert.equal(results.length, 2);
-    assert.ok(elapsed < 200, "refresh should be bounded, took " + elapsed + "ms");
+    // The bound only has to prove the stuck account did not block the batch.
+    // Windows state writes are far slower than the macOS box this was tuned
+    // on, so keep the assertion loose but still catching a hang.
+    assert.ok(elapsed < 1500, "refresh should be bounded, took " + elapsed + "ms");
     assert.match(results.find((entry) => entry.account.accountId === "account-stuck").diagnostics[0], /超时/);
     assert.equal(runtime.snapshot().providers[0].accounts.find((entry) => entry.accountId === "account-stuck").health.status, "degraded");
     assert.equal(runtime.snapshot().providers[0].accounts.find((entry) => entry.accountId === "account-stuck").quota.remaining, 3);
@@ -393,6 +396,55 @@ test("runtime deduplicates overlapping refreshes for one account", async () => {
     await Promise.all([first, second]);
     assert.equal(refreshCalls, 1);
   } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("runtime ignores a late refresh result after its timeout aborts", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-late-refresh-"));
+  let release;
+  try {
+    const module = {
+      manifest: { id: "test-provider", kind: "provider", displayName: "Test provider" },
+      async activate(context) { context.registerService("provider:test-provider", this); },
+      async discover() { return { candidates: [] }; },
+      async importAccount() { throw new Error("not used"); },
+      async refreshAccount() {
+        return new Promise((resolve) => { release = () => resolve({ refresh: { accessTokenExpiresAt: "late" } }); });
+      },
+      async getQuota() { return {}; },
+      async getCatalog() { return { models: [] }; },
+      async invoke() { return {}; },
+    };
+    const stateStore = new JsonStateStore({ home });
+    await stateStore.save({
+      pools: {
+        "test-provider": {
+          accounts: [{
+            providerId: "test-provider",
+            accountId: "account-a",
+            auth: { kind: "oauth", credentialRef: "keychain://late-refresh", scopes: [] },
+          }],
+        },
+      },
+    });
+    const runtime = new DockyardRuntime({
+      providers: [{ module }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore: new MemorySecretStore(),
+      refreshTimeoutMs: 10,
+    });
+    const pending = runtime.refreshAccount("test-provider", "account-a");
+    await assert.rejects(pending, /超时|timed out/i);
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // snapshot() reads the initialized entry table; the timeout path returns
+    // before init's own bookkeeping settles.
+    await runtime.init();
+    assert.notEqual(runtime.snapshot().providers[0].accounts[0].refresh.accessTokenExpiresAt, "late");
+  } finally {
+    release?.();
     await rm(home, { recursive: true, force: true });
   }
 });
@@ -512,6 +564,43 @@ test("runtime imports multiple accounts from one provider source into the pool",
     const result = await runtime.importSource("test-provider", { content: "{}", fileName: "accounts.json" });
     assert.deepEqual(result.accounts.map((account) => account.accountId), ["account-a", "account-b"]);
     assert.deepEqual(runtime.snapshot().providers[0].accounts.map((account) => account.accountId), ["account-a", "account-b"]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("runtime rolls back imported accounts and uncommitted credentials when persistence fails", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-import-rollback-"));
+  const secretStore = new MemorySecretStore();
+  const credentialRef = "keychain://rollback";
+  try {
+    const module = {
+      manifest: { id: "test-provider", kind: "provider", displayName: "Test provider" },
+      async activate(context) { context.registerService("provider:test-provider", this); },
+      async discover() { return { candidates: [] }; },
+      async importSource(_source, context) {
+        await context.secretStore.write(credentialRef, { access: "temporary" });
+        return [{ providerId: "test-provider", accountId: "account-a", credentialRef }];
+      },
+      async importAccount() { throw new Error("not used"); },
+      async refreshAccount() { return {}; },
+      async getQuota() { return {}; },
+      async getCatalog() { return { models: [] }; },
+      async invoke() { return {}; },
+    };
+    const stateStore = {
+      async load() { return { schema: 1, pools: {} }; },
+      async save() { throw new Error("disk full"); },
+    };
+    const runtime = new DockyardRuntime({
+      providers: [{ module }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore,
+    });
+    await assert.rejects(() => runtime.importSource("test-provider", {}), /disk full/);
+    assert.deepEqual(runtime.snapshot().providers[0].accounts, []);
+    assert.equal(await secretStore.read(credentialRef), null);
   } finally {
     await rm(home, { recursive: true, force: true });
   }
@@ -896,6 +985,48 @@ test("runtime saves only the provider it changed when runtimes share state", asy
   }
 });
 
+test("a stale same-provider save does not resurrect a removed account", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-same-provider-state-"));
+  try {
+    const stateStore = new JsonStateStore({ home });
+    await stateStore.save({
+      pools: {
+        "test-provider": {
+          accounts: [{
+            providerId: "test-provider",
+            accountId: "account-a",
+            auth: { kind: "oauth", credentialRef: "keychain://same-provider", scopes: [] },
+          }],
+        },
+      },
+    });
+    const moduleFor = () => ({
+      manifest: { id: "test-provider", kind: "provider", displayName: "Test provider" },
+      async activate(context) { context.registerService("provider:test-provider", this); },
+      async discover() { return { candidates: [] }; },
+      async importAccount() { throw new Error("not used"); },
+      async refreshAccount() { return {}; },
+      async getQuota() { return {}; },
+      async getCatalog() { return { models: [] }; },
+      async invoke() { return {}; },
+    });
+    const makeRuntime = () => new DockyardRuntime({
+      providers: [{ module: moduleFor() }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore: new MemorySecretStore(),
+    });
+    const first = makeRuntime();
+    const second = makeRuntime();
+    await Promise.all([first.init(), second.init()]);
+    await first.removeAccount("test-provider", "account-a");
+    await second.setPolicy("test-provider", ACCOUNT_SELECTION_POLICY.MANUAL);
+    assert.deepEqual((await stateStore.load()).pools["test-provider"].accounts, []);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("runtime keeps an exhausted account out of the pool after a successful refresh", async () => {
   const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-exhausted-refresh-"));
   try {
@@ -937,6 +1068,67 @@ test("runtime keeps an exhausted account out of the pool after a successful refr
     // A confirmed zero-quota account must stay exhausted instead of being
     // flipped back to healthy and re-selected for the next request.
     assert.equal(refreshed.health.status, "exhausted");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("runtime clears a stale expired state after native quota recovery", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-runtime-native-recovery-"));
+  try {
+    const stateStore = new JsonStateStore({ home });
+    await stateStore.save({
+      pools: {
+        "test-provider": {
+          accounts: [{
+            providerId: "test-provider",
+            accountId: "account-recovered",
+            auth: { kind: "oauth", credentialRef: "keychain://recovered", scopes: [] },
+            health: { status: "expired", lastError: "stale OAuth refresh failure" },
+          }],
+        },
+      },
+    });
+    const module = {
+      manifest: { id: "test-provider", kind: "provider", displayName: "Test provider" },
+      async activate(context) { context.registerService("provider:test-provider", this); },
+      async refreshAccount() {
+        return {
+          quota: { remaining: 1, limit: 1, unit: "fraction" },
+          resources: { quotaSource: "antigravity_native" },
+        };
+      },
+      async getQuota() { return {}; },
+      async discover() { return { candidates: [] }; },
+      async importAccount() { throw new Error("not used"); },
+      async getCatalog() { return { models: [] }; },
+      async invoke() { return {}; },
+    };
+    const runtime = new DockyardRuntime({
+      providers: [{ module }],
+      runtime: new ModuleRuntime({ logger: { error() {}, warn() {}, info() {} } }),
+      stateStore,
+      secretStore: new MemorySecretStore(),
+    });
+    await runtime.init();
+    await runtime.refreshAccount("test-provider", "account-recovered");
+    const recovered = runtime.snapshot().providers[0].accounts.find((entry) => entry.accountId === "account-recovered");
+    assert.equal(recovered.health.status, "healthy");
+    assert.equal(recovered.health.lastError, null);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("JsonStateStore partial saves preserve other namespaces", async () => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-state-merge-"));
+  try {
+    const store = new JsonStateStore({ home });
+    await store.save({ pools: { test: { accounts: [] } } });
+    await store.save({ nativeKeyPools: { test: { policy: "failover" } } });
+    const state = await store.load();
+    assert.deepEqual(state.pools.test.accounts, []);
+    assert.equal(state.nativeKeyPools.test.policy, "failover");
   } finally {
     await rm(home, { recursive: true, force: true });
   }

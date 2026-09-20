@@ -13,6 +13,7 @@ import {
   textFromContent,
   validateNativeEndpoint,
 } from "../../../packages/providers/src/native-transport.mjs";
+import { addSecondsIso, isoFromEpoch } from "../../../packages/providers/src/provider-utils.mjs";
 
 const PROVIDER_ID = "claude";
 const DEFAULT_ENDPOINT = "https://api.anthropic.com/v1/messages";
@@ -35,14 +36,59 @@ function oauthTokenFromJson(value) {
   return token ? { token, kind: "oauth" } : null;
 }
 
-/** Resolve the active Claude subscription token without invoking `claude -p`. */
+function claudeOAuthCredentialFromJson(value) {
+  const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
+  const access = firstString(oauth?.accessToken, oauth?.access_token, value?.accessToken, value?.access_token);
+  if (!access) return null;
+  const refresh = firstString(oauth?.refreshToken, oauth?.refresh_token, value?.refreshToken, value?.refresh_token);
+  const expiresAt = isoFromEpoch(
+    oauth?.expiresAt
+      ?? oauth?.expires_at
+      ?? oauth?.expiryDate
+      ?? oauth?.expiry_date
+      ?? value?.expiresAt
+      ?? value?.expires_at,
+  ) ?? addSecondsIso(oauth?.expiresIn ?? oauth?.expires_in ?? value?.expiresIn ?? value?.expires_in);
+  return {
+    type: "oauth",
+    providerId: "claude",
+    access,
+    ...(refresh ? { refresh } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+    ...(Array.isArray(oauth?.scopes) ? { scopes: oauth.scopes.map(String) } : {}),
+  };
+}
+
+/** Read Claude Code's persisted OAuth credential without exposing it in status output. */
+export async function readClaudeOAuthCredential({ home = homedir() } = {}) {
+  for (const path of [
+    join(home, ".claude", ".credentials.json"),
+    join(home, ".opencodex", "claude_desktop_auth.json"),
+  ]) {
+    const credential = claudeOAuthCredentialFromJson(await readJson(path));
+    if (credential) return credential;
+  }
+  return null;
+}
+
+/**
+ * Resolve the active Claude subscription token without invoking `claude -p`.
+ *
+ * When the request is bound to a selected subscription account
+ * (`accountBound`), a missing token must surface as an auth error instead of
+ * silently re-billing the request as an unrelated global credential.
+ */
 export async function resolveClaudeAccessToken({
   credential,
   env = process.env,
   home = homedir(),
+  accountBound = false,
 } = {}) {
   const stored = firstString(credential?.access, credential?.token);
   if (stored) return { token: stored, kind: credential?.type === "api_key" ? "apiKey" : "oauth" };
+  // The fallbacks below are machine-global and belong to no account in
+  // particular, so a bound subscription account must never inherit them.
+  if (accountBound) return null;
   const apiKey = firstString(env.ANTHROPIC_API_KEY);
   if (apiKey) return { token: apiKey, kind: "apiKey" };
   const envToken = firstString(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
@@ -136,21 +182,41 @@ function thinkingBudget(request) {
   return null;
 }
 
+function invalidRequestError(message) {
+  const error = new Error(message);
+  error.code = "INVALID_ARGUMENT";
+  error.providerId = PROVIDER_ID;
+  return error;
+}
+
+function resolveMaxTokens(request) {
+  const value = Number.isInteger(request.maxTokens)
+    ? request.maxTokens
+    : Number.isInteger(request.modelContext?.maxTokens) ? request.modelContext.maxTokens : 4096;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw invalidRequestError(`Claude max_tokens must be a positive integer, received ${value}`);
+  }
+  return value;
+}
+
 export async function buildClaudeRequest(request = {}, context = {}) {
   const body = {
     model: request.model,
     messages: await buildAnthropicMessages(request, context.attachments),
-    max_tokens: Number.isInteger(request.maxTokens)
-      ? request.maxTokens
-      : Number.isInteger(request.modelContext?.maxTokens) ? request.modelContext.maxTokens : 4096,
+    max_tokens: resolveMaxTokens(request),
     stream: true,
   };
   if (typeof request.system === "string" && request.system.length > 0) body.system = request.system;
-  if (request.temperature !== undefined) body.temperature = request.temperature;
   const tools = buildAnthropicTools(request.tools);
   if (tools) body.tools = tools;
   const budget = thinkingBudget(request);
-  if (budget && body.max_tokens > budget) body.thinking = { type: "enabled", budget_tokens: budget };
+  if (budget && body.max_tokens > budget) {
+    // Anthropic rejects temperature on extended-thinking requests with a
+    // stable 4xx, so a thinking budget excludes the parameter entirely.
+    body.thinking = { type: "enabled", budget_tokens: budget };
+  } else if (request.temperature !== undefined) {
+    body.temperature = request.temperature;
+  }
   return body;
 }
 
@@ -175,6 +241,18 @@ function mergeUsage(previous, next) {
   return next ? { ...(previous ?? {}), ...next } : previous;
 }
 
+/**
+ * Build the protocol error for a stream that ended without any terminal
+ * message event. `protocolError` sits beside `authExpired`/`quotaExhausted`
+ * so callers can tell truncation apart from auth or quota failures.
+ */
+function claudeStreamProtocolError() {
+  const error = nativeProviderError(PROVIDER_ID, "SSE stream ended before message_stop; the response was truncated");
+  error.code = "SSE_PROTOCOL_ERROR";
+  error.protocolError = true;
+  return error;
+}
+
 async function* streamClaudeResponse(response) {
   let text = "";
   let textIndex = 0;
@@ -182,6 +260,11 @@ async function* streamClaudeResponse(response) {
   let nextIndex = 1;
   let usage = null;
   let stop = "stop";
+  // A properly opened message must be closed by a terminal event before the
+  // stream may count as successful; `message_delta` already carries the
+  // authoritative stop_reason/usage, while `message_stop` is the close frame.
+  let messageOpened = false;
+  let terminated = false;
   const tools = new Map();
   const reasoning = new Map();
   yield { type: "block-start", index: textIndex, blockType: "text" };
@@ -190,6 +273,7 @@ async function* streamClaudeResponse(response) {
     const payload = event.data;
     if (!payload || typeof payload !== "object") continue;
     if (payload.type === "message_start") {
+      messageOpened = true;
       usage = mergeUsage(usage, normalizeUsage(payload.message?.usage));
       continue;
     }
@@ -272,8 +356,13 @@ async function* streamClaudeResponse(response) {
       continue;
     }
     if (payload.type === "message_delta") {
+      terminated = true;
       stop = payload.delta?.stop_reason ?? stop;
       usage = mergeUsage(usage, normalizeUsage(payload.usage));
+      continue;
+    }
+    if (payload.type === "message_stop") {
+      terminated = true;
       continue;
     }
     if (payload.type === "error") {
@@ -283,6 +372,10 @@ async function* streamClaudeResponse(response) {
       });
     }
   }
+
+  // A network truncation ends the loop without any terminal event; reporting
+  // finish(stop) here would dress an incomplete response up as a success.
+  if (messageOpened && !terminated) throw claudeStreamProtocolError();
 
   for (const thought of reasoning.values()) {
     yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
@@ -310,13 +403,19 @@ export function createClaudeNativeExecutor({
   const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID });
   const executor = async ({ request = {}, invocation, context = {} } = {}) => {
     let credential = null;
-    if (context.secretStore) {
-      const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
-      if (ref) credential = await context.secretStore.read(ref);
+    const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
+    // A pool-routed request is bound to one selected subscription identity:
+    // without that account's own token it must fail loudly instead of being
+    // re-billed as an unrelated global API key or environment credential.
+    const accountBound = Boolean(ref || invocation?.account?.accountId);
+    if (context.secretStore && ref) {
+      credential = await context.secretStore.read(ref);
     }
-    const auth = await tokenResolver({ credential, env: { ...env, ...(context.env ?? {}) }, home });
+    const auth = await tokenResolver({ credential, env: { ...env, ...(context.env ?? {}) }, home, accountBound });
     if (!auth?.token) {
-      const error = nativeProviderError(PROVIDER_ID, "Claude OAuth token is unavailable; authorize Claude first");
+      const error = nativeProviderError(PROVIDER_ID, accountBound
+        ? "Claude subscription OAuth token is unavailable for the selected account; authorize Claude again"
+        : "Claude OAuth token is unavailable; authorize Claude first");
       error.authExpired = true;
       throw error;
     }

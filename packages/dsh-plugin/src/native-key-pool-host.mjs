@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
 import { JsonStateStore, defaultDockyardHome } from "../../runtime/src/state-store.mjs";
 import { join } from "node:path";
 import { usageModuleFor } from "./native-usage.mjs";
@@ -7,18 +9,94 @@ const PATCH_MARK = Symbol("dockyard-native-key-pool");
 const VISIBLE_STREAM_CHUNKS = new Set(["text-delta", "reasoning-delta", "tool-call-delta"]);
 
 function retryableStreamError(error) {
+  // Accepts thrown errors as well as bare stream-failure envelopes
+  // (finish chunks): both expose the same classification fields.
+  if (!error || typeof error !== "object") return false;
+  const statuses = [error.status, error.upstreamStatus, error.upstreamCode]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value));
   return Boolean(
-    error?.rateLimited
-      || error?.quotaExhausted
-      || error?.authExpired
-      || error?.authForbidden
-      || [401, 403, 429].includes(Number(error?.status))
-      || [401, 403, 429].includes(Number(error?.upstreamStatus)),
+    error.rateLimited
+      || error.quotaExhausted
+      || error.authExpired
+      || error.authForbidden
+      || statuses.some((status) => [401, 403, 429].includes(status)),
   );
+}
+
+const NON_RETRYABLE_FAILURE_STATUSES = new Set([400, 404, 405, 413, 422]);
+const NON_RETRYABLE_FAILURE_CODES = /INVALID_ARGUMENT|BAD_REQUEST|UNSUPPORTED|NOT_FOUND|CONTEXT_LENGTH|PAYLOAD/i;
+
+/**
+ * Terminal stream failures (finish chunks) are retryable by default while
+ * nothing visible was emitted — an unclassified early failure is far more
+ * likely transient than key-specific. Known request-shape problems are the
+ * exception: they will fail identically on every other configured key, so
+ * rotating would only burn through the pool and pollute key health.
+ */
+function nonRetryableStreamFailure(failure) {
+  if (!failure || typeof failure !== "object") return false;
+  const statuses = [failure.status, failure.upstreamStatus]
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value));
+  if (statuses.some((status) => NON_RETRYABLE_FAILURE_STATUSES.has(status))) return true;
+  const codes = [failure.code, failure.upstreamCode]
+    .filter((value) => typeof value === "string");
+  return codes.some((code) => NON_RETRYABLE_FAILURE_CODES.test(code));
 }
 
 function text(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function applyContextWindowOverride(request, contextWindow) {
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) return request;
+  const next = {
+    ...request,
+    modelContext: {
+      ...(request?.modelContext ?? {}),
+      contextWindow,
+    },
+  };
+  // DSH marks the original agent-loop request by object identity. Preserve
+  // that identity classification when the immutable request is copied.
+  if (isAgentLoopRequest(request)) markAgentLoopRequest(next);
+  return next;
+}
+
+function applyModelContextWindow(model, contextWindow) {
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0
+    || !model || typeof model !== "object") return model;
+  return {
+    ...model,
+    context: {
+      ...(model.context ?? {}),
+      contextWindow,
+    },
+    // dsh-llm-pi-ai keeps its internal resolved model in this flat shape.
+    // Preserve it as well so its stream-side overflow classification uses the
+    // same effective capacity as the durable DSH request/context event.
+    ...(Number.isInteger(model.contextWindow) ? { contextWindow } : {}),
+  };
+}
+
+async function* iterateWithContext(storage, state, next) {
+  const output = await storage.run(state, () => next());
+  const iterator = await storage.run(state, () => {
+    if (output?.[Symbol.asyncIterator]) return output[Symbol.asyncIterator]();
+    if (output?.[Symbol.iterator]) return output[Symbol.iterator]();
+    return null;
+  });
+  if (!iterator) return;
+  try {
+    while (true) {
+      const result = await storage.run(state, () => iterator.next());
+      if (result.done) return;
+      yield result.value;
+    }
+  } finally {
+    await storage.run(state, () => iterator.return?.());
+  }
 }
 
 function pathValue(source, path = []) {
@@ -73,17 +151,20 @@ export class NativeKeyPoolHost {
   llm;
   logger;
   stateStore;
+  contextWindowOverrides;
   records = new Map();
   cursors = new Map();
   usageCache = new Map();
   #failoverExcluded = new Map();
   #lastResolvedKey = new Map();
+  #requestContext = new AsyncLocalStorage();
+  #contextOverrideRequests = new WeakSet();
   patches = [];
   offAdapters = null;
   offStreams = null;
   readyPromise;
 
-  constructor(ctx, { logger = null, stateStore = null } = {}) {
+  constructor(ctx, { logger = null, stateStore = null, contextWindowOverrides = null } = {}) {
     this.ctx = ctx;
     // The plugin constructor can run while Cordis is still composing the
     // profile. Resolve services in start(), after the fiber is active; reading
@@ -95,6 +176,7 @@ export class NativeKeyPoolHost {
     // `ctx` is a Cordis proxy. Optional chaining does not make a missing
     // injected property safe, so never read ctx.logger during composition.
     this.logger = logger ?? console;
+    this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
       filePath: join(defaultDockyardHome(), "native-key-pools.json"),
     });
@@ -140,6 +222,7 @@ export class NativeKeyPoolHost {
 
   async start() {
     await this.readyPromise;
+    await this.contextWindowOverrides?.ready?.();
     this.resolveServices();
     this.patchAdapters();
     if (typeof this.ctx.on === "function") {
@@ -156,15 +239,38 @@ export class NativeKeyPoolHost {
     this.offAdapters = null;
     this.offStreams = null;
     for (const patch of this.patches.splice(0)) {
-      if (patch.config.resolveApiKey?.[PATCH_MARK] === patch.wrapper) {
+      if (patch.config?.resolveApiKey?.[PATCH_MARK] === patch.wrapper) {
         patch.config.resolveApiKey = patch.original;
       }
+      if (patch.target?.[patch.method]?.[PATCH_MARK] === patch.wrapper) {
+        patch.target[patch.method] = patch.original;
+      }
     }
+  }
+
+  contextWindowForModel(providerId, modelId) {
+    if (!text(providerId) || !text(modelId)
+      || !this.contextWindowOverrides?.hasAny?.(providerId, modelId)) return null;
+    const profile = nativeProfile(this.ctx, providerId).profile;
+    const keyRef = text(profile?.apiKeyEnv);
+    return this.contextWindowOverrides.resolve(providerId, modelId, {
+      ...(keyRef ? { keyRef } : {}),
+    });
+  }
+
+  patchAdapterMethod(adapter, method, transform) {
+    const original = adapter?.[method];
+    if (typeof original !== "function" || original?.[PATCH_MARK]) return;
+    const wrapper = transform(original);
+    Object.defineProperty(wrapper, PATCH_MARK, { value: wrapper });
+    adapter[method] = wrapper;
+    this.patches.push({ target: adapter, method, original, wrapper });
   }
 
   patchAdapters() {
     const adapters = this.llm?.adapters;
     if (!adapters || typeof adapters.values !== "function") return;
+    const thisHost = this;
     for (const registration of adapters.values()) {
       const adapter = registration?.adapter;
       const config = adapter?.config;
@@ -181,6 +287,32 @@ export class NativeKeyPoolHost {
       Object.defineProperty(wrapper, PATCH_MARK, { value: wrapper });
       config.resolveApiKey = wrapper;
       this.patches.push({ config, original, wrapper });
+
+      // DSH records request/context from the model metadata resolved by the
+      // adapter, before the later llm/stream waterfall runs. Patch the
+      // adapter's model seams too, otherwise a request override can be real
+      // at the provider boundary while the session meter still shows the
+      // catalog's stale 262K/272K capacity.
+      this.patchAdapterMethod(adapter, "modelOf", (modelOf) => function (...args) {
+        const model = modelOf.apply(this, args);
+        const contextWindow = thisHost.contextWindowForModel(args[1], args[2]);
+        return applyModelContextWindow(model, contextWindow);
+      });
+      this.patchAdapterMethod(adapter, "resolveModel", (resolveModel) => async function (...args) {
+        const model = await resolveModel.apply(this, args);
+        const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
+        return applyModelContextWindow(model, contextWindow);
+      });
+      this.patchAdapterMethod(adapter, "prepareCall", (prepareCall) => async function (...args) {
+        const prepared = await prepareCall.apply(this, args);
+        const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
+        if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0
+          || !prepared || typeof prepared !== "object") return prepared;
+        return {
+          ...prepared,
+          model: applyModelContextWindow(prepared.model, contextWindow),
+        };
+      });
     }
   }
 
@@ -232,8 +364,6 @@ export class NativeKeyPoolHost {
     const record = this.record(providerId);
     record.policy = policy;
     this.cursors.delete(providerId);
-    this.#failoverExcluded.delete(providerId);
-    this.#lastResolvedKey.delete(providerId);
     await this.saveState();
     return this.status(providerId);
   }
@@ -306,15 +436,61 @@ export class NativeKeyPoolHost {
     return chosen;
   }
 
+  async prepareContextWindow(options, requestState) {
+    const providerId = text(options?.provider);
+    const modelId = text(options?.model);
+    if (!providerId || !modelId || !this.contextWindowOverrides?.hasAny?.(providerId, modelId)) return options;
+
+    const profile = nativeProfile(this.ctx, providerId).profile;
+    const synced = await this.syncProvider(providerId, profile);
+    let chosen = null;
+    if (synced.profile && synced.activeRef && typeof this.credentials?.resolve === "function") {
+      chosen = await this.pickKey(providerId, synced.record, synced.activeRef, {
+        excluded: [...(requestState?.excluded ?? [])],
+      });
+      if (chosen) requestState.preselectedKeyRef = chosen.ref;
+    }
+    const contextWindow = this.contextWindowOverrides.resolve(providerId, modelId, {
+      ...(chosen?.ref ? { keyRef: chosen.ref } : {}),
+    });
+    return applyContextWindowOverride(options, contextWindow);
+  }
+
+  async *streamWithContextWindow(options, next, requestState) {
+    requestState.preselectedKeyRef = null;
+    const prepared = await this.prepareContextWindow(options, requestState);
+    if (prepared === options || typeof this.llm?.stream !== "function") {
+      // The direct host seam used by older integrations has no LLM runtime to
+      // re-enter. Keep its original behavior; the DSH runtime always has one.
+      yield* next();
+      return;
+    }
+
+    // `llm/stream`'s next() closes over the original immutable request, so a
+    // returned copy cannot be passed downstream through next(). Re-enter the
+    // runtime with the copy and let this listener pass its marked request on
+    // to the rest of the waterfall exactly once.
+    this.#contextOverrideRequests.add(prepared);
+    try {
+      yield* iterateWithContext(this.#requestContext, requestState, () => this.llm.stream(prepared));
+    } finally {
+      this.#contextOverrideRequests.delete(prepared);
+    }
+  }
+
   async resolveApiKey(providerId, profile, original) {
     const synced = await this.syncProvider(providerId, profile);
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(providerId, profile);
     }
-    const excluded = [...(this.#failoverExcluded.get(providerId) ?? [])];
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
+    const requestState = this.#requestContext.getStore();
+    const excluded = [...(requestState?.excluded ?? [])];
+    const forced = text(requestState?.preselectedKeyRef);
+    const chosen = forced
+      ? synced.record.keys.find((entry) => entry.ref === forced) ?? await this.pickKey(providerId, synced.record, synced.activeRef, { excluded })
+      : await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(providerId, profile);
-    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
+    if (synced.record.policy === "failover" && requestState) requestState.lastResolvedKey = chosen.ref;
     const resolved = await this.credentials.resolve(chosen.ref);
     const value = text(resolved?.value);
     if (value) return value;
@@ -327,10 +503,14 @@ export class NativeKeyPoolHost {
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(connection);
     }
-    const excluded = [...(this.#failoverExcluded.get(providerId) ?? [])];
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
+    const requestState = this.#requestContext.getStore();
+    const excluded = [...(requestState?.excluded ?? [])];
+    const forced = text(requestState?.preselectedKeyRef);
+    const chosen = forced
+      ? synced.record.keys.find((entry) => entry.ref === forced) ?? await this.pickKey(providerId, synced.record, synced.activeRef, { excluded })
+      : await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(connection);
-    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
+    if (synced.record.policy === "failover" && requestState) requestState.lastResolvedKey = chosen.ref;
     const resolved = await this.credentials.resolve(chosen.ref);
     const value = text(resolved?.value);
     if (value) return value;
@@ -344,8 +524,15 @@ export class NativeKeyPoolHost {
 
   async *stream(options, next) {
     if (typeof next !== "function") return;
-    if (!this.shouldRetry(options?.provider)) {
+    if (this.#contextOverrideRequests.delete(options)) {
       yield* next();
+      return;
+    }
+    const requestState = { excluded: new Set(), lastResolvedKey: null };
+    if (!this.shouldRetry(options?.provider)) {
+      yield* iterateWithContext(this.#requestContext, requestState, async () => {
+        return this.streamWithContextWindow(options, next, requestState);
+      });
       return;
     }
     const configured = await this.configuredKeys(this.records.get(options.provider));
@@ -355,19 +542,17 @@ export class NativeKeyPoolHost {
       // retry excludes the key that just failed so the next attempt advances
       // to the next configured key. The exclusion set is cleared when the
       // stream settles so healthy requests return to the primary key.
-      if (attempt > 0) {
-        const used = this.#lastResolvedKey.get(options.provider);
-        if (used) {
-          const excluded = this.#failoverExcluded.get(options.provider) ?? new Set();
-          excluded.add(used);
-          this.#failoverExcluded.set(options.provider, excluded);
-        }
+      if (attempt > 0 && requestState.lastResolvedKey) {
+        requestState.excluded.add(requestState.lastResolvedKey);
       }
       const buffered = [];
       let emitted = false;
       let retryable = false;
       try {
-        for await (const chunk of next()) {
+        const output = iterateWithContext(this.#requestContext, requestState, async () => {
+          return this.streamWithContextWindow(options, next, requestState);
+        });
+        for await (const chunk of output) {
           if (VISIBLE_STREAM_CHUNKS.has(chunk?.type)) emitted = true;
           if (!emitted) buffered.push(chunk);
           else if (buffered.length > 0) {
@@ -375,7 +560,11 @@ export class NativeKeyPoolHost {
             yield chunk;
           } else yield chunk;
           if (chunk?.type === "finish" && chunk.reason?.kind === "error") {
-            retryable = !emitted;
+            // Retry unclassified terminal failures, but skip known
+            // non-retryable request errors (invalid argument, unsupported
+            // model, context length): they fail identically on every other
+            // key and would only burn the pool and pollute key health.
+            retryable = !emitted && !nonRetryableStreamFailure(chunk.reason.failure);
             if (retryable && attempt + 1 < attempts) break;
           }
         }
@@ -385,12 +574,8 @@ export class NativeKeyPoolHost {
       }
       if (retryable && !emitted && attempt + 1 < attempts) continue;
       if (buffered.length > 0) yield* buffered;
-      this.#failoverExcluded.delete(options.provider);
-      this.#lastResolvedKey.delete(options.provider);
       return;
     }
-    this.#failoverExcluded.delete(options.provider);
-    this.#lastResolvedKey.delete(options.provider);
   }
 
   async refreshUsage(providerId, signal) {

@@ -3,6 +3,7 @@ import { AccountPool } from "../../account-pool/src/index.mjs";
 import { DshInjectionBridge } from "../../dsh-bridge/src/index.mjs";
 import { createDefaultSecretStore } from "../../vault/src/index.mjs";
 import { JsonStateStore } from "./state-store.mjs";
+import { ContextWindowOverrideStore } from "./context-window-overrides.mjs";
 import { createCodexDriver, createCodexModule, summarizeCodexCandidate } from "../../../modules/provider-codex/src/index.mjs";
 import {
   createAntigravityDriver,
@@ -22,7 +23,10 @@ const candidateSummarizers = new Map([
   ["cursor", summarizeCursorCandidate],
 ]);
 
-const DEFAULT_REFRESH_TIMEOUT_MS = 15_000;
+// Official provider CLIs may need a network round-trip to rotate OAuth
+// credentials before they can report live quota. Keep this above agy's normal
+// refresh latency while still bounding a stuck provider operation.
+const DEFAULT_REFRESH_TIMEOUT_MS = 30_000;
 
 function numericOption(value, fallback) {
   const parsed = Number(value);
@@ -41,10 +45,13 @@ function refreshTimeoutError(providerId, accountId, timeoutMs) {
  * A successful quota refresh proves the credential works but must not erase a
  * confirmed exhausted/cooldown state: an account whose live quota reports
  * zero remaining would otherwise be re-selected and fail again immediately.
+ * An expired state is recoverable only when the provider explicitly reports
+ * that the selected account's native transport was authenticated; a CLI
+ * metadata check alone must not clear a real transport failure.
  */
-function reportPostRefreshHealth(pool, accountId) {
+function reportPostRefreshHealth(pool, accountId, { allowExpiredRecovery = false } = {}) {
   const account = pool.get(accountId);
-  if (!account || account.health?.status === ACCOUNT_HEALTH.EXPIRED) return;
+  if (!account || (account.health?.status === ACCOUNT_HEALTH.EXPIRED && !allowExpiredRecovery)) return;
   const remaining = account.quota?.remaining;
   if (typeof remaining === "number" && remaining <= 0) {
     pool.report(accountId, {
@@ -77,6 +84,92 @@ function withRefreshTimeout(task, { providerId, accountId, timeoutMs }) {
 function withRequestExecutor(providerId, driverOptions, requestExecutors = {}) {
   const executor = requestExecutors[providerId];
   return executor ? { ...(driverOptions ?? {}), requestExecutor: executor } : driverOptions;
+}
+
+function jsonEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function providerStorageSnapshot(entry) {
+  return {
+    policy: entry.pool.policy,
+    defaultAccountId: entry.pool.getDefaultAccountId(),
+    accounts: entry.pool.listForStorage(),
+  };
+}
+
+/**
+ * Merge only changes made by this runtime into the latest locked snapshot.
+ * Keeping a baseline prevents a stale policy/health save from resurrecting an
+ * account removed by another runtime while still allowing account-level edits
+ * to be persisted without replacing unrelated provider state.
+ */
+function restorePoolSnapshot(pool, snapshot) {
+  const desired = new Map((snapshot.accounts ?? []).map((account) => [account.accountId, account]));
+  for (const account of pool.list()) {
+    if (!desired.has(account.accountId)) pool.remove(account.accountId);
+  }
+  for (const account of desired.values()) {
+    pool.upsert({ ...account, credentialRef: account.auth?.credentialRef }, { resetHealth: false });
+  }
+  pool.setPolicy(snapshot.policy);
+  pool.setDefaultAccount(snapshot.defaultAccountId ?? null);
+}
+
+async function deleteUncommittedCredentials(secretStore, beforeRefs, accounts) {
+  if (typeof secretStore?.delete !== "function") return;
+  const refs = new Set(accounts.map((account) => account?.auth?.credentialRef ?? account?.credentialRef).filter(Boolean));
+  for (const ref of refs) {
+    if (!beforeRefs.has(ref)) await secretStore.delete(ref).catch(() => {});
+  }
+}
+
+function mergeProviderStorage(latestInput, current, baseline = {}) {
+  const latest = latestInput && typeof latestInput === "object" ? latestInput : {};
+  const merged = { ...latest };
+  if (current.policy !== baseline.policy) merged.policy = current.policy;
+  if ((current.defaultAccountId ?? null) !== (baseline.defaultAccountId ?? null)) {
+    merged.defaultAccountId = current.defaultAccountId ?? null;
+  }
+
+  const latestById = new Map((Array.isArray(latest.accounts) ? latest.accounts : [])
+    .filter((account) => account?.accountId)
+    .map((account) => [account.accountId, account]));
+  const currentById = new Map((Array.isArray(current.accounts) ? current.accounts : [])
+    .filter((account) => account?.accountId)
+    .map((account) => [account.accountId, account]));
+  const baselineById = new Map((Array.isArray(baseline.accounts) ? baseline.accounts : [])
+    .filter((account) => account?.accountId)
+    .map((account) => [account.accountId, account]));
+
+  for (const [accountId, currentAccount] of currentById) {
+    const baselineAccount = baselineById.get(accountId);
+    const latestAccount = latestById.get(accountId);
+    if (!baselineAccount) {
+      latestById.set(accountId, structuredClone(currentAccount));
+      continue;
+    }
+    if (!latestAccount) {
+      // A sibling runtime explicitly removed this baseline account. Do not
+      // resurrect it from an unchanged in-memory snapshot.
+      continue;
+    }
+    if (jsonEqual(currentAccount, baselineAccount)) continue;
+    const changedAccount = { ...latestAccount };
+    for (const [key, value] of Object.entries(currentAccount)) {
+      if (!jsonEqual(value, baselineAccount[key])) changedAccount[key] = structuredClone(value);
+    }
+    latestById.set(accountId, changedAccount);
+  }
+
+  // A removal is an explicit local mutation and must survive a stale sibling
+  // runtime's later save. Accounts added by that sibling are not in the
+  // baseline, so they remain untouched.
+  for (const accountId of baselineById.keys()) {
+    if (!currentById.has(accountId)) latestById.delete(accountId);
+  }
+  merged.accounts = [...latestById.values()];
+  return merged;
 }
 
 export function createDefaultProviderEntries(options = {}) {
@@ -169,7 +262,12 @@ export class DockyardRuntime {
   #candidates = new Map();
   #refreshPromises = new Map();
   #accountRefreshPromises = new Map();
+  #stateBaselines = new Map();
   #saveQueue = Promise.resolve();
+  // Per-provider import transactions. Import work is async (OAuth, network);
+  // without serialization two concurrent imports could roll each other back
+  // through stale pool snapshots.
+  #providerImportQueues = new Map();
   #initialized = false;
   #initPromise = null;
 
@@ -184,7 +282,12 @@ export class DockyardRuntime {
     this.runtime = runtime;
     this.stateStore = stateStore;
     this.secretStore = secretStore;
-    this.bridge = new DshInjectionBridge({ runtime, adapter: dshAdapter });
+    this.contextWindowOverrides = new ContextWindowOverrideStore({ stateStore });
+    this.bridge = new DshInjectionBridge({
+      runtime,
+      adapter: dshAdapter,
+      contextWindowOverrides: this.contextWindowOverrides,
+    });
     this.providers = providers;
     this.refreshTimeoutMs = refreshTimeoutMs;
   }
@@ -202,9 +305,15 @@ export class DockyardRuntime {
     if (this.#initPromise) return this.#initPromise;
     this.#initPromise = (async () => {
       const state = await this.stateStore.load();
+      await this.contextWindowOverrides.ready();
       for (const entry of this.providers) {
         const providerId = entry.module.manifest.id;
         const stored = state.pools?.[providerId] ?? {};
+        this.#stateBaselines.set(providerId, structuredClone({
+          policy: stored.policy ?? ACCOUNT_SELECTION_POLICY.ROUND_ROBIN,
+          defaultAccountId: stored.defaultAccountId ?? null,
+          accounts: Array.isArray(stored.accounts) ? stored.accounts : [],
+        }));
         const pool = new AccountPool({
           providerId,
           policy: stored.policy ?? ACCOUNT_SELECTION_POLICY.ROUND_ROBIN,
@@ -355,14 +464,25 @@ export class DockyardRuntime {
     const entry = this.#entry(providerId);
     const candidate = this.#candidates.get(providerId)?.get(candidateId);
     if (!candidate) throw new Error("Candidate is missing; scan local OAuth states again");
-    const rawAccount = await entry.module.importAccount(candidate, providerContext(this));
-    entry.pool.upsert(rawAccount, { resetHealth: true });
-    await this.#saveState([providerId]);
-    return {
-      account: entry.pool.get(rawAccount.accountId),
-      diagnostics: [],
-      needsRefresh: true,
-    };
+    return this.#enqueueProviderImport(providerId, async () => {
+      const before = providerStorageSnapshot(entry);
+      const beforeRefs = new Set(before.accounts.map((account) => account?.auth?.credentialRef).filter(Boolean));
+      let rawAccount;
+      try {
+        rawAccount = await entry.module.importAccount(candidate, providerContext(this));
+        entry.pool.upsert(rawAccount, { resetHealth: true });
+        await this.#saveState([providerId]);
+      } catch (error) {
+        restorePoolSnapshot(entry.pool, before);
+        await deleteUncommittedCredentials(this.secretStore, beforeRefs, rawAccount ? [rawAccount] : []);
+        throw error;
+      }
+      return {
+        account: entry.pool.get(rawAccount.accountId),
+        diagnostics: [],
+        needsRefresh: true,
+      };
+    });
   }
 
   async importSource(providerId, source) {
@@ -371,17 +491,29 @@ export class DockyardRuntime {
     if (typeof entry.module.importSource !== "function") {
       throw new Error(`Provider ${providerId} does not support OAuth source import`);
     }
-    const imported = await entry.module.importSource(source, providerContext(this));
-    const rawAccounts = Array.isArray(imported)
-      ? imported
-      : Array.isArray(imported?.accounts) ? imported.accounts : [imported];
-    const accounts = rawAccounts.filter((account) => account?.accountId).map((account) => {
-      entry.pool.upsert(account, { resetHealth: true });
-      return entry.pool.get(account.accountId);
+    return this.#enqueueProviderImport(providerId, async () => {
+      const before = providerStorageSnapshot(entry);
+      const beforeRefs = new Set(before.accounts.map((account) => account?.auth?.credentialRef).filter(Boolean));
+      let rawAccounts = [];
+      try {
+        const imported = await entry.module.importSource(source, providerContext(this));
+        rawAccounts = Array.isArray(imported)
+          ? imported
+          : Array.isArray(imported?.accounts) ? imported.accounts : [imported];
+        const importable = rawAccounts.filter((account) => account?.accountId);
+        if (importable.length === 0) throw new Error("OAuth source did not contain an importable account");
+        for (const account of importable) entry.pool.upsert(account, { resetHealth: true });
+        await this.#saveState([providerId]);
+        return {
+          accounts: importable.map((account) => entry.pool.get(account.accountId)),
+          diagnostics: [],
+        };
+      } catch (error) {
+        restorePoolSnapshot(entry.pool, before);
+        await deleteUncommittedCredentials(this.secretStore, beforeRefs, rawAccounts);
+        throw error;
+      }
     });
-    if (accounts.length === 0) throw new Error("OAuth source did not contain an importable account");
-    await this.#saveState([providerId]);
-    return { accounts, diagnostics: [] };
   }
 
   async startAuthorization(providerId) {
@@ -422,7 +554,10 @@ export class DockyardRuntime {
   }
 
   async refreshAccount(providerId, accountId, { force = false, tolerateFailure = false } = {}) {
-    const key = `${providerId}\u0000${accountId}`;
+    // Deduplicate only calls with identical semantics: a lenient background
+    // refresh must never answer a strict foreground call (and vice versa),
+    // and forced refreshes must not be satisfied by cached in-flight ones.
+    const key = `${providerId}\u0000${accountId}\u0000${force ? "force" : "auto"}\u0000${tolerateFailure ? "lenient" : "strict"}`;
     const existing = this.#accountRefreshPromises.get(key);
     if (existing) return existing;
 
@@ -463,6 +598,9 @@ export class DockyardRuntime {
         providerAccount(entry.pool, accountId),
         providerContext(this, { force, signal }),
       );
+      // A provider may ignore AbortSignal and resolve after our timeout. Never
+      // commit a late refresh result into the live pool.
+      if (signal?.aborted) throw signal.reason ?? refreshTimeoutError(providerId, accountId, this.refreshTimeoutMs);
       this.#applyPatch(entry.pool, accountId, refresh);
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -487,7 +625,9 @@ export class DockyardRuntime {
       // authentication/status refresh. Reuse that result instead of issuing
       // the same provider request a second time.
       if (refresh && Object.hasOwn(refresh, "quota")) {
-        reportPostRefreshHealth(entry.pool, accountId);
+        reportPostRefreshHealth(entry.pool, accountId, {
+          allowExpiredRecovery: refresh.resources?.quotaSource === "antigravity_native",
+        });
         await this.#saveState([providerId]);
         return { account: entry.pool.get(accountId), diagnostics };
       }
@@ -495,12 +635,15 @@ export class DockyardRuntime {
         providerAccount(entry.pool, accountId),
         providerContext(this, { signal }),
       );
+      if (signal?.aborted) throw signal.reason ?? refreshTimeoutError(providerId, accountId, this.refreshTimeoutMs);
       this.#applyPatch(entry.pool, accountId, quota);
       // A provider refresh may only prove that its CLI/session metadata is
       // readable. Do not erase a native-request auth failure merely because a
       // later CLI status check succeeds; reauthorization/import is the action
       // that explicitly clears an expired transport credential.
-      reportPostRefreshHealth(entry.pool, accountId);
+      reportPostRefreshHealth(entry.pool, accountId, {
+        allowExpiredRecovery: quota.resources?.quotaSource === "antigravity_native",
+      });
     } catch (error) {
       if (signal?.aborted) throw error;
       diagnostics.push(`刷新实时额度失败：${redactError(error)}`);
@@ -586,16 +729,27 @@ export class DockyardRuntime {
     };
   }
 
-  async getCatalog(providerId) {
+  async getContextWindowOverride(input) {
+    await this.init();
+    return this.contextWindowOverrides.get(input);
+  }
+
+  async setContextWindowOverride(input, value) {
+    await this.init();
+    return this.contextWindowOverrides.set(input, value);
+  }
+
+  async getCatalog(providerId, context = {}) {
     await this.init();
     const entry = this.#entry(providerId);
     const accounts = entry.pool.list().map((account) => providerAccount(entry.pool, account.accountId));
-    return entry.module.getCatalog(providerContext(this, { accounts }));
+    return entry.module.getCatalog(providerContext(this, { ...context, accounts }));
   }
 
   async invoke(providerId, request, context = {}) {
     await this.init();
     const route = this.bridge.getRoute(providerId);
+    if (!route) throw new Error(`Unknown Dockyard provider route: ${providerId}`);
     try {
       return await route.invoke(request, providerContext(this, context));
     } finally {
@@ -660,9 +814,36 @@ export class DockyardRuntime {
     const rawAccounts = Array.isArray(result.accounts)
       ? result.accounts
       : result.account ? [result.account] : [];
-    const accounts = await this.#storeImportedAccounts(entry, rawAccounts);
-    await this.#saveState([providerId]);
-    return { ...result, accounts };
+    return this.#enqueueProviderImport(providerId, async () => {
+      const before = providerStorageSnapshot(entry);
+      const beforeRefs = new Set(before.accounts.map((account) => account?.auth?.credentialRef).filter(Boolean));
+      let accounts = [];
+      try {
+        accounts = await this.#storeImportedAccounts(entry, rawAccounts);
+        await this.#saveState([providerId]);
+      } catch (error) {
+        // Roll the pool back to the pre-import snapshot so a partially
+        // completed authorization cannot leave half-registered accounts
+        // behind, and drop credentials written for this import only.
+        restorePoolSnapshot(entry.pool, before);
+        await deleteUncommittedCredentials(this.secretStore, beforeRefs, rawAccounts.filter((value) => value?.accountId));
+        throw error;
+      }
+      return { ...result, accounts };
+    });
+  }
+
+  /**
+   * Serialize per-provider import transactions (candidate/source imports and
+   * completed OAuth authorizations). Each task takes its pool snapshot inside
+   * the critical section, so a failure rolls back against the newest state
+   * instead of resurrecting stale snapshots over concurrent successes.
+   */
+  #enqueueProviderImport(providerId, task) {
+    const previous = this.#providerImportQueues.get(providerId) ?? Promise.resolve();
+    const run = previous.then(task, task);
+    this.#providerImportQueues.set(providerId, run.then(() => {}, () => {}));
+    return run;
   }
 
   async #storeImportedAccounts(entry, rawAccounts) {
@@ -700,20 +881,25 @@ export class DockyardRuntime {
         };
         for (const [providerId, entry] of this.#entries) {
           if (!changed.has(providerId) && Object.hasOwn(pools, providerId)) continue;
-          pools[providerId] = {
-            policy: entry.pool.policy,
-            defaultAccountId: entry.pool.getDefaultAccountId(),
-            accounts: entry.pool.listForStorage(),
-          };
+          const current = providerStorageSnapshot(entry);
+          pools[providerId] = mergeProviderStorage(
+            pools[providerId],
+            current,
+            this.#stateBaselines.get(providerId),
+          );
         }
         return { ...latest, pools };
       };
       if (typeof this.stateStore.update === "function") {
         await this.stateStore.update(merge);
-        return;
+      } else {
+        const latest = await this.stateStore.load();
+        await this.stateStore.save(merge(latest));
       }
-      const latest = await this.stateStore.load();
-      await this.stateStore.save(merge(latest));
+      for (const providerId of changed) {
+        const entry = this.#entries.get(providerId);
+        if (entry) this.#stateBaselines.set(providerId, structuredClone(providerStorageSnapshot(entry)));
+      }
     };
     const queued = this.#saveQueue.then(write, write);
     this.#saveQueue = queued.catch(() => {});

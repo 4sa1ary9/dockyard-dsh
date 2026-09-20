@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   ACCOUNT_SELECTION_POLICY,
+  EventBus,
   ModuleRuntime,
   createProviderRoute,
 } from "../packages/core/src/index.mjs";
@@ -156,6 +157,94 @@ test("manual policy automatically uses the only eligible account", () => {
 
   assert.equal(pool.getDefaultAccountId(), "account-only");
   assert.equal(pool.select().accountId, "account-only");
+});
+
+test("account selection exclusions apply to manual, round-robin, and sticky policies", () => {
+  for (const policy of [
+    ACCOUNT_SELECTION_POLICY.MANUAL,
+    ACCOUNT_SELECTION_POLICY.ROUND_ROBIN,
+    ACCOUNT_SELECTION_POLICY.STICKY_SESSION,
+  ]) {
+    const pool = new AccountPool({ providerId: policy, policy, clock: fixedNow });
+    addAccount(pool, "account-a", { remaining: 1, limit: 2, unit: "requests" });
+    addAccount(pool, "account-b", { remaining: 1, limit: 2, unit: "requests" });
+    assert.equal(pool.select({ accountId: policy === ACCOUNT_SELECTION_POLICY.MANUAL ? "account-b" : undefined, sessionId: "session-1", excludeAccountIds: ["account-a"] }).accountId, "account-b");
+  }
+});
+
+test("reporting a removed account is a harmless no-op", () => {
+  const pool = new AccountPool({ providerId: "removed", policy: ACCOUNT_SELECTION_POLICY.MANUAL, clock: fixedNow });
+  addAccount(pool, "account-a", { remaining: 1, limit: 2, unit: "requests" });
+  pool.remove("account-a");
+  assert.equal(pool.report("account-a", { status: "success" }), null);
+});
+
+test("account summaries do not expose nested quota windows", () => {
+  const pool = new AccountPool({ providerId: "quota-copy", policy: ACCOUNT_SELECTION_POLICY.MANUAL, clock: fixedNow });
+  addAccount(pool, "account-a", {
+    remaining: 1,
+    limit: 2,
+    unit: "requests",
+    windows: [{ id: "hour", remaining: 1, limit: 2 }],
+  });
+  const summary = pool.get("account-a");
+  summary.quota.windows[0].remaining = 0;
+  assert.equal(pool.get("account-a").quota.windows[0].remaining, 1);
+});
+
+test("event listeners are isolated from each other", async () => {
+  const events = new EventBus();
+  const calls = [];
+  events.on("test", async () => { calls.push("first"); throw new Error("listener failed"); });
+  events.on("test", () => { calls.push("second"); });
+  const result = await events.emit("test", {});
+  assert.deepEqual(calls, ["first", "second"]);
+  assert.equal(result.errors.length, 1);
+});
+
+test("provider health reporting cannot mask a response after account removal", async () => {
+  const pool = new AccountPool({ providerId: "in-flight", policy: ACCOUNT_SELECTION_POLICY.MANUAL, clock: fixedNow });
+  addAccount(pool, "account-a", { remaining: 1, limit: 2, unit: "requests" });
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const route = createProviderRoute({
+    providerModule: {
+      manifest: { id: "in-flight" },
+      async invoke() {
+        await gate;
+        return { text: "ok" };
+      },
+    },
+    accountPool: pool,
+  });
+  const pending = route.invoke({}, { accountId: "account-a" });
+  pool.remove("account-a");
+  release();
+  assert.deepEqual(await pending, { text: "ok" });
+});
+
+test("a terminal provider failure is preserved instead of rewritten as empty output", async () => {
+  const pool = new AccountPool({ providerId: "terminal-error", policy: ACCOUNT_SELECTION_POLICY.MANUAL, clock: fixedNow });
+  addAccount(pool, "account-a", { remaining: 1, limit: 2, unit: "requests" });
+  const route = createProviderRoute({
+    providerModule: {
+      manifest: { id: "terminal-error" },
+      async *stream() {
+        yield { type: "finish", reason: { kind: "error", failure: { code: "TRANSPORT", message: "upstream disconnected" } } };
+      },
+    },
+    accountPool: pool,
+  });
+  await assert.rejects(
+    (async () => {
+      for await (const _chunk of route.stream({}, { accountId: "account-a" })) {}
+    })(),
+    (error) => {
+      assert.equal(error.code, "TRANSPORT");
+      assert.match(error.message, /upstream disconnected/);
+      return true;
+    },
+  );
 });
 
 test("DSH bridge mounts provider routes without provider-specific core branches", async () => {
@@ -354,14 +443,195 @@ test("DSH LLM adapter delegates provider-neutral streaming to the selected route
       defaultEffort: "medium",
     },
   }]);
+  const prepared = await adapter.prepareCall("openai-codex", "live-model");
+  assert.equal(prepared.model.id, "live-model");
+  assert.equal(prepared.model.provider, "openai-codex");
+  assert.equal(typeof prepared.stream, "function");
+  const preparedChunks = [];
+  for await (const chunk of prepared.stream({ provider: "openai-codex", model: "live-model", sessionId: "session-prepared" })) {
+    preparedChunks.push(chunk);
+  }
+  assert.equal(preparedChunks[0].text, "ok");
   const chunks = [];
   for await (const chunk of adapter.stream({ provider: "openai-codex", model: "live-model", sessionId: "session-a" })) {
     chunks.push(chunk);
   }
   assert.equal(chunks[0].text, "ok");
-  assert.equal(emitted[0].context.sessionId, "session-a");
+  assert.equal(emitted[0].context.sessionId, "session-prepared");
   assert.equal(emitted[0].context.attachments, attachments);
   assert.equal(emitted[0].request.model, "live-model");
+  assert.equal(emitted[1].context.sessionId, "session-a");
+  assert.equal(emitted[1].context.attachments, attachments);
+  assert.equal(emitted[1].request.model, "live-model");
+});
+
+test("DSH LLM adapter does not block a cold stream on provider catalog discovery", async () => {
+  let resolveCatalog;
+  let catalogCalls = 0;
+  const pendingCatalog = new Promise((resolve) => { resolveCatalog = resolve; });
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["grok"],
+      listProviderManifests: () => [{ id: "grok", displayName: "Grok" }],
+      async getCatalog() {
+        catalogCalls += 1;
+        return pendingCatalog;
+      },
+      async stream() {
+        return (async function* chunks() {
+          yield { type: "text-delta", index: 0, text: "fast" };
+          yield { type: "finish", reason: { kind: "stop" } };
+        })();
+      },
+    },
+  });
+
+  const stream = adapter.stream({ provider: "grok", model: "grok-4.6" });
+  const first = stream.next();
+  const outcome = await Promise.race([
+    first.then(() => "stream"),
+    new Promise((resolve) => setTimeout(() => resolve("timeout"), 100)),
+  ]);
+  assert.equal(outcome, "stream");
+  assert.equal(catalogCalls, 1);
+
+  resolveCatalog({ models: [{ id: "grok-4.6", name: "Grok 4.6" }] });
+  assert.deepEqual((await first).value, { type: "text-delta", index: 0, text: "fast" });
+  await stream.next();
+  await stream.return();
+});
+
+test("DSH LLM adapter makes Codex WebSocket 1006 retryable", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["openai-codex"],
+      listProviderManifests: () => [{ id: "openai-codex", displayName: "Live Codex" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          yield {
+            type: "finish",
+            reason: {
+              kind: "error",
+              failure: { code: "PI_AI_ERROR", message: "WebSocket closed 1006" },
+            },
+          };
+        })();
+      },
+    },
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: "openai-codex", model: "live-model" })) {
+    chunks.push(chunk);
+  }
+  assert.deepEqual(chunks, [{
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: { code: "TRANSPORT", message: "WebSocket closed 1006" },
+    },
+  }]);
+});
+
+test("DSH LLM adapter turns a thrown empty provider stream into retryable EMPTY_RESPONSE", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["openai-codex"],
+      listProviderManifests: () => [{ id: "openai-codex", displayName: "Live Codex" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          const error = new Error("Provider stream ended without substantive output");
+          error.code = "EMPTY_STREAM_OUTPUT";
+          error.emptyOutput = true;
+          throw error;
+        })();
+      },
+    },
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: "openai-codex", model: "live-model" })) {
+    chunks.push(chunk);
+  }
+  assert.deepEqual(chunks, [{
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: {
+        code: "EMPTY_RESPONSE",
+        message: "Provider stream ended without substantive output",
+      },
+    },
+  }]);
+});
+
+test("DSH LLM adapter turns a thrown transport failure into a retryable finish", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["openai-codex"],
+      listProviderManifests: () => [{ id: "openai-codex", displayName: "Live Codex" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          const error = new Error("WebSocket closed 1006");
+          error.code = "PI_AI_ERROR";
+          throw error;
+        })();
+      },
+    },
+  });
+
+  const chunks = [];
+  for await (const chunk of adapter.stream({ provider: "openai-codex", model: "live-model" })) {
+    chunks.push(chunk);
+  }
+  assert.deepEqual(chunks, [{
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: { code: "TRANSPORT", message: "WebSocket closed 1006" },
+    },
+  }]);
+});
+
+test("DSH LLM adapter does not replay an empty-output failure after forwarding output", async () => {
+  const adapter = createDockyardLlmAdapter({
+    runtime: {
+      listProviderIds: () => ["openai-codex"],
+      listProviderManifests: () => [{ id: "openai-codex", displayName: "Live Codex" }],
+      async getCatalog() {
+        return { models: [{ id: "live-model", name: "Live model" }] };
+      },
+      async stream() {
+        return (async function* chunks() {
+          yield { type: "text-delta", index: 0, text: "partial" };
+          const error = new Error("Provider stream ended without substantive output");
+          error.code = "EMPTY_STREAM_OUTPUT";
+          error.emptyOutput = true;
+          throw error;
+        })();
+      },
+    },
+  });
+
+  await assert.rejects(
+    (async () => {
+      for await (const _chunk of adapter.stream({ provider: "openai-codex", model: "live-model" })) {}
+    })(),
+    (error) => {
+      assert.equal(error.code, "EMPTY_STREAM_OUTPUT");
+      assert.equal(error.emptyOutput, true);
+      return true;
+    },
+  );
 });
 
 test("DSH LLM adapter does not expose duplicate provider model rows", async () => {

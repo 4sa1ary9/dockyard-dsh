@@ -271,6 +271,16 @@ export class DockyardDshService {
     return this.runtime.removeAccount(providerId, accountId);
   }
 
+  async getContextWindowOverride(input) {
+    await this.ready;
+    return this.runtime.getContextWindowOverride(input);
+  }
+
+  async setContextWindowOverride(input, value) {
+    await this.ready;
+    return this.runtime.setContextWindowOverride(input, value);
+  }
+
   async startAuthorization(providerInput, { openBrowser = true } = {}) {
     await this.ready;
     const manifest = manifestFor(this.runtime, providerInput);

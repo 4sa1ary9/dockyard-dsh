@@ -13,7 +13,7 @@ Run from the repository root on macOS:
 The build downloads and embeds:
 
 - Node.js `22.19.0` for both `darwin-arm64` and `darwin-x64`;
-- `@deepseek-ai/dsh@0.1.0-rc.6` and its runtime dependencies;
+- `@deepseek-ai/dsh@0.1.1-rc.2` and its runtime dependencies;
 - the prebuilt Dockyard DSH plugin;
 - a preassembled DSH `web` profile;
 - the official DeepSeek favicon as the application icon.

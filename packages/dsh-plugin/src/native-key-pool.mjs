@@ -337,11 +337,12 @@ export class NativeKeyPoolController {
     const key = String(value ?? "").trim();
     if (!key) throw new Error(this.t?.("native.error.enterApiKey") ?? "Enter an API Key");
     this.setState({ action: "add", status: "loading", providerId, error: null, message: null });
+    let ref = null;
     try {
       await this.ensure(providerId);
       const current = this.store.getSnapshot();
       if (!current.native) throw new Error(this.t?.("native.error.notNativeProvider") ?? "The current model is not a native DSH API Key provider");
-      const ref = makeKeyRef(providerId);
+      ref = makeKeyRef(providerId);
       resultValue(await this.api.credentials.set({ ref, value: key }), this.operation("native.operation.saveApiKey", "Save API Key"));
       await this.mutateProfile(providerId, ref);
       const metadata = readMetadata(providerId);
@@ -356,6 +357,13 @@ export class NativeKeyPoolController {
       this.setState({ message: this.t?.("native.message.keySaved") ?? "The Key was written to DSH Credentials and set as the current Key.", action: null, status: "ready" });
       return this.store.getSnapshot();
     } catch (error) {
+      // The secret value is already persisted once credentials.set succeeds.
+      // If a later step failed, remove the orphaned secret so a reported
+      // failure never leaves an unindexed credential behind. Refs are unique
+      // per call, so deleting can never drop a previously stored Key.
+      if (ref && typeof this.api?.credentials?.delete === "function") {
+        await this.api.credentials.delete({ ref }).catch(() => {});
+      }
       this.setState({ action: null, status: "error", providerId, error: errorMessage(error, this.t) });
       return null;
     }

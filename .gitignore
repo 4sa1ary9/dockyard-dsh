@@ -14,3 +14,4 @@ node_modules/
 # they are the prebuilt entry points used by GitHub installs.
 
 dist/macos/
+artifacts/

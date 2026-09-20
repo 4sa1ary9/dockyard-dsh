@@ -13,6 +13,7 @@ import {
 } from "../../../packages/providers/src/cli-agent-transport.mjs";
 import {
   addSecondsIso,
+  assertSecureEndpointUrl,
   finiteNumber,
   isoFromEpoch,
   recursiveQuotaWindows,
@@ -37,6 +38,16 @@ const DEFAULT_CLI = "agy";
 const DEFAULT_CATALOG_TTL_MS = 60_000;
 const DEFAULT_AUTH_TIMEOUT_MS = 10 * 60 * 1000;
 const CREDENTIAL_SLOT = Symbol("dockyard-antigravity-session");
+const ANTIGRAVITY_CREDENTIAL_REFRESH_MODES = Object.freeze({
+  DSH_BROWSER_OAUTH: "dockyard_browser_oauth",
+  AGY_SESSION: "agy_session",
+});
+// Antigravity's CLI keeps OAuth in the OS keyring by default. That is a poor
+// boundary for a host process that also needs the rotated bearer token: the
+// keyring can refresh successfully while the legacy token file stays stale.
+// The official CLI supports this switch for a file-backed session, allowing
+// DSH to mirror the same rotation into its own secure credential store.
+const AGY_FILE_STORAGE_ENV = "GEMINI_FORCE_FILE_STORAGE";
 const ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || "";
 const ANTIGRAVITY_BROWSER_CLIENT_SECRET = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || "";
 const ANTIGRAVITY_BROWSER_AUTHORIZATION_URL = process.env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL
@@ -49,16 +60,18 @@ const ANTIGRAVITY_BROWSER_REDIRECT_URI = process.env.DOCKYARD_ANTIGRAVITY_REDIRE
   || "http://localhost:51121/oauth-callback";
 const ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE
   || [
+    // The same OAuth token is used both for userinfo and Google's Code Assist
+    // endpoints. Keep the upstream API scope instead of authorizing a token
+    // that can identify the user but cannot call streamGenerateContent.
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/cclog",
-    "https://www.googleapis.com/auth/experimentsandconfigs",
   ].join(" ");
 
-// agy models currently returns only id/name rows. Keep this small fallback
-// tied to Google's published model card until the live registry exposes the
-// same family metadata; do not infer capacity from request usage.
+// agy models currently returns only id/name rows. These pinned capacities
+// mirror Google's published model card and act purely as a capacity overlay:
+// mergedAntigravityRegistry attaches them only when the live directory itself
+// references the id, so the fallback can never invent a callable model.
 // Source: https://deepmind.google/models/model-cards/gemini-3-7-flash/
 const OFFICIAL_ANTIGRAVITY_MODEL_METADATA = Object.freeze([
   Object.freeze({
@@ -226,6 +239,33 @@ function tokenNeedsRefresh(credential, now, leewayMs = 60_000) {
   return !Number.isFinite(expiresAt) || expiresAt <= now.getTime() + leewayMs;
 }
 
+function officialAntigravityTokenPath(environment) {
+  const home = environment?.HOME || homedir();
+  return environment?.DOCKYARD_ANTIGRAVITY_TOKEN_FILE
+    || join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+}
+
+function agyRefreshEnvironment(environment, tokenPath) {
+  return {
+    ...environment,
+    DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath,
+    [AGY_FILE_STORAGE_ENV]: "true",
+    AGY_CLI_HIDE_ACCOUNT_INFO: "1",
+  };
+}
+
+function credentialRefreshMode(account) {
+  const explicit = account?.resources?.credentialRefreshMode;
+  if (explicit) return explicit;
+  // Accounts imported before credentialRefreshMode was persisted still carry
+  // the captured marker from agy's isolated browser profile. Treat those
+  // legacy records as agy sessions instead of attempting a DSH OAuth refresh
+  // with the wrong client credentials.
+  return account?.resources?.sessionPersistence === "captured"
+    ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION
+    : null;
+}
+
 function cliFailure(code, signal, output, errorOutput) {
   const error = new Error(`Antigravity CLI failed (${signal ?? code})`);
   error.code = code;
@@ -259,22 +299,37 @@ function runCommand(command, args, {
     });
     const stdout = [];
     const stderr = [];
-    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+    let timedOut = false;
+    let killTimer = null;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* process is already gone */ }
+      // A CLI that ignores SIGTERM must not leave this promise pending forever;
+      // escalate to SIGKILL after a short grace period.
+      killTimer = setTimeout(() => {
+        try { child.kill("SIGKILL"); } catch { /* process is already gone */ }
+      }, 2_000);
+      killTimer.unref?.();
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => stdout.push(chunk));
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.on("error", (error) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       reject(error);
     });
-    child.on("close", (code, signal) => {
+    child.on("close", (code, closeSignal) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       const output = Buffer.concat(stdout).toString("utf8");
       const errorOutput = Buffer.concat(stderr).toString("utf8");
-      if (code === 0) {
+      if (!timedOut && code === 0) {
         resolve({ output, errorOutput });
         return;
       }
-      reject(cliFailure(code, signal, output, errorOutput));
+      const failure = cliFailure(code, closeSignal, output, errorOutput);
+      if (timedOut) failure.message = `Antigravity CLI timed out after ${timeoutMs}ms`;
+      reject(failure);
     });
   });
 }
@@ -426,12 +481,22 @@ function registryModels(value) {
   return [];
 }
 
-function mergedAntigravityRegistry(registry) {
-  const byId = new Map(OFFICIAL_ANTIGRAVITY_MODEL_METADATA.map((model) => [model.id, { ...model }]));
+function mergedAntigravityRegistry(registry, liveModelIds = []) {
+  const byId = new Map();
   for (const candidate of registryModels(registry)) {
     if (!candidate || typeof candidate.id !== "string" || candidate.id.length === 0) continue;
     const defined = Object.fromEntries(Object.entries(candidate).filter(([, value]) => value !== undefined && value !== null));
     byId.set(candidate.id, { ...(byId.get(candidate.id) ?? {}), ...defined });
+  }
+  // The pinned model card is supplemental metadata, never a source of model
+  // ids: attach a pinned row only when the live directory lists the id itself
+  // or returns a reasoning tier of that family. Otherwise a retired upstream
+  // model would stay callable on paper while the provider no longer serves it.
+  for (const official of OFFICIAL_ANTIGRAVITY_MODEL_METADATA) {
+    const referenced = byId.has(official.id)
+      || liveModelIds.some((id) => id === official.id || id.startsWith(`${official.id}-`));
+    if (!referenced) continue;
+    byId.set(official.id, { ...official, ...(byId.get(official.id) ?? {}) });
   }
   return [...byId.values()];
 }
@@ -591,7 +656,10 @@ export function createAntigravityCatalogLoader({
         }
       }
       const liveModels = parseAntigravityModelCatalog(result.output);
-      const models = enrichAntigravityModelCatalog(liveModels, mergedAntigravityRegistry(registry));
+      const models = enrichAntigravityModelCatalog(
+        liveModels,
+        mergedAntigravityRegistry(registry, liveModels.map((model) => model.id)),
+      );
       const enriched = models.some((model, index) => {
         const original = liveModels[index];
         return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
@@ -1029,6 +1097,15 @@ function findCreditsData(value, depth = 0, seen = new Set()) {
   return null;
 }
 
+/** Normalize the credits block; the CLI and native payloads use either naming. */
+function creditsFromData(data) {
+  if (!data || typeof data !== "object") return null;
+  const remaining = finiteNumber(data.remaining_credits ?? data.remainingCredits);
+  const upgradeUri = stringValue(data.upgrade_uri ?? data.upgradeUri);
+  if (remaining === null && upgradeUri === null) return null;
+  return { remaining, upgradeUri };
+}
+
 function parseQuotaData(data, now = new Date(), source = "antigravity_cli") {
   const windows = [];
   for (const group of quotaGroups(data)) {
@@ -1097,6 +1174,7 @@ function candidate(now, {
   existingAccounts = [],
   source = "official_antigravity_cli",
   sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+  credentialRefreshMode = null,
 } = {}) {
   const normalizedEmail = normalizeEmail(email);
   const capturedSession = normalizedEmail && session && !session.email
@@ -1148,6 +1226,7 @@ function candidate(now, {
     credentialRef,
     resources: {
       ...officialSessionResources({ sourceKind, authSource: source }),
+      ...(credentialRefreshMode ? { credentialRefreshMode } : {}),
       identitySource,
       identityLabel,
       ...(fingerprint ? { sessionFingerprint: fingerprint } : {}),
@@ -1191,7 +1270,7 @@ export function summarizeAntigravityCandidate(value) {
   };
 }
 
-const ANTIGRAVITY_AUTH_URL_PATTERN = /https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?[^\s"'<>]+/i;
+const ANTIGRAVITY_AUTH_URL_PATTERN = /https:\/\/accounts\.google\.com\/o\/oauth2\/(?:v2\/)?auth\?[^\s"'<>]+/i;
 
 function cleanAntigravityAuthUrl(value) {
   return String(value ?? "")
@@ -1286,12 +1365,15 @@ export function createAntigravityOAuthAuthorizer({
           email: extractAntigravityAccountEmail(session.output),
           session: auth,
           existingAccounts: context?.accounts ?? [],
-           // agy's isolated temporary profile is a browser OAuth session, not
-           // the user's active local CLI session. Mark it accordingly so quota
-           // refresh and request execution use the captured credential instead
-           // of rejecting it as a session mismatch.
-           source: "official_antigravity_browser_oauth",
-           sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+          // agy's isolated temporary profile is a browser OAuth session, not
+          // the user's active local CLI session. Mark it accordingly so quota
+          // refresh and request execution use the captured credential instead
+          // of rejecting it as a session mismatch. Its refresh token belongs
+          // to agy's own OAuth client, so DSH must not exchange it with an
+          // unrelated/empty browser client.
+          source: "official_antigravity_browser_oauth",
+          sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+          credentialRefreshMode: ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION,
         });
         session.status = "completed";
         session.result = {
@@ -1446,6 +1528,11 @@ export class AntigravityOfficialSessionDriver {
     env = process.env,
     timeoutMs = 30_000,
     commandRunner = runCommand,
+    ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
+    // Background refresh is a non-interactive `agy models` call. The PTY is
+    // only needed for the browser bootstrap authorizer; wrapping this refresh
+    // in a PTY makes agy report a false exit-code failure on macOS.
+    usePtyForSessionRefresh = false,
     requestExecutor = null,
     catalogLoader = null,
     quotaReader = null,
@@ -1465,13 +1552,20 @@ export class AntigravityOfficialSessionDriver {
     fetchImpl = fetch,
     authorizationTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
   } = {}) {
+    // SECURITY.md: remote OAuth endpoints must be https (or loopback http)
+    // even when they come from the environment.
+    assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL");
     this.cliPath = cliPath;
     this.env = env;
     this.timeoutMs = timeoutMs;
     this.commandRunner = commandRunner;
+    this.ptyPythonPath = ptyPythonPath;
+    this.usePtyForSessionRefresh = usePtyForSessionRefresh;
     this.fetchImpl = fetchImpl;
-    this.browserTokenUrl = tokenUrl;
-    this.browserUserInfoUrl = userInfoUrl;
+    this.browserTokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_ANTIGRAVITY_TOKEN_URL");
+    this.browserUserInfoUrl = userInfoUrl
+      ? assertSecureEndpointUrl(userInfoUrl, "DOCKYARD_ANTIGRAVITY_USERINFO_URL")
+      : userInfoUrl;
     this.browserClientId = clientId;
     this.browserClientSecret = clientSecret;
     this.requestExecutor = requestExecutor;
@@ -1549,6 +1643,7 @@ export class AntigravityOfficialSessionDriver {
             existingAccounts: context.accounts ?? [],
             source: "official_antigravity_browser_oauth",
             sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+            credentialRefreshMode: ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.DSH_BROWSER_OAUTH,
           });
           return [await this.importAccount(candidateValue, context)];
         },
@@ -1602,6 +1697,7 @@ export class AntigravityOfficialSessionDriver {
         throw activeSessionError("Antigravity OAuth session is unavailable; authorize again");
       }
       if (!current?.token || sessionFingerprint(current) !== expectedFingerprint) {
+        if (current?.token && context.allowSessionTokenRotation === true) return;
         // A rotated access token legitimately changes the token-based
         // fingerprint even though the local session belongs to the same
         // account. When the current session exposes a stable identity, verify
@@ -1631,6 +1727,186 @@ export class AntigravityOfficialSessionDriver {
     );
   }
 
+  async #refreshOfficialCredential(account, context = {}) {
+    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
+    if (typeof this.tokenResolver !== "function") return null;
+
+    let current;
+    try {
+      current = await this.tokenResolver({ env: this.env });
+    } catch (error) {
+      const wrapped = activeSessionError(`Antigravity official session could not be read: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+    if (!current?.token) return null;
+
+    const now = context.now instanceof Date ? context.now : new Date();
+    const credential = {
+      type: OFFICIAL_SESSION_AUTH_KIND,
+      providerId: PROVIDER_ID,
+      access: current.token,
+      ...(current.refreshToken ? { refresh: current.refreshToken } : {}),
+      ...(current.expiresAt ? { expiresAt: current.expiresAt } : {}),
+    };
+    if (!tokenNeedsRefresh(credential, now)) {
+      // When agy's Keychain has already rotated the session, keep DSH's own
+      // secure copy aligned even though no second CLI refresh is necessary.
+      const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+      if (current.source === "antigravity_keychain"
+        && credentialRef
+        && typeof context.secretStore?.write === "function") {
+        await context.secretStore.write(credentialRef, credential);
+      }
+      return { session: current, credential, rotated: false };
+    }
+    if (!current.refreshToken) {
+      throw activeSessionError("Antigravity official session has expired; authorize again");
+    }
+
+    // Refresh the real agy profile in place. agy's macOS keyring is global to
+    // the user and does not provide a per-HOME profile boundary; putting the
+    // child in a temporary HOME therefore caused the keychain lookup shown by
+    // the user and left DSH with the old file token. Keep HOME/XDG untouched,
+    // ask agy to use its supported file-backed session, then mirror the
+    // rotated credential into DSH's own secure store below.
+    const officialTokenPath = officialAntigravityTokenPath(this.env);
+    const officialHome = this.env.HOME || homedir();
+    const childEnv = agyRefreshEnvironment(this.env, officialTokenPath);
+    try {
+      await mkdir(dirname(officialTokenPath), { recursive: true, mode: 0o700 });
+      const refreshCommand = this.usePtyForSessionRefresh ? this.ptyPythonPath : this.cliPath;
+      const refreshArgs = this.usePtyForSessionRefresh
+        ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, this.cliPath, "models"]
+        : ["models"];
+      await this.commandRunner(refreshCommand, refreshArgs, {
+        env: childEnv,
+        timeoutMs: this.timeoutMs,
+        signal: context.signal,
+      });
+      let refreshed = null;
+      try {
+        // agy may refresh the keyring without rewriting its legacy file. Read
+        // the provider-owned keyring again before accepting the file copy.
+        refreshed = await this.tokenResolver({ env: this.env });
+      } catch {
+        // The file fallback below remains useful for older/headless agy builds.
+      }
+      refreshed = refreshed?.token
+        ? refreshed
+        : readAntigravityTokenFile({ env: childEnv, home: officialHome });
+      if (!refreshed?.token) throw new Error("agy did not persist a refreshed OAuth token");
+      const nextCredential = {
+        ...credential,
+        access: refreshed.token,
+        ...(refreshed.refreshToken ? { refresh: refreshed.refreshToken } : {}),
+        ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}),
+        lastRefreshedAt: now.toISOString(),
+      };
+      const expiry = nextCredential.expiresAt ? Date.parse(nextCredential.expiresAt) : Number.NaN;
+      const expiryAdvanced = Number.isFinite(expiry) && expiry > now.getTime() + 60_000;
+      if (nextCredential.access === credential.access && !expiryAdvanced) {
+        throw new Error("agy did not advance the Antigravity OAuth token expiry");
+      }
+      await mkdir(dirname(officialTokenPath), { recursive: true, mode: 0o700 });
+      const persistedPath = `${officialTokenPath}.${randomUUID()}.tmp`;
+      try {
+        await writeFile(persistedPath, JSON.stringify({
+          auth_method: "consumer",
+          token: {
+            access_token: nextCredential.access,
+            refresh_token: nextCredential.refresh,
+            token_type: "Bearer",
+            ...(nextCredential.expiresAt ? { expiry: nextCredential.expiresAt } : {}),
+          },
+        }), { encoding: "utf8", mode: 0o600 });
+        await rename(persistedPath, officialTokenPath);
+      } finally {
+        await rm(persistedPath, { force: true }).catch(() => {});
+      }
+      const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+      if (credentialRef && typeof context.secretStore?.write === "function") {
+        await context.secretStore.write(credentialRef, nextCredential);
+      }
+      return { session: refreshed, credential: nextCredential, rotated: true };
+    } catch (error) {
+      if (error?.authExpired) throw error;
+      const wrapped = activeSessionError(`Antigravity official session refresh failed: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+  }
+
+  async #refreshAgyCredential(credential, context = {}) {
+    if (!credential?.refresh) {
+      throw activeSessionError("Antigravity agy session has no refresh token; authorize again");
+    }
+
+    const tokenPath = officialAntigravityTokenPath(this.env);
+    const officialHome = this.env.HOME || homedir();
+    const childEnv = agyRefreshEnvironment(this.env, tokenPath);
+    const now = context.now instanceof Date ? context.now : new Date();
+
+    try {
+      await mkdir(dirname(tokenPath), { recursive: true, mode: 0o700 });
+      // A captured browser session may be the first DSH record and therefore
+      // have no file in the official profile yet. Seed only that missing file;
+      // an existing file remains authoritative for the active agy profile.
+      if (!readAntigravityTokenFile({ env: childEnv, home: officialHome })?.token) {
+        await writeFile(tokenPath, JSON.stringify({
+          auth_method: "consumer",
+          token: {
+            access_token: credential.access,
+            refresh_token: credential.refresh,
+            token_type: "Bearer",
+            ...(credential.expiresAt ? { expiry: credential.expiresAt } : {}),
+          },
+        }), { encoding: "utf8", mode: 0o600 });
+      }
+
+      // `agy models` is a provider-owned authenticated command. It refreshes
+      // the token file when the access token is stale without spending a
+      // generation request, and keeps Google's client id/secret inside agy.
+      await this.commandRunner(this.cliPath, ["models"], {
+        env: childEnv,
+        timeoutMs: this.timeoutMs,
+        signal: context.signal,
+      });
+
+      let refreshed = null;
+      try {
+        refreshed = await this.tokenResolver({ env: this.env });
+      } catch {
+        // Fall back to the stable file for older/headless agy builds.
+      }
+      refreshed = refreshed?.token
+        ? refreshed
+        : readAntigravityTokenFile({ env: childEnv, home: officialHome });
+      if (!refreshed?.token) {
+        throw new Error("agy did not persist a refreshed OAuth token");
+      }
+      const next = {
+        ...credential,
+        access: refreshed.token,
+        ...(refreshed.refreshToken ? { refresh: refreshed.refreshToken } : {}),
+        ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}),
+        lastRefreshedAt: now.toISOString(),
+      };
+      const accessChanged = next.access !== credential.access;
+      const expiry = next.expiresAt ? Date.parse(next.expiresAt) : Number.NaN;
+      const expiryAdvanced = Number.isFinite(expiry) && expiry > now.getTime() + 60_000;
+      if (!accessChanged && !expiryAdvanced) {
+        throw new Error("agy did not advance the Antigravity OAuth token expiry");
+      }
+      return next;
+    } catch (error) {
+      if (error?.authExpired) throw error;
+      const wrapped = activeSessionError(`Antigravity agy session refresh failed: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+  }
+
   async #refreshBrowserCredential(account, context = {}) {
     if (account?.resources?.sessionSource !== OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
     const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
@@ -1641,7 +1917,22 @@ export class AntigravityOfficialSessionDriver {
     if (!credential?.access) {
       throw activeSessionError("Antigravity browser OAuth credential is missing; authorize again");
     }
+    const refreshMode = credentialRefreshMode(account);
+    const dshManagedRefresh = refreshMode !== ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION;
     const now = context.now instanceof Date ? context.now : new Date();
+    if (refreshMode === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION) {
+      if (!tokenNeedsRefresh(credential, now)) return credential;
+      const updated = await this.#refreshAgyCredential(credential, context);
+      await context.secretStore.write(credentialRef, updated);
+      return updated;
+    }
+    // Accounts captured from agy's temporary browser profile carry agy's
+    // refresh token, not a token issued for DSH's optional browser OAuth
+    // client. The standard DSH launch agent also has no browser client
+    // credentials. In either case the captured access token must be used as-is
+    // for native quota/invocation instead of turning a successful login into
+    // the misleading "订阅未返回" state with a blank client refresh call.
+    if (!dshManagedRefresh || !this.browserClientId || !this.browserClientSecret) return credential;
     if (!tokenNeedsRefresh(credential, now)) return credential;
     if (!credential.refresh) {
       throw activeSessionError("Antigravity browser OAuth token expired; authorize again");
@@ -1687,6 +1978,8 @@ export class AntigravityOfficialSessionDriver {
     const credentialRef = account?.auth?.credentialRef;
     if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
       credential = await this.#refreshBrowserCredential(account, context);
+    } else if (context.officialCredential) {
+      credential = context.officialCredential;
     } else if (credentialRef && context.secretStore && typeof context.secretStore.read === "function") {
       credential = await context.secretStore.read(credentialRef);
     }
@@ -1818,8 +2111,17 @@ export class AntigravityOfficialSessionDriver {
         accounts: [account],
         diagnostic: null,
       };
-    } catch {
-      return null;
+    } catch (error) {
+      // Keep the no-session contract, but never swallow the cause silently:
+      // the redacted failure rides along so callers can surface why the
+      // official session could not be imported.
+      return {
+        status: "failed",
+        providerId: PROVIDER_ID,
+        instructions: "未能读取 Antigravity 官方会话，请重新扫描或登录。",
+        accounts: [],
+        diagnostic: redactError(error),
+      };
     }
   }
 
@@ -1850,12 +2152,16 @@ export class AntigravityOfficialSessionDriver {
   }
 
   async refreshAccount(account, context = {}) {
-    await this.#refreshBrowserCredential(account, context);
-    await this.#assertActiveSession(account, context);
+    const browserCredential = await this.#refreshBrowserCredential(account, context);
+    const officialCredential = await this.#refreshOfficialCredential(account, context);
+    await this.#assertActiveSession(account, {
+      ...context,
+      ...(officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}),
+    });
     const now = context.now instanceof Date ? context.now : new Date();
-    let session = null;
+    let session = officialCredential?.session ?? null;
     try {
-      session = await this.tokenResolver({ env: this.env });
+      session = session ?? await this.tokenResolver({ env: this.env });
     } catch {
       // The fingerprint below stays absent when the local session cannot be
       // read; the account keeps its existing fingerprint.
@@ -1865,10 +2171,19 @@ export class AntigravityOfficialSessionDriver {
       ? { ...session, email: sessionEmail }
       : session);
     const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
+    const persistedRefreshMode = account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+      ? credentialRefreshMode(account)
+        ?? (!this.browserClientId || !this.browserClientSecret
+          ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION
+          : null)
+      : null;
     const identityPatch = sessionEmail ? { email: sessionEmail } : {};
     let nativeError = null;
     try {
-      const native = await this.#nativeQuota(account, context, now);
+      const native = await this.#nativeQuota(account, {
+        ...context,
+        ...(officialCredential?.credential ? { officialCredential: officialCredential.credential } : {}),
+      }, now);
       if (native) {
         const primary = selectPrimaryQuotaWindow(native.windows);
         return {
@@ -1880,12 +2195,23 @@ export class AntigravityOfficialSessionDriver {
             source: "antigravity_native",
           },
           credits: native.credits,
-          resources: { quotaSource: "antigravity_native", ...fingerprintResources },
+          resources: {
+            quotaSource: "antigravity_native",
+            ...(persistedRefreshMode ? { credentialRefreshMode: persistedRefreshMode } : {}),
+            ...fingerprintResources,
+          },
           refresh: {
-            accessTokenExpiresAt: null,
+            accessTokenExpiresAt: browserCredential?.expiresAt
+              ?? officialCredential?.credential?.expiresAt
+              ?? account.refresh?.accessTokenExpiresAt
+              ?? null,
             nextRefreshAt: null,
-            lastRefreshedAt: now.toISOString(),
-            refreshable: null,
+            lastRefreshedAt: browserCredential?.lastRefreshedAt ?? account.refresh?.lastRefreshedAt ?? now.toISOString(),
+            refreshable: browserCredential
+              ? Boolean(browserCredential.refresh)
+              : officialCredential?.credential
+                ? Boolean(officialCredential.credential.refresh)
+                : account.refresh?.refreshable ?? null,
           },
         };
       }
@@ -1915,12 +2241,7 @@ export class AntigravityOfficialSessionDriver {
         updatedAt: now.toISOString(),
         source: "antigravity_cli",
       },
-      credits: creditsResult?.parsed?.command?.data
-        ? {
-          remaining: finiteNumber(creditsResult.parsed.command.data.remaining_credits),
-          upgradeUri: stringValue(creditsResult.parsed.command.data.upgrade_uri),
-        }
-        : null,
+      credits: creditsFromData(creditsResult?.parsed?.command?.data),
       resources: fingerprintResources,
       refresh: {
         accessTokenExpiresAt: null,
@@ -1932,11 +2253,20 @@ export class AntigravityOfficialSessionDriver {
   }
 
   async getQuota(account, context = {}) {
-    await this.#assertActiveSession(account, context);
+    const browserCredential = await this.#refreshBrowserCredential(account, context);
+    const officialCredential = await this.#refreshOfficialCredential(account, context);
+    await this.#assertActiveSession(account, {
+      ...context,
+      ...(officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}),
+    });
     const now = context.now instanceof Date ? context.now : new Date();
     let nativeError = null;
     try {
-      const native = await this.#nativeQuota(account, context, now);
+      const native = await this.#nativeQuota(account, {
+        ...context,
+        ...(browserCredential ? { browserCredential } : {}),
+        ...(officialCredential?.credential ? { officialCredential: officialCredential.credential } : {}),
+      }, now);
       if (native) {
         const primary = selectPrimaryQuotaWindow(native.windows);
         return {
@@ -1969,7 +2299,7 @@ export class AntigravityOfficialSessionDriver {
     const data = quotaResult.parsed?.command?.data;
     const windows = parseQuotaData(data, now);
     const fallbackWindows = windows.length ? windows : parseQuotaText(quotaResult.parsed?.response ?? "", now);
-    const credits = creditsResult?.parsed?.command?.data ?? null;
+    const credits = creditsFromData(creditsResult?.parsed?.command?.data);
     const primary = selectPrimaryQuotaWindow(fallbackWindows);
     return {
       quota: {
@@ -1978,9 +2308,7 @@ export class AntigravityOfficialSessionDriver {
         updatedAt: now.toISOString(),
         source: "antigravity_cli",
       },
-      credits: credits
-        ? { remaining: finiteNumber(credits.remaining_credits), upgradeUri: stringValue(credits.upgrade_uri) }
-        : null,
+      credits,
       refresh: {
         accessTokenExpiresAt: null,
         nextRefreshAt: null,
@@ -1999,7 +2327,11 @@ export class AntigravityOfficialSessionDriver {
 
   async invoke(request, invocation, context = {}) {
     await this.#refreshBrowserCredential(invocation?.account, context);
-    await this.#assertActiveSession(invocation?.account, context);
+    const officialCredential = await this.#refreshOfficialCredential(invocation?.account, context);
+    await this.#assertActiveSession(invocation?.account, {
+      ...context,
+      ...(officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}),
+    });
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");

@@ -122,6 +122,14 @@ export class DockyardRemoteService extends TypertRemoteService {
     if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool 尚未挂载");
     return this.nativeKeyPool.setPolicy(request.providerId, request.policy);
   }
+
+  async getContextWindowOverride(request = {}) {
+    return this.dockyard.getContextWindowOverride(request);
+  }
+
+  async setContextWindowOverride(request = {}) {
+    return this.dockyard.setContextWindowOverride(request, request.value);
+  }
 }
 
 function markRemoteMethods() {
@@ -129,6 +137,7 @@ function markRemoteMethods() {
   for (const name of [
     "snapshot", "refresh", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
     "nativeKeyStatus", "nativeKeyRefresh", "nativeKeyRegister", "nativeKeyUnregister", "nativeKeySetPolicy",
+    "getContextWindowOverride", "setContextWindowOverride",
   ]) {
     let initializer;
     Remote(name)(undefined, {

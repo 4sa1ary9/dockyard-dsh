@@ -1,6 +1,26 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
+const MAX_CLI_OUTPUT_BYTES = 4 * 1024 * 1024;
+// POSIX CLIs fork helper processes; only killing the direct pid turns those
+// helpers into orphans. On POSIX we spawn the CLI as a detached process-group
+// leader so the whole group can be signalled together.
+const PROCESS_GROUP_PLATFORM = process.platform !== "win32";
+const KILL_GRACE_MS = 1_000;
+
+function appendBounded(chunks, chunk, state) {
+  const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ""));
+  const remaining = MAX_CLI_OUTPUT_BYTES - state.total;
+  if (remaining <= 0) return;
+  const accepted = value.subarray(0, remaining);
+  chunks.push(accepted);
+  state.total += accepted.byteLength;
+}
+
+function boundedCliDetail(output, errorOutput) {
+  return String(errorOutput || output || "").replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
 function cliFailure(code, signal, output, errorOutput, providerId) {
   const error = new Error(`${providerId ?? "provider"} CLI failed (${signal ?? code})`);
   error.code = code;
@@ -9,6 +29,44 @@ function cliFailure(code, signal, output, errorOutput, providerId) {
     .trim()
     .slice(0, 500);
   return error;
+}
+
+/** Stable timeout failure: a CLI that traps SIGTERM must not read as success. */
+function cliTimeoutError(providerId, output, errorOutput) {
+  const error = new Error(`${providerId ?? "provider"} CLI request timed out`);
+  error.code = "ETIMEDOUT";
+  error.providerId = providerId ?? null;
+  error.detail = boundedCliDetail(output, errorOutput);
+  return error;
+}
+
+/** Stable abort failure carrying ABORT_ERR semantics like fetch's AbortError. */
+function cliAbortError(providerId, output, errorOutput) {
+  const error = new Error(`${providerId ?? "provider"} CLI request aborted`);
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  error.providerId = providerId ?? null;
+  error.detail = boundedCliDetail(output, errorOutput);
+  return error;
+}
+
+/**
+ * Signal a CLI and everything it spawned. When the child is a detached group
+ * leader, signal the negative pid first so grandchildren die with it; ESRCH
+ * means the group is already gone. The direct pid always gets a fallback kill.
+ */
+function killProcessTree(child, sig, { detached = PROCESS_GROUP_PLATFORM } = {}) {
+  const pid = child?.pid;
+  if (detached && Number.isFinite(pid)) {
+    try {
+      process.kill(-pid, sig);
+    } catch (error) {
+      if (error?.code !== "ESRCH") {
+        try { child.kill(sig); } catch { /* process is already gone */ }
+      }
+    }
+  }
+  try { child.kill(sig); } catch { /* process is already gone */ }
 }
 
 export function parseJsonOutput(output) {
@@ -36,48 +94,83 @@ export function runCliCommand(command, args, {
   providerId,
 } = {}) {
   return new Promise((resolve, reject) => {
+    const detached = PROCESS_GROUP_PLATFORM;
     const child = spawn(command, args, {
       env,
       ...(cwd ? { cwd } : {}),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      detached,
       ...(signal ? { signal } : {}),
     });
     const stdout = [];
     const stderr = [];
+    const stdoutSize = { total: 0 };
+    const stderrSize = { total: 0 };
     let timedOut = false;
-    let forceTimer = null;
+    let abortRequested = Boolean(signal?.aborted);
+    let settled = false;
     let terminationRequested = false;
+    let forceTimer = null;
+    let timer = null;
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      signal?.removeEventListener?.("abort", onAbort);
+      settle(value);
+    };
     const terminate = () => {
       if (terminationRequested) return;
       terminationRequested = true;
-      try { child.kill("SIGTERM"); } catch { /* process is already gone */ }
+      killProcessTree(child, "SIGTERM", { detached });
       forceTimer = setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* process is already gone */ }
-      }, 1_000);
+        killProcessTree(child, "SIGKILL", { detached });
+      }, KILL_GRACE_MS);
       forceTimer.unref?.();
     };
-    const timer = setTimeout(() => {
+    const onAbort = () => {
+      abortRequested = true;
+      terminate();
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
       timedOut = true;
       terminate();
     }, timeoutMs);
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    timer.unref?.();
+    child.stdout.on("data", (chunk) => appendBounded(stdout, chunk, stdoutSize));
+    child.stderr.on("data", (chunk) => appendBounded(stderr, chunk, stderrSize));
     child.once("error", (error) => {
-      clearTimeout(timer);
-      if (forceTimer) clearTimeout(forceTimer);
-      reject(error);
-    });
-    child.once("close", (code, closeSignal) => {
-      clearTimeout(timer);
-      if (forceTimer) clearTimeout(forceTimer);
-      const output = Buffer.concat(stdout).toString("utf8");
-      const errorOutput = Buffer.concat(stderr).toString("utf8");
-      if (code === 0) {
-        resolve({ output, errorOutput });
+      if (error?.name === "AbortError" || abortRequested || signal?.aborted) {
+        finish(reject, cliAbortError(
+          providerId,
+          Buffer.concat(stdout).toString("utf8"),
+          Buffer.concat(stderr).toString("utf8"),
+        ));
         return;
       }
-      reject(cliFailure(code, timedOut ? "SIGTERM" : closeSignal, output, errorOutput, providerId));
+      finish(reject, error);
+    });
+    child.once("close", (code, closeSignal) => {
+      const output = Buffer.concat(stdout).toString("utf8");
+      const errorOutput = Buffer.concat(stderr).toString("utf8");
+      // A CLI that catches SIGTERM and exits 0 after the deadline still timed
+      // out; the exit code alone must never report success here.
+      if (timedOut) {
+        finish(reject, cliTimeoutError(providerId, output, errorOutput));
+        return;
+      }
+      if (abortRequested || signal?.aborted) {
+        finish(reject, cliAbortError(providerId, output, errorOutput));
+        return;
+      }
+      if (code === 0) {
+        finish(resolve, { output, errorOutput });
+        return;
+      }
+      finish(reject, cliFailure(code, closeSignal, output, errorOutput, providerId));
     });
   });
 }
@@ -90,17 +183,23 @@ export function runCliStreamingCommand(command, args, {
   providerId,
 } = {}) {
   return (async function* streamLines() {
+    const detached = PROCESS_GROUP_PLATFORM;
     const child = spawn(command, args, {
       env,
       ...(cwd ? { cwd } : {}),
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      detached,
       ...(signal ? { signal } : {}),
     });
     const stdout = [];
     const stderr = [];
+    const stdoutSize = { total: 0 };
+    const stderrSize = { total: 0 };
+    let outputLimitError = null;
     let spawnError = null;
     let timedOut = false;
+    let abortRequested = Boolean(signal?.aborted);
     let closedResult = null;
     let forceTimer = null;
     let timer = null;
@@ -108,19 +207,25 @@ export function runCliStreamingCommand(command, args, {
     const terminate = () => {
       if (closedResult || terminationRequested) return;
       terminationRequested = true;
-      try { child.kill("SIGTERM"); } catch { /* process is already gone */ }
+      killProcessTree(child, "SIGTERM", { detached });
       forceTimer = setTimeout(() => {
         if (!closedResult) {
-          try { child.kill("SIGKILL"); } catch { /* process is already gone */ }
+          killProcessTree(child, "SIGKILL", { detached });
         }
-      }, 1_000);
+      }, KILL_GRACE_MS);
       forceTimer.unref?.();
     };
+    const onAbort = () => {
+      abortRequested = true;
+      terminate();
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
     timer = setTimeout(() => {
       timedOut = true;
       terminate();
     }, timeoutMs);
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    timer.unref?.();
+    child.stderr.on("data", (chunk) => appendBounded(stderr, chunk, stderrSize));
     child.once("error", (error) => { spawnError = error; });
     const closed = new Promise((resolve) => {
       child.once("close", (code, closeSignal) => {
@@ -133,6 +238,14 @@ export function runCliStreamingCommand(command, args, {
     const reader = createInterface({ input: child.stdout });
     try {
       for await (const line of reader) {
+        const lineBytes = Buffer.byteLength(line, "utf8") + 1;
+        if (stdoutSize.total + lineBytes > MAX_CLI_OUTPUT_BYTES) {
+          outputLimitError = new Error(`${providerId ?? "provider"} CLI output exceeded the maximum allowed size`);
+          outputLimitError.code = "OUTPUT_LIMIT";
+          terminate();
+          break;
+        }
+        stdoutSize.total += lineBytes;
         stdout.push(line);
         yield line;
       }
@@ -140,11 +253,23 @@ export function runCliStreamingCommand(command, args, {
       reader.close();
       terminate();
       clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
     }
     const result = await closed;
     const output = stdout.join("\n");
     const errorOutput = Buffer.concat(stderr).toString("utf8");
-    if (spawnError) throw spawnError;
+    // A CLI that traps SIGTERM and exits 0 after the deadline still timed out.
+    if (timedOut) throw cliTimeoutError(providerId, output, errorOutput);
+    if (outputLimitError) throw outputLimitError;
+    if (spawnError) {
+      if (spawnError.name === "AbortError" || abortRequested || signal?.aborted) {
+        throw cliAbortError(providerId, output, errorOutput);
+      }
+      throw spawnError;
+    }
+    if (abortRequested || signal?.aborted) {
+      throw cliAbortError(providerId, output, errorOutput);
+    }
     if (result.code !== 0) {
       throw cliFailure(
         result.code,
@@ -210,7 +335,8 @@ export function cliRequestPrompt(request = {}) {
 }
 
 function eventName(payload) {
-  return String(payload?.type ?? payload?.event ?? payload?.subtype ?? "").toLowerCase();
+  const nestedEvent = payload?.event && typeof payload.event === "object" ? payload.event : null;
+  return String(payload?.type ?? nestedEvent?.type ?? nestedEvent?.subtype ?? payload?.event ?? payload?.subtype ?? "").toLowerCase();
 }
 
 function collectText(value, result = []) {
@@ -244,6 +370,15 @@ export function cliEventText(payload) {
   if (!payload || typeof payload !== "object") return [];
   const name = eventName(payload);
   if (/error|failed|cancelled/.test(name)) return [];
+  const role = String(
+    payload.role
+      ?? payload.message?.role
+      ?? payload.event?.role
+      ?? payload.event?.message?.role
+      ?? "",
+  ).toLowerCase();
+  if (role && !["assistant", "model"].includes(role)) return [];
+  if (!role && /^(?:user|system|tool|tool[_ -]?result|result)$/.test(name)) return [];
   const candidates = [
     payload.event?.delta,
     payload.delta,
@@ -253,9 +388,10 @@ export function cliEventText(payload) {
     payload.response?.content,
   ];
   const values = candidates.flatMap((candidate) => collectText(candidate, []));
-  if (values.length > 0) return values;
+  const unique = (items) => [...new Set(items)];
+  if (values.length > 0) return unique(values);
   if (/text|message|assistant|delta|content/.test(name) && !/result|tool/.test(name)) {
-    return collectText(payload, []).filter((value) => value !== payload.type && value !== payload.event);
+    return unique(collectText(payload, []).filter((value) => value !== payload.type && value !== payload.event));
   }
   return [];
 }
@@ -338,7 +474,7 @@ export function createCliAgentExecutor({
         env: resolvedEnv,
         cwd: context.cwd ?? cwd,
         timeoutMs,
-        signal: request.signal,
+        signal: context.signal ?? request.signal,
         providerId,
       })) {
         const payload = parseJsonOutput(line);
@@ -436,6 +572,12 @@ export function createAcpAgentExecutor({
 
   return async function execute({ request = {}, invocation = {}, context = {} } = {}) {
     const resolvedEnv = { ...env, ...(context.env ?? {}) };
+    const transportSignal = context.signal ?? request.signal;
+    if (transportSignal?.aborted) {
+      const error = new Error(`${providerId} ACP request aborted`);
+      error.code = "ABORT_ERR";
+      throw error;
+    }
     const args = await buildArgs({ request, invocation, context });
     const prompt = await promptBuilder({ request, invocation, context });
     return (async function* responseStream() {
@@ -444,7 +586,8 @@ export function createAcpAgentExecutor({
         cwd: context.cwd ?? cwd,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
-        ...(request.signal ? { signal: request.signal } : {}),
+        detached: PROCESS_GROUP_PLATFORM,
+        ...(transportSignal ? { signal: transportSignal } : {}),
       });
       const reader = createInterface({ input: child.stdout });
       const pending = new Map();
@@ -453,7 +596,10 @@ export function createAcpAgentExecutor({
       let nextId = 1;
       let spawnError = null;
       let closed = false;
+      let timedOut = false;
       let timer;
+      let forceTimer = null;
+      let terminationRequested = false;
 
       const rejectPending = (error) => {
         for (const entry of pending.values()) entry.reject(error);
@@ -564,10 +710,30 @@ export function createAcpAgentExecutor({
         };
       };
 
-      const abort = () => {
-        if (!closed) child.kill("SIGTERM");
+      const terminate = (error) => {
+        if (closed || terminationRequested) return;
+        terminationRequested = true;
+        rejectPending(error);
+        killProcessTree(child, "SIGTERM");
+        forceTimer = setTimeout(() => {
+          if (!closed) {
+            killProcessTree(child, "SIGKILL");
+          }
+        }, KILL_GRACE_MS);
+        forceTimer.unref?.();
       };
-      timer = setTimeout(abort, timeoutMs);
+      const abort = () => {
+        const error = new Error(`${providerId} ACP request ${timedOut ? "timed out" : "aborted"}`);
+        error.code = timedOut ? "ETIMEDOUT" : "ABORT_ERR";
+        terminate(error);
+      };
+      const onSignalAbort = () => abort();
+      transportSignal?.addEventListener?.("abort", onSignalAbort, { once: true });
+      timer = setTimeout(() => {
+        timedOut = true;
+        abort();
+      }, timeoutMs);
+      timer.unref?.();
       try {
         yield { type: "block-start", index: 0, blockType: "text" };
         const initialize = await requestRpc("initialize", {
@@ -639,9 +805,14 @@ export function createAcpAgentExecutor({
         yield { type: "finish", reason: { kind: "stop" } };
       } finally {
         clearTimeout(timer);
+        if (forceTimer) clearTimeout(forceTimer);
+        transportSignal?.removeEventListener?.("abort", onSignalAbort);
         reader.close();
-        rejectPending(new Error(`${providerId} ACP transport closed`));
-        if (!closed) child.kill("SIGTERM");
+        if (!closed) {
+          const error = new Error(`${providerId} ACP transport closed`);
+          error.code = "ABORT_ERR";
+          terminate(error);
+        }
       }
     })();
   };

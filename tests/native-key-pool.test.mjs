@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 
 import { NativeKeyPoolHost } from "../packages/dsh-plugin/src/native-key-pool-host.mjs";
 
-function createMemoryHost({ providerId, profile, adapterConfig, values }) {
+function createMemoryHost({ providerId, profile, adapterConfig, adapterMethods = {}, values }) {
   const listeners = new Map();
   const llm = {
-    adapters: new Map([[providerId, { adapter: { config: adapterConfig } }]]),
+    adapters: new Map([[providerId, { adapter: { config: adapterConfig, ...adapterMethods } }]]),
     listConfigurableProviders: () => [{
       provider: providerId,
       settingsNs: "llm-pi-ai",
@@ -89,6 +89,114 @@ test("native API-key pool rotates pi-ai credentials at request resolution", asyn
   assert.deepEqual(status.keys.map((entry) => entry.ref), ["DEEPSEEK_KEY_A", "DEEPSEEK_KEY_B"]);
   assert.equal(stateStore.state.nativeKeyPools.deepseek.keys.length, 2);
   host.dispose();
+});
+
+test("native API-key pool applies a custom context limit before the request starts", async () => {
+  const values = new Map([["DEEPSEEK_KEY_A", "secret-a"]]);
+  const { ctx, llm, stateStore } = createMemoryHost({
+    providerId: "deepseek",
+    profile: { apiKeyEnv: "DEEPSEEK_KEY_A" },
+    adapterConfig: { async resolveApiKey(_provider, profile) { return values.get(profile.apiKeyEnv); } },
+    values,
+  });
+  const received = [];
+  const host = new NativeKeyPoolHost(ctx, {
+    stateStore,
+    contextWindowOverrides: {
+      hasAny() { return true; },
+      resolve(providerId, modelId, scope) {
+        assert.equal(providerId, "deepseek");
+        assert.equal(modelId, "custom-model");
+        assert.equal(scope.keyRef, "DEEPSEEK_KEY_A");
+        return 1000000;
+      },
+    },
+  });
+  llm.stream = (request) => host.stream(request, async function* () {
+    received.push(request);
+    yield { type: "text-delta", index: 0, text: "ok" };
+    yield { type: "finish", reason: { kind: "stop" } };
+  });
+  await host.start();
+  const options = Object.freeze({
+    provider: "deepseek",
+    model: "custom-model",
+    modelContext: Object.freeze({ maxTokens: 4096 }),
+  });
+  for await (const _chunk of host.stream(options, async function* () {
+    throw new Error("immutable request should be re-entered with a copied request");
+  })) {}
+  assert.deepEqual(options.modelContext, { maxTokens: 4096 });
+  assert.equal(received.length, 1);
+  assert.notEqual(received[0], options);
+  assert.deepEqual(received[0].modelContext, { maxTokens: 4096, contextWindow: 1000000 });
+  host.dispose();
+});
+
+test("native API-key pool applies a custom context limit to model metadata", async () => {
+  const values = new Map([["OPENROUTER_API_KEY", "secret-a"]]);
+  const baseModel = {
+    provider: "openrouter",
+    id: "stealth/ox-alpha",
+    name: "ox-alpha",
+    contextWindow: 262144,
+  };
+  const { ctx, llm, stateStore } = createMemoryHost({
+    providerId: "openrouter",
+    profile: { apiKeyEnv: "OPENROUTER_API_KEY" },
+    adapterConfig: { async resolveApiKey(_provider, profile) { return values.get(profile.apiKeyEnv); } },
+    adapterMethods: {
+      modelOf(_snapshot, provider, model) {
+        return { ...baseModel, provider, id: model };
+      },
+      async resolveModel(provider, model) {
+        return {
+          provider,
+          id: model,
+          name: "ox-alpha",
+          context: { contextWindow: 262144 },
+        };
+      },
+      async prepareCall(provider, model) {
+        return {
+          model: {
+            provider,
+            id: model,
+            name: "ox-alpha",
+            context: { contextWindow: 262144 },
+          },
+          stream() {},
+        };
+      },
+    },
+    values,
+  });
+  const host = new NativeKeyPoolHost(ctx, {
+    stateStore,
+    contextWindowOverrides: {
+      hasAny(providerId, modelId) {
+        return providerId === "openrouter" && modelId === "stealth/ox-alpha";
+      },
+      resolve(providerId, modelId, scope) {
+        assert.equal(providerId, "openrouter");
+        assert.equal(modelId, "stealth/ox-alpha");
+        assert.equal(scope.keyRef, "OPENROUTER_API_KEY");
+        return 1000000;
+      },
+    },
+  });
+  await host.start();
+
+  const adapter = llm.adapters.get("openrouter").adapter;
+  const resolved = await adapter.resolveModel("openrouter", "stealth/ox-alpha");
+  const prepared = await adapter.prepareCall("openrouter", "stealth/ox-alpha");
+  const internal = adapter.modelOf({}, "openrouter", "stealth/ox-alpha");
+
+  assert.equal(resolved.context.contextWindow, 1000000);
+  assert.equal(prepared.model.context.contextWindow, 1000000);
+  assert.equal(internal.contextWindow, 1000000);
+  host.dispose();
+  assert.equal((await adapter.resolveModel("openrouter", "stealth/ox-alpha")).context.contextWindow, 262144);
 });
 
 test("native API-key pool does not crash when an optional host seam is absent", async () => {
@@ -204,6 +312,46 @@ test("failover retries a retryable stream exception before visible output", asyn
   host.dispose();
 });
 
+test("failover state is isolated between concurrent streams", async () => {
+  const values = new Map([
+    ["DEEPSEEK_KEY_A", "secret-a"],
+    ["DEEPSEEK_KEY_B", "secret-b"],
+  ]);
+  const { ctx, llm, stateStore } = createMemoryHost({
+    providerId: "deepseek",
+    profile: { apiKeyEnv: "DEEPSEEK_KEY_A" },
+    adapterConfig: { async resolveApiKey(_provider, profile) { return values.get(profile.apiKeyEnv); } },
+    values,
+  });
+  const host = new NativeKeyPoolHost(ctx, { stateStore });
+  await host.start();
+  await host.register("deepseek", "DEEPSEEK_KEY_B", "备用 Key");
+  await host.setPolicy("deepseek", "failover");
+  const wrapped = llm.adapters.get("deepseek").adapter.config.resolveApiKey;
+  let calls = 0;
+  const run = async () => {
+    const keys = [];
+    for await (const chunk of host.stream({ provider: "deepseek" }, () => (async function* () {
+      const key = await wrapped("deepseek", { apiKeyEnv: "DEEPSEEK_KEY_A" });
+      keys.push(key);
+      calls += 1;
+      if (calls <= 2) {
+        const error = new Error("rate limited");
+        error.rateLimited = true;
+        throw error;
+      }
+      yield { type: "text-delta", index: 0, text: "ok" };
+      yield { type: "finish", reason: { kind: "stop" } };
+    })())) {
+      if (chunk.type === "text-delta") keys.push(chunk.text);
+    }
+    return keys;
+  };
+  const results = await Promise.all([run(), run()]);
+  assert.deepEqual(results.map((result) => result.slice(0, 2)), [["secret-a", "secret-b"], ["secret-a", "secret-b"]]);
+  host.dispose();
+});
+
 test("failover drops a failed partial stream before trying the next Key", async () => {
   const values = new Map([
     ["DEEPSEEK_KEY_A", "secret-a"],
@@ -282,4 +430,37 @@ test("native key pool refreshes OpenCode Go usage and keeps it on the next statu
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("failover does not rotate Keys for known non-retryable stream failures", async () => {
+  const values = new Map([
+    ["DEEPSEEK_KEY_A", "secret-a"],
+    ["DEEPSEEK_KEY_B", "secret-b"],
+  ]);
+  const { ctx, stateStore } = createMemoryHost({
+    providerId: "deepseek",
+    profile: { apiKeyEnv: "DEEPSEEK_KEY_A" },
+    adapterConfig: {
+      async resolveApiKey(_provider, profile) {
+        return values.get(profile.apiKeyEnv);
+      },
+    },
+    values,
+  });
+  const host = new NativeKeyPoolHost(ctx, { stateStore });
+  await host.start();
+  await host.register("deepseek", "DEEPSEEK_KEY_B", "备用 Key");
+  await host.setPolicy("deepseek", "failover");
+
+  let calls = 0;
+  const chunks = [];
+  for await (const chunk of host.stream({ provider: "deepseek" }, () => (async function* () {
+    calls += 1;
+    yield { type: "finish", reason: { kind: "error", failure: { code: "INVALID_ARGUMENT", status: 400, message: "unsupported model" } } };
+  })())) chunks.push(chunk);
+
+  // A request-shape error fails identically on every key: no rotation.
+  assert.equal(calls, 1);
+  assert.equal(chunks.find((chunk) => chunk.type === "finish")?.reason?.failure?.code, "INVALID_ARGUMENT");
+  host.dispose();
 });

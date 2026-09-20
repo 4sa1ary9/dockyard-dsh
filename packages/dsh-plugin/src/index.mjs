@@ -1,9 +1,12 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createDefaultProviderEntries, DockyardRuntime } from "../../runtime/src/dockyard-runtime.mjs";
 import { createDockyardLlmAdapter } from "../../dsh-bridge/src/index.mjs";
 import {
   createAntigravityCatalogLoader,
   createAntigravityNativeExecutor,
   createAntigravityNativeQuotaReader,
+  createAntigravityProjectResolver,
 } from "../../../modules/provider-antigravity/src/index.mjs";
 import { createGrokCatalogLoader, createGrokNativeExecutor } from "../../../modules/provider-grok/src/index.mjs";
 import { createClaudeCatalogLoader, createClaudeNativeExecutor } from "../../../modules/provider-claude/src/index.mjs";
@@ -19,7 +22,7 @@ import { createDockyardCredentialStore } from "./dockyard-credential-store.mjs";
 import { NativeKeyPoolHost } from "./native-key-pool-host.mjs";
 
 export const name = "dockyard-dsh";
-export const inject = ["llm", "commands", "credentials", "settings"];
+export const inject = ["llm", "commands", "credentials", "settings", "webServer"];
 
 function contextLogger(ctx, name) {
   try {
@@ -45,10 +48,12 @@ export function apply(ctx, config = {}) {
     const antigravityOptions = {
       ...(runtimeOptions.antigravity ?? {}),
     };
-    // Match CodexSplit's native subscription request exactly: the selected
-    // OAuth account supplies the bearer token, while streamGenerateContent
-    // receives the fixed default-cli-project envelope. Do not preflight
-    // loadCodeAssist or replace the project with a guessed account value.
+    // Resolve the Code Assist project for the selected OAuth account before
+    // native requests. A configured project remains an explicit fast path;
+    // otherwise loadCodeAssist supplies the account-scoped project instead of
+    // sending a fabricated default envelope.
+    antigravityOptions.projectResolver = antigravityOptions.projectResolver
+      ?? createAntigravityProjectResolver(antigravityOptions);
     antigravityOptions.quotaReader = runtimeOptions.antigravity?.quotaReader
       ?? createAntigravityNativeQuotaReader(antigravityOptions);
     runtimeOptions.antigravity = antigravityOptions;
@@ -118,11 +123,22 @@ export function apply(ctx, config = {}) {
       }
     },
   });
-  const registerAdapter = () => ctx.llm.registerAdapter(adapter.providers(), adapter);
+  const installAdapter = () => {
+    const result = ctx.llm.registerAdapter(adapter.providers(), adapter);
+    // DSH may hand back a disposer for hot reload/unplug; keep it so the
+    // effect can unregister instead of leaving a stale adapter behind.
+    return typeof result?.dispose === "function" ? result.dispose.bind(result)
+      : typeof result === "function" ? result : null;
+  };
   if (typeof ctx.effect === "function") {
-    ctx.effect(registerAdapter, "dockyard-dsh: llm adapter");
+    ctx.effect(() => {
+      const disposeAdapter = installAdapter();
+      return () => {
+        try { disposeAdapter?.(); } catch { /* one failing dispose must not break teardown */ }
+      };
+    }, "dockyard-dsh: llm adapter");
   } else {
-    registerAdapter();
+    installAdapter();
   }
 
   // The runtime is the source of truth for DSH itself. Commands, the native
@@ -152,6 +168,7 @@ export function apply(ctx, config = {}) {
       // from booting while the service graph is still settling.
       nativeKeyPool ??= new NativeKeyPoolHost(ctx, {
         logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
+        contextWindowOverrides: runtime.contextWindowOverrides,
       });
       const nativeKeyPoolReady = nativeKeyPool.start();
       void nativeKeyPoolReady.catch((error) => {
@@ -175,10 +192,61 @@ export function apply(ctx, config = {}) {
             return null;
           });
       }
+      let unregisterArtifactsRoute;
+      try {
+        const webServer = ctx.webServer ?? (typeof ctx.get === "function" ? ctx.get("webServer") : null);
+        if (webServer && typeof webServer.register === "function") {
+          unregisterArtifactsRoute = webServer.register({
+            kind: "prefix",
+            path: "/artifacts",
+            handler: async (req, res) => {
+              try {
+                const url = new URL(req.url, "http://127.0.0.1");
+                const cleanPath = url.pathname.replace(/^\/artifacts\/?/, "");
+                if (!cleanPath || cleanPath.includes("..")) {
+                  res.writeHead(403);
+                  res.end("Forbidden");
+                  return;
+                }
+                const filePath = join(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync(filePath)) {
+                  res.writeHead(404);
+                  res.end("Not Found");
+                  return;
+                }
+                const ext = cleanPath.split(".").pop()?.toLowerCase();
+                const mimeTypes = {
+                  png: "image/png",
+                  jpg: "image/jpeg",
+                  jpeg: "image/jpeg",
+                  webp: "image/webp",
+                  gif: "image/gif",
+                  svg: "image/svg+xml",
+                };
+                const contentType = mimeTypes[ext] ?? "application/octet-stream";
+                const content = readFileSync(filePath);
+                res.writeHead(200, {
+                  "Content-Type": contentType,
+                  "Content-Length": content.length,
+                  "Cache-Control": "public, max-age=3600",
+                });
+                res.end(content);
+              } catch (err) {
+                res.writeHead(500);
+                res.end("Internal Server Error");
+              }
+            },
+          });
+        }
+      } catch (error) {
+        contextLogger(ctx, "dockyard-dsh").warn?.(`Failed to register /artifacts/ route: ${error.message}`);
+      }
+
       return async () => {
         // Isolate every cleanup step: one failing dispose must not prevent
         // the remaining teardown (command unregister, service dispose), which
         // would leave a stale `dockyard` command registered on hot reload.
+        try { unregisterArtifactsRoute?.(); } catch { /* ignore */ }
         try { await remoteFiberPromise?.catch?.(() => null); } catch { /* ignore */ }
         try { await nativeKeyPoolReady.catch?.(() => null); } catch { /* ignore */ }
         try { nativeKeyPool?.dispose?.(); } catch { /* ignore */ }

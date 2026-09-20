@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
@@ -11,6 +12,7 @@ import {
   runCliCommand,
 } from "../../../packages/providers/src/cli-agent-transport.mjs";
 import {
+  assertSecureEndpointUrl,
   finiteNumber,
   recursiveQuotaWindows,
   selectPrimaryQuotaWindow,
@@ -22,13 +24,17 @@ import {
   normalizeOfficialSessionResult,
   officialSessionResources,
 } from "../../../packages/providers/src/session-source.mjs";
+import { readClaudeOAuthCredential } from "./native-transport.mjs";
 
 const PROVIDER_ID = "claude";
 const DEFAULT_BROWSER_AUTHORIZATION_URL = "https://claude.com/cai/oauth/authorize";
 const DEFAULT_BROWSER_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const DEFAULT_BROWSER_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const DEFAULT_BROWSER_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
-const DEFAULT_BROWSER_SCOPE = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+// Dockyard only calls the Messages API and reads profile identity; scopes for
+// org key creation, MCP servers, file upload, and Claude Code sessions are
+// intentionally not requested. DOCKYARD_CLAUDE_OAUTH_SCOPE still overrides.
+const DEFAULT_BROWSER_SCOPE = "user:profile user:inference";
 const CREDENTIAL_SLOT = Symbol("dockyard-claude-session");
 
 function hash(value) {
@@ -120,6 +126,15 @@ function candidateFromStatus(status, {
   imported = false,
   credential = null,
 } = {}) {
+  const sourceCredential = credential ?? status.credential ?? null;
+  const persistedCredential = sourceCredential?.access && sourceCredential?.refresh
+    ? {
+      ...sourceCredential,
+      type: sourceCredential.type ?? "oauth",
+      providerId: PROVIDER_ID,
+      accountId: sourceCredential.accountId ?? status.accountId,
+    }
+    : null;
   const credentialRef = createCredentialRef(PROVIDER_ID, status.accountId);
   const candidate = {
     candidateId: `claude:${hash(status.accountId).slice(0, 20)}`,
@@ -130,10 +145,10 @@ function candidateFromStatus(status, {
     email: status.email,
     subscription: { plan: status.plan, status: status.isSubscription ? "active" : null, expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: null,
+      accessTokenExpiresAt: persistedCredential?.expiresAt ?? null,
       nextRefreshAt: null,
-      lastRefreshedAt: null,
-      refreshable: false,
+      lastRefreshedAt: persistedCredential?.lastRefreshedAt ?? null,
+      refreshable: Boolean(persistedCredential?.refresh),
     },
     credentialRef,
     resources: officialSessionResources({ sourceKind, authSource: source }),
@@ -144,7 +159,7 @@ function candidateFromStatus(status, {
       : status.isSubscription ? null : "Claude 官方会话没有返回可识别的订阅 OAuth 状态",
   };
   Object.defineProperty(candidate, CREDENTIAL_SLOT, {
-    value: credential ?? {
+    value: persistedCredential ?? {
       type: OFFICIAL_SESSION_AUTH_KIND,
       providerId: PROVIDER_ID,
       accountId: status.accountId,
@@ -326,14 +341,18 @@ export class ClaudeSubscriptionDriver {
     clientId = env.DOCKYARD_CLAUDE_CLIENT_ID || DEFAULT_BROWSER_CLIENT_ID,
     redirectUri = env.DOCKYARD_CLAUDE_REDIRECT_URI || DEFAULT_BROWSER_REDIRECT_URI,
     oauthScope = env.DOCKYARD_CLAUDE_OAUTH_SCOPE || DEFAULT_BROWSER_SCOPE,
+    home = homedir(),
     fetchImpl = fetch,
   } = {}) {
+    // SECURITY.md: remote OAuth endpoints must be https (or loopback http).
+    assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CLAUDE_AUTHORIZATION_URL");
     this.cliPath = cliPath;
     this.env = env;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
     this.fetchImpl = fetchImpl;
-    this.browserTokenUrl = tokenUrl;
+    this.home = home;
+    this.browserTokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_CLAUDE_TOKEN_URL");
     this.browserClientId = clientId;
     this.sessionReader = sessionReader;
     this.sessionSource = sessionSource;
@@ -433,7 +452,16 @@ export class ClaudeSubscriptionDriver {
       ...status,
       source: normalized?.source ?? defaults.source ?? "official_claude_cli",
       sourceKind: normalized?.sourceKind ?? defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+      credential: normalized?.credential ?? null,
     };
+  }
+
+  async #persistedOAuthCredential() {
+    try {
+      return await readClaudeOAuthCredential({ home: this.home });
+    } catch {
+      return null;
+    }
   }
 
   async #readStatus(signal) {
@@ -444,7 +472,10 @@ export class ClaudeSubscriptionDriver {
           source: this.sessionSource,
           sourceKind: this.sessionSourceKind,
         });
-        if (normalized) return normalized;
+        if (normalized) return {
+          ...normalized,
+          credential: normalized.credential ?? await this.#persistedOAuthCredential(),
+        };
       } catch {
         // Fall through to the provider CLI when an optional client reader is
         // unavailable on this machine.
@@ -456,14 +487,18 @@ export class ClaudeSubscriptionDriver {
       timeoutMs: 30_000,
       ...(signal ? { signal } : {}),
     });
-    return normalizeOfficialSessionResult(result, {
+    const normalized = normalizeOfficialSessionResult(result, {
       source: "official_claude_cli",
       sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI,
     });
+    return normalized
+      ? { ...normalized, credential: normalized.credential ?? await this.#persistedOAuthCredential() }
+      : null;
   }
 
   #isBrowserAccount(account) {
-    return account?.resources?.authSource === "official_claude_browser_oauth";
+    return account?.resources?.authSource === "official_claude_browser_oauth"
+      || account?.refresh?.refreshable === true;
   }
 
   async #readBrowserCredential(account, context = {}) {

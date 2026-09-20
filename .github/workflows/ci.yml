@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json engines: ^22.19.0 || >=24.0.0
+        node-version: ["22.19", "24"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      # package-lock.json pins the documented dev flow (`npm install && npm test`).
+      - run: npm ci
+      - run: node --test
+
+  plugin-bundle:
+    # The published bundle builds from packages/dsh-plugin with its own
+    # authoritative pnpm lockfile.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - name: Install with frozen lockfile
+        working-directory: packages/dsh-plugin
+        run: pnpm install --frozen-lockfile
+      - name: Build bundle
+        working-directory: packages/dsh-plugin
+        run: pnpm build
+
+  macos-gates:
+    # Native surfaces that only exercise on macOS: the real Keychain helper
+    # round-trip and Swift syntax gates for the app + keychain helper sources.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - name: Full suite (Keychain tests execute for real on macOS)
+        run: node --test
+      - name: Swift syntax gates
+        run: |
+          xcrun swiftc -parse apps/macos/DockyardDSH/Sources/main.swift
+          xcrun swiftc -parse packages/vault/src/macos-keychain-helper.swift
+      - name: Build script syntax gate
+        run: bash -n apps/macos/build-dmg.sh

@@ -10,6 +10,7 @@ import {
   decodeJwtPayload,
   fetchJson,
   isoFromEpoch,
+  assertSecureEndpointUrl,
   readJsonFile,
   recursiveQuotaWindows,
   redactError,
@@ -195,8 +196,11 @@ export class CodexOAuthDriver {
     cliPath = env.DOCKYARD_CODEX_CLI || "codex",
   } = {}) {
     this.authFilePath = codexAuthPath({ env, home, authFilePath });
-    this.tokenUrl = tokenUrl;
-    this.usageUrls = usageUrls;
+    // SECURITY.md: OAuth endpoints must be https (or loopback http) even when
+    // they come from the environment.
+    this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_CODEX_TOKEN_URL");
+    assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CODEX_AUTHORIZATION_URL");
+    this.usageUrls = usageUrls.map((url) => assertSecureEndpointUrl(url, "DOCKYARD_CODEX_USAGE_URL"));
     this.clientId = clientId;
     this.fetchImpl = fetchImpl;
     this.requestExecutor = requestExecutor;
@@ -408,8 +412,14 @@ export class CodexOAuthDriver {
       ...(context.signal ? { signal: context.signal } : {}),
     }, { fetchImpl: this.fetchImpl });
     const body = response.body ?? {};
-    if (!body.access_token || !body.refresh_token || !Number.isFinite(Number(body.expires_in))) {
+    // RFC 6749 §6: a refresh response MAY omit refresh_token when the
+    // authorization server issued one previously — the old value stays valid.
+    // Requiring a new token here would strand perfectly healthy accounts.
+    if (!body.access_token || !Number.isFinite(Number(body.expires_in))) {
       throw new Error("Codex OAuth refresh response is incomplete");
+    }
+    if (body.refresh_token !== undefined && body.refresh_token !== null && typeof body.refresh_token !== "string") {
+      throw new Error("Codex OAuth refresh response returned an invalid refresh token");
     }
     const payload = decodeJwtPayload(body.access_token) ?? {};
     const auth = authClaims(payload);
@@ -418,7 +428,7 @@ export class CodexOAuthDriver {
       ...credential,
       type: "oauth",
       access: body.access_token,
-      refresh: body.refresh_token,
+      refresh: body.refresh_token ?? credential.refresh,
       idToken: body.id_token ?? credential.idToken ?? null,
       accountId,
       expiresAt: addSecondsIso(body.expires_in, context.now instanceof Date ? context.now : new Date()),

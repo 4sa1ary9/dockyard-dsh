@@ -41,6 +41,8 @@ export {
   createAntigravityNativeExecutor,
   createAntigravityNativeQuotaReader,
   createAntigravityProjectResolver,
+  parseAntigravityKeychainValue,
+  readAntigravityKeychainToken,
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
 } from "./native-transport.mjs";

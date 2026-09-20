@@ -282,6 +282,7 @@ function statusFromDesktopSession(session) {
 
 function candidateFromDesktopSession(session) {
   const accountId = session.accountId ?? desktopSessionAccountId(session);
+  const expiresAt = cursorTokenExpiresAt({}, decodeJwtPayload(session.token) ?? {});
   const candidate = {
     candidateId: `cursor:desktop:${hash(accountId).slice(0, 20)}`,
     providerId: PROVIDER_ID,
@@ -291,7 +292,7 @@ function candidateFromDesktopSession(session) {
     email: session.email,
     subscription: { plan: session.plan, status: "active", expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: null,
+      accessTokenExpiresAt: expiresAt,
       nextRefreshAt: null,
       lastRefreshedAt: null,
       refreshable: Boolean(session.refreshToken),
@@ -318,6 +319,7 @@ function candidateFromDesktopSession(session) {
       accountId,
       access: session.token,
       ...(session.refreshToken ? { refresh: session.refreshToken } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
     },
     enumerable: false,
   });
@@ -376,6 +378,13 @@ function normalizeModel(value) {
   };
 }
 
+function browserCatalogAccount(accounts) {
+  return (Array.isArray(accounts) ? accounts : []).find((entry) => (
+    entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+    || entry?.resources?.authSource === "official_cursor_browser_oauth"
+  ));
+}
+
 export function createCursorCatalogLoader({
   cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
   env = process.env,
@@ -383,15 +392,21 @@ export function createCursorCatalogLoader({
   apiBaseUrl = process.env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
   fetchImpl = fetch,
 } = {}) {
-  let cached = null;
-  let pending = null;
+  // Catalog state is bucketed per browser account (by credential identity):
+  // a single global cached/pending pair let concurrent multi-account loads
+  // overwrite each other's results.
+  const cachedBuckets = new Map();
+  const pendingBuckets = new Map();
   const normalizedApiBaseUrl = apiBaseUrl.replace(/\/+$/, "");
 
+  function catalogBucketKey(accounts) {
+    const account = browserCatalogAccount(accounts);
+    const identity = account?.auth?.credentialRef ?? account?.credentialRef ?? account?.accountId;
+    return identity ? String(identity) : "shared";
+  }
+
   async function loadBrowserCatalog({ accounts, secretStore, signal }) {
-    const account = (Array.isArray(accounts) ? accounts : []).find((entry) => (
-      entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
-      || entry?.resources?.authSource === "official_cursor_browser_oauth"
-    ));
+    const account = browserCatalogAccount(accounts);
     const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
     if (!account || !credentialRef || typeof secretStore?.read !== "function") return null;
     const credential = await secretStore.read(credentialRef);
@@ -426,22 +441,22 @@ export function createCursorCatalogLoader({
   }
 
   return async function loadCatalog({ force = false, accounts = [], secretStore, signal } = {}) {
-    const hasBrowserAccount = (Array.isArray(accounts) ? accounts : []).some((entry) => (
-      entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
-      || entry?.resources?.authSource === "official_cursor_browser_oauth"
-    ));
+    const bucketKey = catalogBucketKey(accounts);
+    const hasBrowserAccount = bucketKey !== "shared";
+    const cached = cachedBuckets.get(bucketKey);
     if (!force && cached && (
       hasBrowserAccount
         ? cached.source === "official_cursor_browser_oauth_api"
         : cached.source !== "official_cursor_browser_oauth_api"
     )) return cached;
+    const pending = pendingBuckets.get(bucketKey);
     if (pending) return pending;
-    pending = (async () => {
+    const promise = (async () => {
       try {
         const browser = await loadBrowserCatalog({ accounts, secretStore, signal });
         if (browser) {
-          cached = browser;
-          return cached;
+          cachedBuckets.set(bucketKey, browser);
+          return browser;
         }
       } catch {
         // Fall through to the official CLI status compatibility path.
@@ -460,7 +475,8 @@ export function createCursorCatalogLoader({
           source: "official_cursor_cli_status",
           ...(models.length ? {} : { diagnostics: ["Cursor 官方 status 没有返回模型目录"] }),
         };
-        cached = models.length ? catalog : null;
+        if (models.length) cachedBuckets.set(bucketKey, catalog);
+        else cachedBuckets.delete(bucketKey);
         return catalog;
       } catch (error) {
         const desktop = readCursorDesktopSession({ env });
@@ -473,11 +489,12 @@ export function createCursorCatalogLoader({
             ? "已检测到 Cursor 官方 OAuth；官方模型目录请求未返回结果"
             : `无法读取 Cursor 官方模型目录：${error.message}`],
         };
-        cached = null;
+        cachedBuckets.delete(bucketKey);
         return catalog;
       }
-    })().finally(() => { pending = null; });
-    return pending;
+    })().finally(() => { pendingBuckets.delete(bucketKey); });
+    pendingBuckets.set(bucketKey, promise);
+    return promise;
   };
 }
 
@@ -681,7 +698,8 @@ export class CursorSubscriptionDriver {
   }
 
   #isBrowserAccount(account) {
-    return account?.resources?.authSource === "official_cursor_browser_oauth";
+    return account?.resources?.authSource === "official_cursor_browser_oauth"
+      || account?.refresh?.refreshable === true;
   }
 
   async #refreshBrowserCredential(account, context = {}) {
@@ -895,6 +913,24 @@ export class CursorSubscriptionDriver {
     const now = context.now instanceof Date ? context.now : new Date();
     const quotaSource = this.#isBrowserAccount(account) ? "official_cursor_browser_oauth" : "cursor_cli_status";
     const windows = recursiveQuotaWindows(status.raw, { source: quotaSource, now, prefix: "cursor" });
+    if (windows.length === 0) {
+      // Browser OAuth accounts (and CLI statuses without window data) return
+      // an empty status.raw. Report the quota surface as explicitly
+      // unavailable instead of fabricating an empty success while the module
+      // still advertises a quota capability for account types that do expose
+      // real windows.
+      return {
+        quota: null,
+        subscription: { plan: status.plan, status: status.loggedIn ? "active" : null, expiresAt: null },
+        resources: {
+          quotaSource,
+          quotaAvailable: false,
+          quotaDiagnostic: this.#isBrowserAccount(account)
+            ? "Cursor 官方浏览器会话未返回任何实时额度窗口；额度数据暂不可用（degraded），请以 Cursor 官方 Dashboard 为准"
+            : "Cursor 官方 CLI status 未返回任何实时额度窗口；额度数据暂不可用（degraded），请以 Cursor 官方 Dashboard 为准",
+        },
+      };
+    }
     const primary = selectPrimaryQuotaWindow(windows);
     return {
       quota: {
@@ -908,11 +944,8 @@ export class CursorSubscriptionDriver {
       },
       subscription: { plan: status.plan, status: status.loggedIn ? "active" : null, expiresAt: null },
       resources: {
-        quotaDiagnostic: windows.length
-          ? null
-          : this.#isBrowserAccount(account)
-            ? "Cursor 官方浏览器会话未返回实时订阅额度；详细 usage 仍以 Cursor 官方 Dashboard 为准"
-            : "Cursor 官方 CLI status 未返回实时订阅额度；详细 usage 仍以 Cursor 官方 Dashboard 为准",
+        quotaAvailable: true,
+        quotaDiagnostic: null,
       },
     };
   }

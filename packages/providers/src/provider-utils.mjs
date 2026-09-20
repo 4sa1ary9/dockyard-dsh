@@ -151,3 +151,43 @@ export function selectPrimaryQuotaWindow(windows) {
   const preferred = windows.find((window) => /primary|weekly|five.?hour|5h/i.test(`${window.id} ${window.name}`));
   return preferred ?? windows[0];
 }
+
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
+
+export function isLoopbackHostname(hostname) {
+  const value = String(hostname ?? "").trim().toLowerCase();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return LOOPBACK_HOSTNAMES.has(bare);
+}
+
+/**
+ * SECURITY.md contract: provider-native remote endpoints must use HTTPS.
+ * Plain HTTP is only allowed for explicit loopback development endpoints.
+ * Validate every remote URL that arrives from configuration/environment
+ * before it is ever fetched — credentials must never travel to a URL an
+ * attacker could downgrade.
+ *
+ * Returns the normalized URL string; throws on violations.
+ */
+export function assertSecureEndpointUrl(value, label = "endpoint") {
+  const raw = String(value ?? "").trim();
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`${label} is not a valid URL`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`${label} must use http(s), got: ${url.protocol}`);
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    throw new Error(`${label} over plain http must target a loopback host, got: ${url.hostname}`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${label} must not embed credentials in the URL`);
+  }
+  if (url.hash) {
+    url.hash = "";
+  }
+  return url.toString();
+}

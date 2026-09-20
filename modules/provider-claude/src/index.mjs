@@ -32,5 +32,6 @@ export {
   buildClaudeRequest,
   claudeNativeTransportConstants,
   createClaudeNativeExecutor,
+  readClaudeOAuthCredential,
   resolveClaudeAccessToken,
 } from "./native-transport.mjs";

@@ -132,9 +132,17 @@ async function* streamGrokResponse(response) {
   let stop = "stop";
   let reasoning = null;
   const tools = new Map();
+  // A canonical termination event is required before the stream may report
+  // success: either the SSE [DONE] terminator or a valid finish_reason.
+  // Without this check a network truncation would be masked as a "stop".
+  let terminated = false;
   yield { type: "block-start", index: textIndex, blockType: "text" };
 
   for await (const event of readSseEvents(response)) {
+    if (event?.done) {
+      terminated = true;
+      continue;
+    }
     const payload = event.data;
     if (!payload || typeof payload !== "object") continue;
     if (payload.error) {
@@ -147,6 +155,7 @@ async function* streamGrokResponse(response) {
     const choice = payload.choices?.[0];
     if (!choice) continue;
     stop = choice.finish_reason ?? stop;
+    if (typeof choice.finish_reason === "string" && choice.finish_reason.trim()) terminated = true;
     const delta = choice.delta ?? {};
     const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
     if (content) {
@@ -206,6 +215,16 @@ async function* streamGrokResponse(response) {
         yield { type: "tool-call-delta", index: state.index, id: state.id, name: state.name, argumentsDelta: argumentDelta };
       }
     }
+  }
+  if (!terminated) {
+    // Neither [DONE] nor a finish_reason arrived: the connection was cut
+    // before the model finished. Fail as a protocol error instead of closing
+    // the generator with a synthetic "stop" success.
+    throw nativeProviderError(
+      PROVIDER_ID,
+      "xAI stream ended without a finish_reason or [DONE] terminator; the response may be truncated",
+      { code: "GROK_TRUNCATED_STREAM" },
+    );
   }
   if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
   if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text } };

@@ -51,7 +51,9 @@ function markRemoteMethods() {
     "nativeKeyRefresh",
     "nativeKeyRegister",
     "nativeKeyUnregister",
-    "nativeKeySetPolicy"
+    "nativeKeySetPolicy",
+    "getContextWindowOverride",
+    "setContextWindowOverride"
   ]) {
     let initializer;
     Remote(name2)(void 0, {
@@ -145,10 +147,20 @@ var init_dockyard_remote_host = __esm({
         if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool \u5C1A\u672A\u6302\u8F7D");
         return this.nativeKeyPool.setPolicy(request.providerId, request.policy);
       }
+      async getContextWindowOverride(request = {}) {
+        return this.dockyard.getContextWindowOverride(request);
+      }
+      async setContextWindowOverride(request = {}) {
+        return this.dockyard.setContextWindowOverride(request, request.value);
+      }
     };
     markRemoteMethods();
   }
 });
+
+// packages/dsh-plugin/src/index.mjs
+import { existsSync, readFileSync as readFileSync2 } from "node:fs";
+import { join as join12 } from "node:path";
 
 // packages/core/src/errors.mjs
 var DockyardError = class extends Error {
@@ -316,7 +328,7 @@ function accountSummary(account) {
     displayName: account.displayName,
     email: account.email,
     subscription: { ...account.subscription },
-    quota: { ...account.quota },
+    quota: structuredClone(account.quota ?? {}),
     refresh: { ...account.refresh },
     resources: structuredClone(account.resources ?? {}),
     health: { ...account.health },
@@ -340,6 +352,12 @@ function accountStorageRecord(account) {
 var EventBus = class {
   #handlers = /* @__PURE__ */ new Map();
   on(type, handler) {
+    if (typeof type !== "string" || type.length === 0) {
+      throw new TypeError("EventBus.on requires a non-empty event type");
+    }
+    if (typeof handler !== "function") {
+      throw new TypeError("EventBus.on requires a handler function");
+    }
     if (!this.#handlers.has(type)) this.#handlers.set(type, /* @__PURE__ */ new Set());
     this.#handlers.get(type).add(handler);
     return () => this.off(type, handler);
@@ -352,7 +370,15 @@ var EventBus = class {
   }
   async emit(type, payload) {
     const handlers = [...this.#handlers.get(type) ?? []];
-    for (const handler of handlers) await handler(payload);
+    const errors = [];
+    for (const handler of handlers) {
+      try {
+        await handler(payload);
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    return { handled: handlers.length, errors };
   }
   clear() {
     this.#handlers.clear();
@@ -363,39 +389,55 @@ var EventBus = class {
 var ModuleRuntime = class {
   #modules = /* @__PURE__ */ new Map();
   #services = /* @__PURE__ */ new Map();
+  // Per-module lifecycle serialization. activate()/deactivate() are awaited,
+  // so without ordering an unregister could remove a module mid-register and
+  // let the still-running register mark it active again afterwards.
+  #lifecycleQueues = /* @__PURE__ */ new Map();
   constructor({ events = new EventBus(), logger = console } = {}) {
     this.events = events;
     this.logger = logger;
   }
-  async register(module) {
+  #enqueueLifecycle(moduleId, task) {
+    const previous = this.#lifecycleQueues.get(moduleId) ?? Promise.resolve();
+    const run = previous.then(task, task);
+    this.#lifecycleQueues.set(moduleId, run.then(() => {
+    }, () => {
+    }));
+    return run;
+  }
+  register(module) {
     const manifest = module?.manifest;
     if (!manifest?.id || !manifest.kind) {
       throw new ValidationError("A module manifest must contain id and kind");
     }
-    if (this.#modules.has(manifest.id)) throw new ModuleConflictError(manifest.id);
-    const record = { module, manifest: { ...manifest }, services: /* @__PURE__ */ new Set(), active: false };
-    this.#modules.set(manifest.id, record);
-    const context = this.#contextFor(record);
-    try {
-      if (typeof module.activate === "function") await module.activate(context);
-      record.active = true;
-      await this.events.emit("module/registered", { moduleId: manifest.id, manifest: { ...manifest } });
-      return module;
-    } catch (error) {
-      this.#removeServices(record);
-      this.#modules.delete(manifest.id);
-      throw error;
-    }
+    return this.#enqueueLifecycle(manifest.id, async () => {
+      if (this.#modules.has(manifest.id)) throw new ModuleConflictError(manifest.id);
+      const record = { module, manifest: { ...manifest }, services: /* @__PURE__ */ new Set(), active: false };
+      this.#modules.set(manifest.id, record);
+      const context = this.#contextFor(record);
+      try {
+        if (typeof module.activate === "function") await module.activate(context);
+        record.active = true;
+        await this.events.emit("module/registered", { moduleId: manifest.id, manifest: { ...manifest } });
+        return module;
+      } catch (error) {
+        this.#removeServices(record);
+        this.#modules.delete(manifest.id);
+        throw error;
+      }
+    });
   }
-  async unregister(moduleId) {
-    const record = this.#modules.get(moduleId);
-    if (!record) throw new ModuleNotFoundError(moduleId);
-    if (typeof record.module.deactivate === "function") {
-      await record.module.deactivate(this.#contextFor(record));
-    }
-    this.#removeServices(record);
-    this.#modules.delete(moduleId);
-    await this.events.emit("module/unregistered", { moduleId });
+  unregister(moduleId) {
+    return this.#enqueueLifecycle(moduleId, async () => {
+      const record = this.#modules.get(moduleId);
+      if (!record) throw new ModuleNotFoundError(moduleId);
+      if (typeof record.module.deactivate === "function") {
+        await record.module.deactivate(this.#contextFor(record));
+      }
+      this.#removeServices(record);
+      this.#modules.delete(moduleId);
+      await this.events.emit("module/unregistered", { moduleId });
+    });
   }
   has(moduleId) {
     return this.#modules.has(moduleId);
@@ -516,6 +558,161 @@ function defineProviderModule({
   return Object.freeze(module);
 }
 
+// packages/providers/src/provider-utils.mjs
+import { readFile } from "node:fs/promises";
+async function readJsonFile(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+function decodeJwtPayload(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+function isoFromEpoch(value) {
+  if (value === void 0 || value === null || value === "") return null;
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric) ? new Date(numeric < 1e10 ? numeric * 1e3 : numeric) : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+function addSecondsIso(seconds, now = /* @__PURE__ */ new Date()) {
+  const numeric = Number(seconds);
+  if (!Number.isFinite(numeric)) return null;
+  return new Date(now.getTime() + numeric * 1e3).toISOString();
+}
+function finiteNumber(value) {
+  if (value === void 0 || value === null || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+function stringValue(value) {
+  return value === void 0 || value === null || value === "" ? null : String(value);
+}
+async function fetchJson(url, init = {}, { timeoutMs = 2e4, fetchImpl = fetch } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const externalSignal = init?.signal;
+  const abortFromCaller = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) controller.abort(externalSignal.reason);
+  else externalSignal?.addEventListener?.("abort", abortFromCaller, { once: true });
+  try {
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    const text3 = await response.text();
+    let body = null;
+    try {
+      body = text3 ? JSON.parse(text3) : null;
+    } catch {
+      body = null;
+    }
+    if (!response.ok) {
+      const error = new Error(`Provider request failed (${response.status})`);
+      error.status = response.status;
+      error.bodyKeys = body && typeof body === "object" ? Object.keys(body) : [];
+      const upstreamError = body?.error;
+      const upstreamCode = typeof upstreamError === "string" ? upstreamError : upstreamError && typeof upstreamError === "object" ? upstreamError.code ?? upstreamError.type : body?.error_code ?? body?.code;
+      if (typeof upstreamCode === "string" && upstreamCode.length > 0) error.upstreamCode = upstreamCode;
+      throw error;
+    }
+    return { body, response };
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener?.("abort", abortFromCaller);
+  }
+}
+function redactError(error) {
+  if (!error) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = error?.detail ? ` ${String(error.detail)}` : "";
+  const code = error?.code !== void 0 && error?.code !== null ? ` [code ${String(error.code)}]` : "";
+  return `${message}${detail}${code}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]").replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]").slice(0, 300);
+}
+function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date(), prefix = "quota" } = {}) {
+  const windows = [];
+  function visit(node, path, label) {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    const usedPercent = finiteNumber(node.used_percent ?? node.usedPercent);
+    const remainingFraction = finiteNumber(node.remaining_fraction ?? node.remainingFraction);
+    const remainingValue = finiteNumber(node.remaining);
+    const limitValue = finiteNumber(node.limit);
+    const resetAt = isoFromEpoch(node.reset_at ?? node.resetAt) ?? addSecondsIso(node.reset_after_seconds ?? node.resetAfterSeconds, now);
+    const hasQuotaShape = usedPercent !== null || remainingFraction !== null || remainingValue !== null || limitValue !== null;
+    if (hasQuotaShape) {
+      let remaining = remainingValue;
+      let limit = limitValue;
+      let unit = stringValue(node.unit);
+      if (remaining === null && remainingFraction !== null) {
+        remaining = remainingFraction;
+        limit = limit ?? 1;
+        unit = unit ?? "fraction";
+      } else if (remaining === null && usedPercent !== null) {
+        remaining = Math.max(0, 100 - usedPercent);
+        limit = limit ?? 100;
+        unit = unit ?? "percent";
+      }
+      windows.push({
+        id: path || prefix,
+        name: label || path || prefix,
+        remaining,
+        limit,
+        unit,
+        resetAt,
+        source
+      });
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (child && typeof child === "object" && !Array.isArray(child)) {
+        visit(child, path ? `${path}.${key}` : key, key);
+      }
+    }
+  }
+  visit(value, "", prefix);
+  const unique = /* @__PURE__ */ new Map();
+  for (const window of windows) unique.set(window.id, window);
+  return [...unique.values()];
+}
+function selectPrimaryQuotaWindow(windows) {
+  if (!windows?.length) return {};
+  const preferred = windows.find((window) => /primary|weekly|five.?hour|5h/i.test(`${window.id} ${window.name}`));
+  return preferred ?? windows[0];
+}
+var LOOPBACK_HOSTNAMES = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1"]);
+function isLoopbackHostname(hostname) {
+  const value = String(hostname ?? "").trim().toLowerCase();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return LOOPBACK_HOSTNAMES.has(bare);
+}
+function assertSecureEndpointUrl(value, label = "endpoint") {
+  const raw = String(value ?? "").trim();
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`${label} is not a valid URL`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`${label} must use http(s), got: ${url.protocol}`);
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    throw new Error(`${label} over plain http must target a loopback host, got: ${url.hostname}`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${label} must not embed credentials in the URL`);
+  }
+  if (url.hash) {
+    url.hash = "";
+  }
+  return url.toString();
+}
+
 // packages/core/src/dsh-route.mjs
 function selectionContext(context, excludedIds) {
   if (excludedIds.size === 0) return context;
@@ -540,6 +737,26 @@ function failureStatus(error) {
 function failureCooldown(error, account) {
   return error?.cooldownUntil ?? quotaResetAt(account);
 }
+function reportAccount(accountPool, accountId, result, { opToken } = {}) {
+  try {
+    const safeResult = result?.message ? { ...result, message: redactError(result.message) } : result;
+    accountPool.report(accountId, safeResult, { opToken });
+  } catch {
+  }
+}
+function errorFromTerminalChunk(chunk) {
+  const failure = chunk?.type === "finish" && chunk.reason?.kind === "error" ? chunk.reason.failure : null;
+  if (!failure) return null;
+  const error = new Error(String(failure.message ?? "Provider stream failed"));
+  if (failure.code !== void 0) error.code = failure.code;
+  if (failure.status !== void 0) error.status = failure.status;
+  if (failure.upstreamCode !== void 0) error.upstreamCode = failure.upstreamCode;
+  if (failure.authExpired) error.authExpired = true;
+  if (failure.authForbidden) error.authForbidden = true;
+  if (failure.rateLimited) error.rateLimited = true;
+  if (failure.quotaExhausted) error.quotaExhausted = true;
+  return error;
+}
 function hasSubstantiveStreamOutput(chunk) {
   if (!chunk || typeof chunk !== "object") return true;
   if (chunk.type === "block-start") return false;
@@ -558,7 +775,19 @@ function providerAccount(account, auth) {
     }
   };
 }
-function createProviderRoute({ providerModule, accountPool }) {
+function requestWithContextWindow(request, providerId, modelId, accountId, contextWindowOverrides) {
+  if (!modelId || !contextWindowOverrides || typeof contextWindowOverrides.resolve !== "function") return request;
+  const contextWindow = contextWindowOverrides.resolve(providerId, modelId, { accountId });
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) return request;
+  return {
+    ...request,
+    modelContext: {
+      ...request?.modelContext ?? {},
+      contextWindow
+    }
+  };
+}
+function createProviderRoute({ providerModule, accountPool, contextWindowOverrides = null }) {
   if (!providerModule?.manifest?.id) throw new ValidationError("Provider module is required");
   if (!accountPool?.select || !accountPool?.resolve) throw new ValidationError("Account pool is required");
   if (accountPool.providerId !== providerModule.manifest.id) {
@@ -582,24 +811,31 @@ function createProviderRoute({ providerModule, accountPool }) {
         excludedIds.add(account.accountId);
         const auth = accountPool.resolve(account.accountId);
         const selectedAccount = providerAccount(account, auth);
+        const selectedRequest = requestWithContextWindow(
+          request,
+          providerModule.manifest.id,
+          request?.model,
+          account.accountId,
+          contextWindowOverrides
+        );
         try {
           const response = await providerModule.invoke(
-            request,
+            selectedRequest,
             { account: selectedAccount, auth },
             context
           );
-          accountPool.report(account.accountId, {
+          reportAccount(accountPool, account.accountId, {
             status: "success",
             quota: response?.quota,
             refresh: response?.refresh
-          });
+          }, { opToken: account.opToken });
           return response;
         } catch (error) {
-          accountPool.report(account.accountId, {
+          reportAccount(accountPool, account.accountId, {
             status: failureStatus(error),
             cooldownUntil: failureCooldown(error, selectedAccount),
             message: error?.message
-          });
+          }, { opToken: account.opToken });
           if (!shouldFailover(error, accountPool, context)) throw error;
           lastError = error;
         }
@@ -619,10 +855,17 @@ function createProviderRoute({ providerModule, accountPool }) {
           excludedIds.add(account.accountId);
           const auth = accountPool.resolve(account.accountId);
           const selectedAccount = providerAccount(account, auth);
+          const selectedRequest = requestWithContextWindow(
+            request,
+            providerModule.manifest.id,
+            request?.model,
+            account.accountId,
+            contextWindowOverrides
+          );
           const pending = [];
           let hasOutput = false;
           try {
-            const output = providerModule.stream(request, { account: selectedAccount, auth }, context);
+            const output = providerModule.stream(selectedRequest, { account: selectedAccount, auth }, context);
             for await (const chunk of await output) {
               if (!hasOutput && !hasSubstantiveStreamOutput(chunk)) {
                 pending.push(chunk);
@@ -635,19 +878,22 @@ function createProviderRoute({ providerModule, accountPool }) {
               yield chunk;
             }
             if (!hasOutput) {
-              const error = new Error("Provider stream ended without substantive output");
-              error.code = "EMPTY_STREAM_OUTPUT";
-              error.emptyOutput = true;
+              const terminalError = pending.map(errorFromTerminalChunk).find(Boolean);
+              const error = terminalError ?? new Error("Provider stream ended without substantive output");
+              if (!terminalError) {
+                error.code = "EMPTY_STREAM_OUTPUT";
+                error.emptyOutput = true;
+              }
               throw error;
             }
-            accountPool.report(account.accountId, { status: "success" });
+            reportAccount(accountPool, account.accountId, { status: "success" }, { opToken: account.opToken });
             return;
           } catch (error) {
-            accountPool.report(account.accountId, {
+            reportAccount(accountPool, account.accountId, {
               status: failureStatus(error),
               cooldownUntil: failureCooldown(error, selectedAccount),
               message: error?.message
-            });
+            }, { opToken: account.opToken });
             if (!hasOutput && shouldFailover(error, accountPool, context)) {
               lastError = error;
               continue;
@@ -664,11 +910,19 @@ function createProviderRoute({ providerModule, accountPool }) {
 function defaultClock() {
   return /* @__PURE__ */ new Date();
 }
+var STICKY_SESSION_TTL_MS = 30 * 60 * 1e3;
+var MAX_STICKY_ASSIGNMENTS = 1e4;
 var AccountPool = class {
   #accounts = /* @__PURE__ */ new Map();
   #sessionAssignments = /* @__PURE__ */ new Map();
   #cursor = 0;
   #defaultAccountId = null;
+  // Monotonic operation sequencing: every select() hands out a token and only
+  // the newest report per account may commit health/quota changes. This keeps
+  // a late result from an older request (e.g. one that used pre-refresh
+  // credentials) from flipping a newer auth_expired back to healthy.
+  #operationSeq = 0;
+  #reportedOpByAccount = /* @__PURE__ */ new Map();
   constructor({ providerId, policy = ACCOUNT_SELECTION_POLICY.ROUND_ROBIN, clock = defaultClock } = {}) {
     if (!providerId) throw new ValidationError("AccountPool providerId is required");
     if (!Object.values(ACCOUNT_SELECTION_POLICY).includes(policy)) {
@@ -712,10 +966,12 @@ var AccountPool = class {
     return accountSummary(account);
   }
   remove(accountId) {
-    this.#sessionAssignments.forEach((assignedId, key) => {
+    this.#sessionAssignments.forEach((assignment, key) => {
+      const assignedId = typeof assignment === "string" ? assignment : assignment?.accountId;
       if (assignedId === accountId) this.#sessionAssignments.delete(key);
     });
     const removed = this.#accounts.delete(accountId);
+    if (removed) this.#reportedOpByAccount.delete(accountId);
     if (removed && this.#defaultAccountId === accountId) this.#defaultAccountId = null;
     this.#ensureSingleAccountDefault();
     return removed;
@@ -748,42 +1004,55 @@ var AccountPool = class {
     this.#defaultAccountId = accountId;
   }
   select(context = {}) {
-    const eligible = this.#eligibleAccounts();
+    const now = this.clock();
+    this.#pruneSessionAssignments(now.getTime());
+    const eligible = this.#eligibleAccounts(now);
     if (eligible.length === 0) {
       throw new AccountSelectionError(`No eligible accounts for provider ${this.providerId}`, {
         providerId: this.providerId
       });
     }
+    const excludedIds = new Set(Array.isArray(context.excludeAccountIds) ? context.excludeAccountIds : []);
+    const selectable = eligible.filter((candidate2) => !excludedIds.has(candidate2.accountId));
+    if (selectable.length === 0) {
+      throw new AccountSelectionError("No eligible account remains after selection exclusions", {
+        providerId: this.providerId,
+        excludeAccountIds: [...excludedIds]
+      });
+    }
     let account;
     if (this.policy === ACCOUNT_SELECTION_POLICY.MANUAL) {
-      const requestedId = context.accountId ?? this.#defaultAccountId ?? (eligible.length === 1 ? eligible[0].accountId : null);
+      const requestedId = context.accountId ?? this.#defaultAccountId ?? (selectable.length === 1 ? selectable[0].accountId : null);
       if (!requestedId) throw new AccountSelectionError("Manual policy requires accountId");
-      account = eligible.find((candidate2) => candidate2.accountId === requestedId);
+      account = selectable.find((candidate2) => candidate2.accountId === requestedId);
       if (!account) throw new AccountSelectionError(`Account is not eligible: ${requestedId}`, { accountId: requestedId });
     } else {
       const sticky = this.policy === ACCOUNT_SELECTION_POLICY.STICKY_SESSION;
       const assignmentKey = sticky ? context.sessionId ?? context.requestId ?? null : null;
-      const excludedIds = new Set(context.excludeAccountIds ?? []);
-      const assignedId = assignmentKey ? this.#sessionAssignments.get(assignmentKey) : null;
-      account = assignedId && !excludedIds.has(assignedId) ? eligible.find((candidate2) => candidate2.accountId === assignedId) : null;
+      const assignment = assignmentKey ? this.#sessionAssignments.get(assignmentKey) : null;
+      const assignedId = typeof assignment === "string" ? assignment : assignment?.accountId;
+      account = assignedId ? selectable.find((candidate2) => candidate2.accountId === assignedId) : null;
       if (!account) {
-        account = this.policy === ACCOUNT_SELECTION_POLICY.FAILOVER ? eligible.find((candidate2) => !excludedIds.has(candidate2.accountId)) : this.#next(eligible);
-        if (!account) {
-          throw new AccountSelectionError("No eligible account remains after failover exclusions", {
-            providerId: this.providerId,
-            excludeAccountIds: [...excludedIds]
-          });
-        }
-        if (assignmentKey) this.#sessionAssignments.set(assignmentKey, account.accountId);
+        account = this.policy === ACCOUNT_SELECTION_POLICY.FAILOVER ? selectable[0] : this.#next(selectable);
+      }
+      if (assignmentKey) {
+        this.#sessionAssignments.delete(assignmentKey);
+        this.#sessionAssignments.set(assignmentKey, {
+          accountId: account.accountId,
+          lastUsedAt: now.getTime()
+        });
+        this.#pruneSessionAssignments(now.getTime());
       }
     }
+    const timestamp = now.toISOString();
     const updated = {
       ...account,
-      lastUsedAt: this.clock().toISOString(),
-      updatedAt: this.clock().toISOString()
+      lastUsedAt: timestamp,
+      updatedAt: timestamp
     };
     this.#accounts.set(updated.accountId, updated);
-    return accountSummary(updated);
+    const summary = accountSummary(updated);
+    return { ...summary, opToken: ++this.#operationSeq };
   }
   resolve(accountId) {
     const account = this.#accounts.get(accountId);
@@ -815,9 +1084,14 @@ var AccountPool = class {
     if (!current) throw new AccountSelectionError(`Account does not exist: ${accountId}`, { accountId });
     return this.#patch(accountId, { resources: { ...current.resources, ...input } });
   }
-  report(accountId, result = {}) {
+  report(accountId, result = {}, { opToken } = {}) {
     const account = this.#accounts.get(accountId);
-    if (!account) throw new AccountSelectionError(`Account does not exist: ${accountId}`, { accountId });
+    if (!account) return null;
+    if (opToken !== void 0) {
+      const lastReported = this.#reportedOpByAccount.get(accountId) ?? 0;
+      if (opToken <= lastReported) return accountSummary(account);
+      this.#reportedOpByAccount.set(accountId, opToken);
+    }
     const now = this.clock().toISOString();
     const patch = { updatedAt: now, health: { ...account.health, lastCheckedAt: now } };
     if (result.quota) patch.quota = createQuotaSnapshot({ ...account.quota, ...result.quota }, this.clock());
@@ -867,14 +1141,24 @@ var AccountPool = class {
     this.#accounts.set(accountId, next);
     return accountSummary(next);
   }
-  #eligibleAccounts() {
-    const now = this.clock();
+  #eligibleAccounts(now = this.clock()) {
     return [...this.#accounts.values()].filter((account) => {
       if (account.health.status === ACCOUNT_HEALTH.EXPIRED) return false;
       if (account.health.status === ACCOUNT_HEALTH.EXHAUSTED && !account.health.cooldownUntil) return false;
       if (!account.health.cooldownUntil) return true;
       return new Date(account.health.cooldownUntil).getTime() <= now.getTime();
     });
+  }
+  #pruneSessionAssignments(nowMs) {
+    for (const [key, assignment] of this.#sessionAssignments) {
+      const lastUsedAt = typeof assignment === "object" ? assignment.lastUsedAt : nowMs;
+      if (nowMs - Number(lastUsedAt) > STICKY_SESSION_TTL_MS) this.#sessionAssignments.delete(key);
+    }
+    while (this.#sessionAssignments.size > MAX_STICKY_ASSIGNMENTS) {
+      const oldest = this.#sessionAssignments.keys().next().value;
+      if (oldest === void 0) break;
+      this.#sessionAssignments.delete(oldest);
+    }
   }
   #next(accounts) {
     const account = accounts[this.#cursor % accounts.length];
@@ -978,22 +1262,118 @@ function unsupportedContentError(message) {
   error.code = "UNSUPPORTED_CONTENT";
   return error;
 }
+function normalizeTransportFailure(chunk) {
+  const failure = chunk?.type === "finish" && chunk.reason?.kind === "error" ? chunk.reason.failure : null;
+  if (!failure || failure.code === "TRANSPORT") return chunk;
+  if (!/\bWebSocket closed\s+1006\b/i.test(String(failure.message ?? ""))) return chunk;
+  return {
+    ...chunk,
+    reason: {
+      ...chunk.reason,
+      failure: {
+        ...failure,
+        code: "TRANSPORT"
+      }
+    }
+  };
+}
+var RETRYABLE_THROWN_FAILURE_CODES = /* @__PURE__ */ new Set([
+  "EMPTY_RESPONSE",
+  "RATE_LIMIT",
+  "SERVER",
+  "TIMEOUT",
+  "TRANSPORT"
+]);
+function retryFinishFromThrownError(error) {
+  let code = error?.code;
+  if (code === "EMPTY_STREAM_OUTPUT" && error?.emptyOutput === true) {
+    code = "EMPTY_RESPONSE";
+  } else if (code === "PI_AI_ERROR" && /\bWebSocket closed\s+1006\b/i.test(String(error.message ?? ""))) {
+    code = "TRANSPORT";
+  }
+  if (!RETRYABLE_THROWN_FAILURE_CODES.has(code)) return null;
+  return {
+    type: "finish",
+    reason: {
+      kind: "error",
+      failure: {
+        code,
+        message: String(error.message ?? "Provider stream ended without substantive output"),
+        ...Number.isInteger(error.status) ? { status: error.status } : {},
+        ...typeof error.providerRetryAfterMs === "number" && Number.isFinite(error.providerRetryAfterMs) ? { providerRetryAfterMs: error.providerRetryAfterMs } : {}
+      }
+    }
+  };
+}
 function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = null } = {}) {
   if (!runtime) throw new ValidationError("Dockyard runtime is required");
   const owned = [...providerIds ?? runtime.listProviderIds?.() ?? []];
   if (owned.length === 0) throw new ValidationError("At least one Dockyard provider is required");
   const catalogPromises = /* @__PURE__ */ new Map();
+  const catalogCache = /* @__PURE__ */ new Map();
+  const STREAM_CATALOG_REFRESH_MS = 6e4;
   async function ensureRuntimeReady() {
     if (typeof runtime.init === "function") await runtime.init();
   }
-  async function providerCatalog(provider) {
-    const existing = catalogPromises.get(provider);
-    if (existing) return existing;
-    const promise = Promise.resolve().then(() => runtime.getCatalog(provider)).finally(() => {
-      if (catalogPromises.get(provider) === promise) catalogPromises.delete(provider);
+  function abortedCallerError(signal) {
+    const error = new Error("This model lookup was aborted");
+    error.name = "AbortError";
+    if (signal?.reason !== void 0) error.cause = signal.reason;
+    return error;
+  }
+  function raceCallerSignal(promise, signal) {
+    if (!signal) return promise;
+    if (signal.aborted) return Promise.reject(abortedCallerError(signal));
+    return new Promise((resolve2, reject) => {
+      const onAbort = () => reject(abortedCallerError(signal));
+      signal.addEventListener("abort", onAbort, { once: true });
+      promise.then(
+        (value) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve2(value);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        }
+      );
     });
-    catalogPromises.set(provider, promise);
-    return promise;
+  }
+  async function providerCatalog(provider, signal) {
+    let promise = catalogPromises.get(provider);
+    if (!promise) {
+      promise = Promise.resolve().then(() => runtime.getCatalog(provider, {})).then((catalog) => {
+        catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+        return catalog;
+      }).finally(() => {
+        if (catalogPromises.get(provider) === promise) catalogPromises.delete(provider);
+      });
+      catalogPromises.set(provider, promise);
+    }
+    return raceCallerSignal(promise, signal);
+  }
+  function cachedProviderCatalog(provider) {
+    const entry = catalogCache.get(provider);
+    if (!entry) return null;
+    if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(provider)) {
+      void providerCatalog(provider).catch(() => {
+      });
+    }
+    return entry.value;
+  }
+  function warmProviderCatalog(provider) {
+    if (!catalogCache.has(provider) && !catalogPromises.has(provider)) {
+      void providerCatalog(provider).catch(() => {
+      });
+    }
+  }
+  function fastResolveModel(provider, model) {
+    const catalog = cachedProviderCatalog(provider);
+    if (!catalog) {
+      warmProviderCatalog(provider);
+      return { provider, id: model, name: model };
+    }
+    return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? { provider, id: model, name: model };
   }
   return {
     providerInfo(provider) {
@@ -1003,25 +1383,37 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     providerRetryPolicy() {
       return void 0;
     },
-    async listModels(provider) {
+    async listModels(provider, signal) {
       await ensureRuntimeReady();
       if (!providerHasConnectedAccount(runtime, provider)) return [];
-      const catalog = await providerCatalog(provider);
+      const catalog = await providerCatalog(provider, signal);
       return providerCatalogModels(provider, catalog);
     },
-    async resolveModel(provider, model) {
+    async resolveModel(provider, model, signal) {
       await ensureRuntimeReady();
       if (!providerHasConnectedAccount(runtime, provider)) return { provider, id: model, name: model };
-      const catalog = await providerCatalog(provider);
+      const catalog = await providerCatalog(provider, signal);
       return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? { provider, id: model, name: model };
+    },
+    async prepareCall(provider, model, signal) {
+      return {
+        // DSH may call prepareCall immediately before generation. Do not make
+        // that path wait for a cold provider catalog; listModels/resolveModel
+        // remain the explicit, authoritative discovery APIs.
+        model: fastResolveModel(provider, model),
+        stream: (options = {}) => this.stream(
+          signal && options.signal === void 0 ? { ...options, signal } : options
+        )
+      };
     },
     async *stream(options) {
       await ensureRuntimeReady();
       if (!providerHasConnectedAccount(runtime, options.provider)) {
         throw new ValidationError(`Provider ${options.provider} has no connected Dockyard account`);
       }
-      const catalog = await providerCatalog(options.provider);
-      const model = providerCatalogModels(options.provider, catalog).find((entry) => entry.id === options.model);
+      const catalog = cachedProviderCatalog(options.provider);
+      if (!catalog) warmProviderCatalog(options.provider);
+      const model = catalog ? providerCatalogModels(options.provider, catalog).find((entry) => entry.id === options.model) : null;
       if (requestHasImageInCurrentTurn(options) && Array.isArray(model?.inputModalities) && !model.inputModalities.includes("image")) {
         throw unsupportedContentError(
           `\u6A21\u578B ${model.name ?? model.id} \u7684\u5B9E\u65F6 provider catalog \u672A\u58F0\u660E\u56FE\u7247\u8F93\u5165\u80FD\u529B`
@@ -1037,9 +1429,25 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
         accountId: options.accountId,
         requestId: options.requestId,
         sessionId: options.sessionId,
+        ...options.signal ? { signal: options.signal } : {},
         ...attachments ? { attachments } : {}
       });
-      for await (const chunk of stream) yield chunk;
+      let emittedChunk = false;
+      try {
+        for await (const chunk of stream) {
+          emittedChunk = true;
+          yield normalizeTransportFailure(chunk);
+        }
+      } catch (error) {
+        if (!emittedChunk) {
+          const retryFinish = retryFinishFromThrownError(error);
+          if (retryFinish) {
+            yield retryFinish;
+            return;
+          }
+        }
+        throw error;
+      }
     },
     providers() {
       return [...owned];
@@ -1050,25 +1458,47 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
 // packages/dsh-bridge/src/index.mjs
 var DshInjectionBridge = class {
   #routes = /* @__PURE__ */ new Map();
-  constructor({ runtime, adapter = null } = {}) {
+  constructor({ runtime, adapter = null, contextWindowOverrides = null } = {}) {
     if (!runtime) throw new ValidationError("DSH runtime is required");
     this.runtime = runtime;
     this.adapter = adapter;
+    this.contextWindowOverrides = contextWindowOverrides;
   }
   async mountProvider(providerModule, accountPool) {
     const providerId = providerModule?.manifest?.id;
     if (!providerId) throw new ValidationError("Provider module is required");
     if (!this.runtime.has(providerId)) await this.runtime.register(providerModule);
-    const route = createProviderRoute({ providerModule, accountPool });
-    this.#routes.set(providerId, route);
-    if (this.adapter?.registerProviderRoute) {
-      await this.adapter.registerProviderRoute(route, providerModule.manifest);
-    }
-    await this.runtime.events.emit("dsh/provider-mounted", {
-      providerId,
-      manifest: { ...providerModule.manifest }
+    const previous = this.#routes.get(providerId) ?? null;
+    const route = createProviderRoute({
+      providerModule,
+      accountPool,
+      contextWindowOverrides: this.contextWindowOverrides
     });
-    return route;
+    let adapterMounted = false;
+    try {
+      if (this.adapter?.registerProviderRoute) {
+        await this.adapter.registerProviderRoute(route, providerModule.manifest);
+        adapterMounted = true;
+      }
+      this.#routes.set(providerId, route);
+      await this.runtime.events.emit("dsh/provider-mounted", {
+        providerId,
+        manifest: { ...providerModule.manifest }
+      });
+      return route;
+    } catch (error) {
+      if (this.#routes.get(providerId) === route) this.#routes.delete(providerId);
+      if (adapterMounted && this.adapter?.unregisterProviderRoute) {
+        await this.adapter.unregisterProviderRoute(providerId).catch(() => {
+        });
+        if (previous) {
+          await this.adapter.registerProviderRoute(previous, providerModule.manifest).catch(() => {
+          });
+          this.#routes.set(providerId, previous);
+        }
+      }
+      throw error;
+    }
   }
   async unmountProvider(providerId) {
     const route = this.#routes.get(providerId);
@@ -1089,7 +1519,7 @@ var DshInjectionBridge = class {
 // packages/vault/src/index.mjs
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile as readFile2, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1243,7 +1673,7 @@ var WindowsDpapiSecretStore = class {
   }
   async read(ref) {
     try {
-      const packed = await readFile(this.#fileFor(ref));
+      const packed = await readFile2(this.#fileFor(ref));
       return JSON.parse((await this.#transform("unprotect", packed)).toString("utf8"));
     } catch (error) {
       if (error?.code === "ENOENT") return null;
@@ -1295,7 +1725,7 @@ var secretStoreConstants = Object.freeze({
 });
 
 // packages/runtime/src/state-store.mjs
-import { mkdir as mkdir2, open, readFile as readFile2, rename, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir2, open, readFile as readFile3, rename, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2, join as join2 } from "node:path";
 import { homedir as homedir2 } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -1305,6 +1735,34 @@ var LOCK_STALE_MS = 12e4;
 function delay(milliseconds) {
   return new Promise((resolve2) => setTimeout(resolve2, milliseconds));
 }
+function parseLockOwner(value) {
+  const [pidText, token] = String(value ?? "").trim().split(/\s+/, 2);
+  const pid = Number(pidText);
+  return Number.isInteger(pid) && pid > 0 && token ? { pid, token } : null;
+}
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+async function removeLockIfOwned(lockPath, token) {
+  try {
+    const owner = parseLockOwner(await readFile3(lockPath, "utf8"));
+    if (!owner && !token) {
+      await rm2(lockPath, { force: true });
+      return true;
+    }
+    if (owner?.token !== token) return false;
+    await rm2(lockPath, { force: true });
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
 async function acquireFileLock(filePath) {
   const lockPath = `${filePath}.lock`;
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
@@ -1312,13 +1770,14 @@ async function acquireFileLock(filePath) {
   while (true) {
     try {
       const handle = await open(lockPath, "wx", 384);
+      const token = randomUUID();
       try {
-        await handle.writeFile(`${process.pid}
+        await handle.writeFile(`${process.pid} ${token}
 `, "utf8");
       } catch (error) {
         await handle.close().catch(() => {
         });
-        await rm2(lockPath, { force: true }).catch(() => {
+        await removeLockIfOwned(lockPath, token).catch(() => {
         });
         throw error;
       }
@@ -1328,7 +1787,7 @@ async function acquireFileLock(filePath) {
         released = true;
         await handle.close().catch(() => {
         });
-        await rm2(lockPath, { force: true }).catch(() => {
+        await removeLockIfOwned(lockPath, token).catch(() => {
         });
       };
     } catch (error) {
@@ -1336,8 +1795,11 @@ async function acquireFileLock(filePath) {
       try {
         const metadata = await stat(lockPath);
         if (Date.now() - metadata.mtimeMs > LOCK_STALE_MS) {
-          await rm2(lockPath, { force: true });
-          continue;
+          const owner = parseLockOwner(await readFile3(lockPath, "utf8").catch(() => ""));
+          if (!owner || !processIsAlive(owner.pid)) {
+            await removeLockIfOwned(lockPath, owner?.token ?? "");
+            continue;
+          }
         }
       } catch (lockError) {
         if (lockError?.code !== "ENOENT") throw lockError;
@@ -1378,32 +1840,55 @@ var JsonStateStore = class {
     this.filePath = filePath ?? defaultDockyardStatePath({ home, env });
   }
   async load() {
+    return withFileLock(this.filePath, () => this.#loadUnlocked());
+  }
+  /**
+   * Load without acquiring the file lock. Callers already holding the lock
+   * (save/update) use this to avoid re-entrant lock acquisition.
+   */
+  async #loadUnlocked() {
+    let raw;
     try {
-      const raw = await readFile2(this.filePath, "utf8");
-      const parsed = JSON.parse(raw);
-      return {
-        ...emptyState(),
-        ...parsed,
-        pools: parsed?.pools && typeof parsed.pools === "object" ? parsed.pools : {}
-      };
+      raw = await readFile3(this.filePath, "utf8");
     } catch (error) {
       if (error?.code === "ENOENT") return emptyState();
-      if (error instanceof SyntaxError) {
-        const archivePath = `${this.filePath}.corrupted.${Date.now()}`;
-        await rename(this.filePath, archivePath).catch(() => {
-        });
-        return emptyState();
-      }
       throw error;
     }
+    try {
+      return this.#parse(raw);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      try {
+        raw = await readFile3(this.filePath, "utf8");
+        return this.#parse(raw);
+      } catch (retryError) {
+        if (retryError?.code === "ENOENT") return emptyState();
+        if (!(retryError instanceof SyntaxError)) throw retryError;
+      }
+      const archivePath = `${this.filePath}.corrupted.${Date.now()}`;
+      await rename(this.filePath, archivePath).catch(() => {
+      });
+      return emptyState();
+    }
+  }
+  #parse(raw) {
+    const parsed = JSON.parse(raw);
+    return {
+      ...emptyState(),
+      ...parsed,
+      pools: parsed?.pools && typeof parsed.pools === "object" ? parsed.pools : {}
+    };
   }
   async save(state) {
-    return withFileLock(this.filePath, () => this.#write(state));
+    return withFileLock(this.filePath, async () => {
+      const current = await this.#loadUnlocked();
+      return this.#write({ ...current, ...state ?? {} });
+    });
   }
   async update(mutator) {
     if (typeof mutator !== "function") throw new TypeError("State update mutator must be a function");
     return withFileLock(this.filePath, async () => {
-      const current = await this.load();
+      const current = await this.#loadUnlocked();
       const next = await mutator(current);
       return this.#write(next);
     });
@@ -1420,13 +1905,218 @@ var JsonStateStore = class {
     try {
       await writeFile2(tempPath, `${JSON.stringify(next, null, 2)}
 `, { mode: 384 });
+      const handle = await open(tempPath, "r+");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
       await rename(tempPath, this.filePath);
       committed = true;
+      try {
+        const directory = await open(dirname2(this.filePath), "r");
+        try {
+          await directory.sync();
+        } catch {
+        } finally {
+          await directory.close();
+        }
+      } catch {
+      }
       return next;
     } finally {
       if (!committed) await rm2(tempPath, { force: true }).catch(() => {
       });
     }
+  }
+};
+
+// packages/runtime/src/context-window-overrides.mjs
+var MAX_CONTEXT_WINDOW = Number.MAX_SAFE_INTEGER;
+function text(value) {
+  const normalized = typeof value === "string" ? value.trim() : String(value ?? "").trim();
+  return normalized.length > 0 ? normalized : null;
+}
+function normalizeContextWindow(value) {
+  if (value === null || value === void 0 || value === "") return null;
+  const numeric = typeof value === "number" ? value : Number(String(value).replaceAll(",", "").trim());
+  if (!Number.isSafeInteger(numeric) || numeric <= 0 || numeric > MAX_CONTEXT_WINDOW) return null;
+  return numeric;
+}
+function normalizedMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value;
+}
+function cleanModelMap(value) {
+  const output = {};
+  for (const [modelId, raw] of Object.entries(normalizedMap(value))) {
+    const id = text(modelId);
+    const contextWindow = normalizeContextWindow(raw);
+    if (id && contextWindow !== null) output[id] = contextWindow;
+  }
+  return output;
+}
+function cleanNestedModelMap(value) {
+  const output = {};
+  for (const [scopeId, models] of Object.entries(normalizedMap(value))) {
+    const id = text(scopeId);
+    const cleaned = cleanModelMap(models);
+    if (id && Object.keys(cleaned).length > 0) output[id] = cleaned;
+  }
+  return output;
+}
+function cleanProviderRecord(value) {
+  return {
+    models: cleanModelMap(value?.models),
+    accounts: cleanNestedModelMap(value?.accounts),
+    keys: cleanNestedModelMap(value?.keys)
+  };
+}
+function cleanState(value) {
+  const providers = {};
+  for (const [providerId, record] of Object.entries(normalizedMap(value?.providers))) {
+    const id = text(providerId);
+    if (!id) continue;
+    const cleaned = cleanProviderRecord(record);
+    if (Object.values(cleaned).some((map) => Object.keys(map).length > 0)) providers[id] = cleaned;
+  }
+  return { schema: 1, providers };
+}
+function assertScope(scope = {}) {
+  const providerId = text(scope.providerId);
+  const modelId = text(scope.modelId);
+  const accountId = text(scope.accountId);
+  const keyRef = text(scope.keyRef);
+  if (!providerId) throw new Error("\u4E0A\u4E0B\u6587\u8986\u76D6\u914D\u7F6E\u9700\u8981 providerId");
+  if (!modelId) throw new Error("\u4E0A\u4E0B\u6587\u8986\u76D6\u914D\u7F6E\u9700\u8981 modelId");
+  if (accountId && keyRef) throw new Error("\u4E0A\u4E0B\u6587\u8986\u76D6\u914D\u7F6E\u4E0D\u80FD\u540C\u65F6\u7ED1\u5B9A\u8D26\u53F7\u548C Key");
+  return {
+    providerId,
+    modelId,
+    ...accountId ? { accountId } : {},
+    ...keyRef ? { keyRef } : {}
+  };
+}
+function bucketFor(scope) {
+  if (scope.keyRef) return ["keys", scope.keyRef];
+  if (scope.accountId) return ["accounts", scope.accountId];
+  return ["models", null];
+}
+function exactValue(state, scope) {
+  const provider = state.providers?.[scope.providerId];
+  if (!provider) return null;
+  const [bucket, scopeId] = bucketFor(scope);
+  const models = scopeId ? provider[bucket]?.[scopeId] : provider.models;
+  return normalizeContextWindow(models?.[scope.modelId]);
+}
+function resolveValue(state, scope) {
+  const provider = state.providers?.[scope.providerId];
+  if (!provider) return null;
+  if (scope.keyRef) {
+    const keyValue = normalizeContextWindow(provider.keys?.[scope.keyRef]?.[scope.modelId]);
+    if (keyValue !== null) return keyValue;
+  }
+  if (scope.accountId) {
+    const accountValue = normalizeContextWindow(provider.accounts?.[scope.accountId]?.[scope.modelId]);
+    if (accountValue !== null) return accountValue;
+  }
+  return normalizeContextWindow(provider.models?.[scope.modelId]);
+}
+function cloneState(value) {
+  return structuredClone(cleanState(value));
+}
+function removeEmptyScopes(provider, bucket, scopeId) {
+  if (bucket === "models") return;
+  if (Object.keys(provider[bucket]?.[scopeId] ?? {}).length === 0) delete provider[bucket][scopeId];
+}
+function removeEmptyProvider(state, providerId) {
+  const provider = state.providers?.[providerId];
+  if (!provider) return;
+  if (Object.values(provider).every((map) => Object.keys(map).length === 0)) delete state.providers[providerId];
+}
+var ContextWindowOverrideStore = class {
+  stateStore;
+  state = { schema: 1, providers: {} };
+  readyPromise;
+  constructor({ stateStore } = {}) {
+    if (!stateStore || typeof stateStore.load !== "function" || typeof stateStore.update !== "function" && typeof stateStore.save !== "function") {
+      throw new TypeError("Context window override store requires a state store");
+    }
+    this.stateStore = stateStore;
+    this.readyPromise = this.load();
+  }
+  async load() {
+    const snapshot = await this.stateStore.load();
+    this.state = cleanState(snapshot?.contextWindowOverrides);
+    return this;
+  }
+  async ready() {
+    await this.readyPromise;
+    return this;
+  }
+  describe(input) {
+    const scope = assertScope(input);
+    const override = exactValue(this.state, scope);
+    const inherited = resolveValue(this.state, {
+      providerId: scope.providerId,
+      modelId: scope.modelId,
+      ...scope.accountId ? { accountId: scope.accountId } : {},
+      ...scope.keyRef ? { keyRef: scope.keyRef } : {}
+    });
+    return {
+      ...scope,
+      override,
+      effectiveOverride: inherited,
+      source: override !== null ? "custom" : inherited !== null ? "inherited" : "auto"
+    };
+  }
+  resolve(providerId, modelId, scope = {}) {
+    const normalized = assertScope({ providerId, modelId, ...scope });
+    return resolveValue(this.state, normalized);
+  }
+  hasAny(providerId, modelId) {
+    const normalizedProvider = text(providerId);
+    const normalizedModel = text(modelId);
+    if (!normalizedProvider || !normalizedModel) return false;
+    const provider = this.state.providers?.[normalizedProvider];
+    if (!provider) return false;
+    if (normalizeContextWindow(provider.models?.[normalizedModel]) !== null) return true;
+    return [provider.accounts, provider.keys].some((scopes) => Object.values(scopes ?? {}).some((models) => normalizeContextWindow(models?.[normalizedModel]) !== null));
+  }
+  async get(input) {
+    await this.ready();
+    return this.describe(input);
+  }
+  async set(input, value) {
+    await this.ready();
+    const scope = assertScope(input);
+    const contextWindow = value === null || value === void 0 || value === "" ? null : normalizeContextWindow(value);
+    if (value !== null && value !== void 0 && value !== "" && contextWindow === null) {
+      throw new Error("\u4E0A\u4E0B\u6587\u4E0A\u9650\u5FC5\u987B\u662F\u6B63\u6574\u6570 token \u6570");
+    }
+    const mutate = (current) => {
+      const next = {
+        ...current,
+        contextWindowOverrides: cloneState(current?.contextWindowOverrides)
+      };
+      const overrides = next.contextWindowOverrides;
+      const provider = overrides.providers[scope.providerId] ?? {
+        models: {},
+        accounts: {},
+        keys: {}
+      };
+      overrides.providers[scope.providerId] = provider;
+      const [bucket, scopeId] = bucketFor(scope);
+      const models = scopeId ? provider[bucket][scopeId] ??= {} : provider.models;
+      if (contextWindow === null) delete models[scope.modelId];
+      else models[scope.modelId] = contextWindow;
+      removeEmptyScopes(provider, bucket, scopeId);
+      removeEmptyProvider(overrides, scope.providerId);
+      return { ...next, contextWindowOverrides: cleanState(overrides) };
+    };
+    const saved = typeof this.stateStore.update === "function" ? await this.stateStore.update(mutate) : await this.stateStore.save(mutate(await this.stateStore.load()));
+    this.state = cleanState(saved?.contextWindowOverrides);
+    return this.describe(scope);
   }
 };
 
@@ -1438,135 +2128,6 @@ import { join as join4 } from "node:path";
 // packages/oauth/src/browser-oauth-authorizer.mjs
 import { createHash as createHash2, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
 import { createServer } from "node:http";
-
-// packages/providers/src/provider-utils.mjs
-import { readFile as readFile3 } from "node:fs/promises";
-async function readJsonFile(path) {
-  try {
-    return JSON.parse(await readFile3(path, "utf8"));
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-}
-function decodeJwtPayload(token) {
-  if (typeof token !== "string") return null;
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-function isoFromEpoch(value) {
-  if (value === void 0 || value === null || value === "") return null;
-  const numeric = Number(value);
-  const date = Number.isFinite(numeric) ? new Date(numeric < 1e10 ? numeric * 1e3 : numeric) : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-function addSecondsIso(seconds, now = /* @__PURE__ */ new Date()) {
-  const numeric = Number(seconds);
-  if (!Number.isFinite(numeric)) return null;
-  return new Date(now.getTime() + numeric * 1e3).toISOString();
-}
-function finiteNumber(value) {
-  if (value === void 0 || value === null || value === "") return null;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
-}
-function stringValue(value) {
-  return value === void 0 || value === null || value === "" ? null : String(value);
-}
-async function fetchJson(url, init = {}, { timeoutMs = 2e4, fetchImpl = fetch } = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const externalSignal = init?.signal;
-  const abortFromCaller = () => controller.abort(externalSignal?.reason);
-  if (externalSignal?.aborted) controller.abort(externalSignal.reason);
-  else externalSignal?.addEventListener?.("abort", abortFromCaller, { once: true });
-  try {
-    const response = await fetchImpl(url, { ...init, signal: controller.signal });
-    const text2 = await response.text();
-    let body = null;
-    try {
-      body = text2 ? JSON.parse(text2) : null;
-    } catch {
-      body = null;
-    }
-    if (!response.ok) {
-      const error = new Error(`Provider request failed (${response.status})`);
-      error.status = response.status;
-      error.bodyKeys = body && typeof body === "object" ? Object.keys(body) : [];
-      const upstreamError = body?.error;
-      const upstreamCode = typeof upstreamError === "string" ? upstreamError : upstreamError && typeof upstreamError === "object" ? upstreamError.code ?? upstreamError.type : body?.error_code ?? body?.code;
-      if (typeof upstreamCode === "string" && upstreamCode.length > 0) error.upstreamCode = upstreamCode;
-      throw error;
-    }
-    return { body, response };
-  } finally {
-    clearTimeout(timer);
-    externalSignal?.removeEventListener?.("abort", abortFromCaller);
-  }
-}
-function redactError(error) {
-  if (!error) return null;
-  const message = error instanceof Error ? error.message : String(error);
-  const detail = error?.detail ? ` ${String(error.detail)}` : "";
-  const code = error?.code !== void 0 && error?.code !== null ? ` [code ${String(error.code)}]` : "";
-  return `${message}${detail}${code}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]").replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]").slice(0, 300);
-}
-function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date(), prefix = "quota" } = {}) {
-  const windows = [];
-  function visit(node, path, label) {
-    if (!node || typeof node !== "object" || Array.isArray(node)) return;
-    const usedPercent = finiteNumber(node.used_percent ?? node.usedPercent);
-    const remainingFraction = finiteNumber(node.remaining_fraction ?? node.remainingFraction);
-    const remainingValue = finiteNumber(node.remaining);
-    const limitValue = finiteNumber(node.limit);
-    const resetAt = isoFromEpoch(node.reset_at ?? node.resetAt) ?? addSecondsIso(node.reset_after_seconds ?? node.resetAfterSeconds, now);
-    const hasQuotaShape = usedPercent !== null || remainingFraction !== null || remainingValue !== null || limitValue !== null;
-    if (hasQuotaShape) {
-      let remaining = remainingValue;
-      let limit = limitValue;
-      let unit = stringValue(node.unit);
-      if (remaining === null && remainingFraction !== null) {
-        remaining = remainingFraction;
-        limit = limit ?? 1;
-        unit = unit ?? "fraction";
-      } else if (remaining === null && usedPercent !== null) {
-        remaining = Math.max(0, 100 - usedPercent);
-        limit = limit ?? 100;
-        unit = unit ?? "percent";
-      }
-      windows.push({
-        id: path || prefix,
-        name: label || path || prefix,
-        remaining,
-        limit,
-        unit,
-        resetAt,
-        source
-      });
-    }
-    for (const [key, child] of Object.entries(node)) {
-      if (child && typeof child === "object" && !Array.isArray(child)) {
-        visit(child, path ? `${path}.${key}` : key, key);
-      }
-    }
-  }
-  visit(value, "", prefix);
-  const unique = /* @__PURE__ */ new Map();
-  for (const window of windows) unique.set(window.id, window);
-  return [...unique.values()];
-}
-function selectPrimaryQuotaWindow(windows) {
-  if (!windows?.length) return {};
-  const preferred = windows.find((window) => /primary|weekly|five.?hour|5h/i.test(`${window.id} ${window.name}`));
-  return preferred ?? windows[0];
-}
-
-// packages/oauth/src/browser-oauth-authorizer.mjs
 var DEFAULT_TIMEOUT_MS = 10 * 60 * 1e3;
 var DEFAULT_CALLBACK_PATH = "/oauth/callback";
 function base64Url(value) {
@@ -1590,6 +2151,26 @@ function publicSession(session) {
     ...session.authorizationCodeRequired ? { authorizationCodeRequired: true } : {}
   };
 }
+function escapeHtml(value) {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
+}
+var LOOPBACK_HOSTNAMES2 = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1"]);
+function isLoopbackHostname2(hostname) {
+  const value = String(hostname ?? "").trim().toLowerCase();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return LOOPBACK_HOSTNAMES2.has(bare);
+}
+function assertSafeCallbackHost(host) {
+  const value = String(host ?? "").trim();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value.toLowerCase();
+  if (!isLoopbackHostname2(bare)) {
+    throw new Error(`OAuth callback host must be loopback (localhost / 127.0.0.1 / ::1), got: ${value || "<empty>"}`);
+  }
+}
+function resolveLoopbackListenHost(host) {
+  const bare = String(host ?? "").trim().toLowerCase();
+  return bare === "::1" || bare === "[::1]" ? "::1" : "127.0.0.1";
+}
 function missingSession(sessionId, providerId, instructions) {
   return {
     sessionId,
@@ -1600,17 +2181,17 @@ function missingSession(sessionId, providerId, instructions) {
   };
 }
 function extractCodeInput(input) {
-  const text2 = String(input ?? "").trim();
-  if (!text2) return { code: "", state: "" };
+  const text3 = String(input ?? "").trim();
+  if (!text3) return { code: "", state: "" };
   try {
-    const url = new URL(text2);
+    const url = new URL(text3);
     return {
       code: url.searchParams.get("code") ?? "",
       state: url.searchParams.get("state") ?? "",
       error: url.searchParams.get("error") ?? ""
     };
   } catch {
-    const [code, state] = text2.split("#", 2);
+    const [code, state] = text3.split("#", 2);
     return { code: code.trim(), state: state?.trim() ?? "" };
   }
 }
@@ -1642,6 +2223,20 @@ function createBrowserOAuthAuthorizer({
   if (!redirectUri && callbackPort === null && typeof pollSession !== "function") {
     throw new Error(`Browser OAuth authorizer requires redirectUri or callbackPort for ${providerId}`);
   }
+  assertSafeCallbackHost(callbackHost ?? "localhost");
+  if (redirectUri) {
+    let parsedRedirectUri = null;
+    try {
+      parsedRedirectUri = new URL(redirectUri);
+    } catch {
+      throw new Error(`Browser OAuth authorizer has an invalid redirectUri for ${providerId}`);
+    }
+    if (parsedRedirectUri.protocol === "http:" && !isLoopbackHostname2(parsedRedirectUri.hostname)) {
+      throw new Error(
+        `Browser OAuth redirectUri over plain http must use a loopback host for ${providerId}, got: ${parsedRedirectUri.hostname}`
+      );
+    }
+  }
   const sessions = /* @__PURE__ */ new Map();
   async function closeServer(session) {
     if (!session.server) return;
@@ -1657,10 +2252,10 @@ function createBrowserOAuthAuthorizer({
     if (session.timer) clearTimeout(session.timer);
     await closeServer(session);
   }
-  function responseHtml(res, title, message) {
-    res.statusCode = 200;
+  function responseHtml(res, title, message, statusCode = 200) {
+    res.statusCode = statusCode;
     res.setHeader("content-type", "text/html; charset=utf-8");
-    res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title><p>${message}</p><p>\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u8FD4\u56DE Dockyard DSH\u3002</p>`);
+    res.end(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><p>${escapeHtml(message)}</p><p>\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u8FD4\u56DE Dockyard DSH\u3002</p>`);
   }
   async function handleCallback(session, req, res) {
     const requestUrl = new URL(req.url ?? "/", "http://localhost");
@@ -1673,8 +2268,10 @@ function createBrowserOAuthAuthorizer({
     const code = requestUrl.searchParams.get("code") ?? "";
     const state = requestUrl.searchParams.get("state") ?? "";
     if (state !== session.state) {
-      session.callback = { error: "OAuth state \u6821\u9A8C\u5931\u8D25" };
-      responseHtml(res, "\u6388\u6743\u672A\u5B8C\u6210", "\u5B89\u5168\u6821\u9A8C\u5931\u8D25\uFF0C\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u91CD\u65B0\u5F00\u59CB\u6388\u6743\u3002");
+      session.status = "failed";
+      session.diagnostic = "OAuth state \u6821\u9A8C\u5931\u8D25";
+      responseHtml(res, "\u6388\u6743\u672A\u5B8C\u6210", "\u5B89\u5168\u6821\u9A8C\u5931\u8D25\uFF0C\u53EF\u4EE5\u5173\u95ED\u6B64\u9875\u9762\u5E76\u91CD\u65B0\u5F00\u59CB\u6388\u6743\u3002", 400);
+      await cleanup(session);
       return;
     }
     if (error) {
@@ -1711,7 +2308,7 @@ function createBrowserOAuthAuthorizer({
       };
       server.once("error", onError);
       server.once("listening", onListening);
-      server.listen({ host: callbackHost, port: session.callbackPort });
+      server.listen({ host: resolveLoopbackListenHost(callbackHost), port: session.callbackPort });
     });
     server.unref?.();
     const address = server.address();
@@ -1719,10 +2316,12 @@ function createBrowserOAuthAuthorizer({
   }
   async function finalize(session, context = {}) {
     if (session.result) return session.result;
+    if (session.cancelled || session.status === "cancelled") return publicSession(session);
     if (session.finalizing) return session.finalizing;
     session.finalizing = (async () => {
       try {
         const callback = session.callback;
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         if (!callback && !session.credentials) return publicSession(session);
         if (callback?.error) throw new Error(callback.error);
         const exchanged = session.credentials ?? await exchangeCode({
@@ -1732,7 +2331,9 @@ function createBrowserOAuthAuthorizer({
           redirectUri: session.redirectUri,
           context
         });
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         const accounts = await importCredentials(exchanged, context);
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         if (!Array.isArray(accounts) || accounts.length === 0) {
           throw new Error("\u5B98\u65B9\u6388\u6743\u5B8C\u6210\uFF0C\u4F46 provider \u6CA1\u6709\u8FD4\u56DE\u53EF\u63A5\u5165\u7684\u8BA2\u9605\u8D26\u53F7");
         }
@@ -1744,6 +2345,7 @@ function createBrowserOAuthAuthorizer({
         };
         return session.result;
       } catch (error) {
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         session.status = "failed";
         session.diagnostic = redactError(error);
         return publicSession(session);
@@ -1793,7 +2395,8 @@ function createBrowserOAuthAuthorizer({
         if (session.status !== "pending") return;
         session.status = "failed";
         session.diagnostic = "\u5B98\u65B9 OAuth \u767B\u5F55\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002";
-        void cleanup(session);
+        session.cancelled = true;
+        void cleanup(session).finally(() => sessions.delete(session.sessionId));
       }, timeoutMs);
       session.timer.unref?.();
     } catch (error) {
@@ -1828,8 +2431,15 @@ function createBrowserOAuthAuthorizer({
     const session = sessions.get(sessionId);
     if (!session) return missingSession(sessionId, providerId, instructions);
     const parsed = extractCodeInput(input);
+    if (String(input ?? "").length > 8192) {
+      session.diagnostic = "\u6388\u6743\u56DE\u8C03\u8F93\u5165\u8FC7\u957F\uFF0C\u8BF7\u7C98\u8D34\u5B98\u65B9\u8FD4\u56DE\u7684\u5B8C\u6574\u56DE\u8C03\u5730\u5740\u3002";
+      return publicSession(session);
+    }
     if (parsed.state !== session.state) {
-      session.callback = { error: "OAuth state \u6821\u9A8C\u5931\u8D25" };
+      session.status = "failed";
+      session.diagnostic = "OAuth state \u6821\u9A8C\u5931\u8D25\uFF0C\u8BF7\u91CD\u65B0\u63D0\u4EA4\u5F53\u524D\u4F1A\u8BDD\u8FD4\u56DE\u7684\u56DE\u8C03\u5730\u5740\u3002";
+      await cleanup(session);
+      return publicSession(session);
     } else if (parsed.error) {
       session.callback = { error: parsed.error, state: parsed.state };
     } else if (!parsed.code) {
@@ -1843,6 +2453,8 @@ function createBrowserOAuthAuthorizer({
   async function cancel(sessionId) {
     const session = sessions.get(sessionId);
     if (!session) return { sessionId, providerId, status: "missing" };
+    session.cancelled = true;
+    session.status = "cancelled";
     await cleanup(session);
     sessions.delete(sessionId);
     return { sessionId, providerId, status: "cancelled" };
@@ -1860,12 +2472,70 @@ import { mkdir as mkdir3, mkdtemp, readFile as readFile4, rm as rm3 } from "node
 import { tmpdir } from "node:os";
 import { join as join3 } from "node:path";
 import { spawn as spawn2 } from "node:child_process";
+
+// packages/oauth/src/cli-url-sanitizer.mjs
 var URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
+var SENSITIVE_URL_QUERY_PARAMS = /* @__PURE__ */ new Set([
+  "code",
+  "error",
+  "error_description",
+  "error_uri",
+  "error_code",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "token",
+  "identy_token",
+  "session_token",
+  "sessiontoken",
+  "secret",
+  "jwt",
+  "authcode",
+  "authorization_code"
+]);
+function stripAnsiAndControl(value) {
+  return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f].*$/, "");
+}
+function trimTrailingPunctuation(value) {
+  return value.replace(/[),.;]+$/, "");
+}
+function isLoopbackHostname3(hostname) {
+  const value = String(hostname ?? "").trim().toLowerCase();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return bare === "localhost" || bare === "127.0.0.1" || bare === "::1";
+}
+function carriesResponseParameters(url) {
+  const scopes = [url.search];
+  if (url.hash && url.hash.length > 1) scopes.push(url.hash.slice(1));
+  for (const scope of scopes) {
+    if (!scope) continue;
+    for (const [key] of new URLSearchParams(scope)) {
+      if (SENSITIVE_URL_QUERY_PARAMS.has(key.toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+function extractSafeAuthorizationUrl(text3) {
+  const match = String(text3 ?? "").match(URL_PATTERN);
+  if (!match?.[0]) return null;
+  const raw = trimTrailingPunctuation(stripAnsiAndControl(match[0]));
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHostname3(url.hostname))) {
+    return null;
+  }
+  if (carriesResponseParameters(url)) return null;
+  if (url.hash) url.hash = "";
+  return url.toString();
+}
+
+// packages/oauth/src/cli-oauth-authorizer.mjs
 var DEFAULT_TIMEOUT_MS2 = 10 * 60 * 1e3;
 var CHILD_STOP_GRACE_MS = 2e3;
-function cleanUrl(value) {
-  return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f].*$/, "").replace(/[),.;]+$/, "");
-}
 function publicSession2(session) {
   return {
     sessionId: session.sessionId,
@@ -1944,11 +2614,10 @@ function createCliOAuthAuthorizer({
     }
   }
   function captureOutput(session, chunk) {
-    const text2 = String(chunk ?? "");
-    session.output = `${session.output}${text2}`.slice(-32e3);
+    const text3 = String(chunk ?? "");
+    session.output = `${session.output}${text3}`.slice(-32e3);
     if (!session.authorizationUrl) {
-      const match = session.output.match(URL_PATTERN);
-      if (match?.[0]) session.authorizationUrl = cleanUrl(match[0]);
+      session.authorizationUrl = extractSafeAuthorizationUrl(session.output);
     }
   }
   async function finalize(session, context) {
@@ -2290,8 +2959,9 @@ var CodexOAuthDriver = class {
     cliPath = env.DOCKYARD_CODEX_CLI || "codex"
   } = {}) {
     this.authFilePath = codexAuthPath({ env, home, authFilePath });
-    this.tokenUrl = tokenUrl;
-    this.usageUrls = usageUrls;
+    this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_CODEX_TOKEN_URL");
+    assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CODEX_AUTHORIZATION_URL");
+    this.usageUrls = usageUrls.map((url) => assertSecureEndpointUrl(url, "DOCKYARD_CODEX_USAGE_URL"));
     this.clientId = clientId;
     this.fetchImpl = fetchImpl;
     this.requestExecutor = requestExecutor;
@@ -2478,8 +3148,11 @@ var CodexOAuthDriver = class {
       ...context.signal ? { signal: context.signal } : {}
     }, { fetchImpl: this.fetchImpl });
     const body = response.body ?? {};
-    if (!body.access_token || !body.refresh_token || !Number.isFinite(Number(body.expires_in))) {
+    if (!body.access_token || !Number.isFinite(Number(body.expires_in))) {
       throw new Error("Codex OAuth refresh response is incomplete");
+    }
+    if (body.refresh_token !== void 0 && body.refresh_token !== null && typeof body.refresh_token !== "string") {
+      throw new Error("Codex OAuth refresh response returned an invalid refresh token");
     }
     const payload = decodeJwtPayload(body.access_token) ?? {};
     const auth = authClaims(payload);
@@ -2488,7 +3161,7 @@ var CodexOAuthDriver = class {
       ...credential,
       type: "oauth",
       access: body.access_token,
-      refresh: body.refresh_token,
+      refresh: body.refresh_token ?? credential.refresh,
       idToken: body.id_token ?? credential.idToken ?? null,
       accountId,
       expiresAt: addSecondsIso(body.expires_in, context.now instanceof Date ? context.now : /* @__PURE__ */ new Date()),
@@ -2715,11 +3388,59 @@ import { dirname as dirname3, join as join6 } from "node:path";
 
 // packages/providers/src/cli-agent-transport.mjs
 import { spawn as spawn3 } from "node:child_process";
+var MAX_CLI_OUTPUT_BYTES = 4 * 1024 * 1024;
+var PROCESS_GROUP_PLATFORM = process.platform !== "win32";
+var KILL_GRACE_MS = 1e3;
+function appendBounded(chunks, chunk, state) {
+  const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk ?? ""));
+  const remaining = MAX_CLI_OUTPUT_BYTES - state.total;
+  if (remaining <= 0) return;
+  const accepted = value.subarray(0, remaining);
+  chunks.push(accepted);
+  state.total += accepted.byteLength;
+}
+function boundedCliDetail(output, errorOutput) {
+  return String(errorOutput || output || "").replace(/\s+/g, " ").trim().slice(0, 500);
+}
 function cliFailure(code, signal, output, errorOutput, providerId) {
   const error = new Error(`${providerId ?? "provider"} CLI failed (${signal ?? code})`);
   error.code = code;
   error.detail = String(errorOutput || output || "").replace(/\s+/g, " ").trim().slice(0, 500);
   return error;
+}
+function cliTimeoutError(providerId, output, errorOutput) {
+  const error = new Error(`${providerId ?? "provider"} CLI request timed out`);
+  error.code = "ETIMEDOUT";
+  error.providerId = providerId ?? null;
+  error.detail = boundedCliDetail(output, errorOutput);
+  return error;
+}
+function cliAbortError(providerId, output, errorOutput) {
+  const error = new Error(`${providerId ?? "provider"} CLI request aborted`);
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  error.providerId = providerId ?? null;
+  error.detail = boundedCliDetail(output, errorOutput);
+  return error;
+}
+function killProcessTree(child, sig, { detached = PROCESS_GROUP_PLATFORM } = {}) {
+  const pid = child?.pid;
+  if (detached && Number.isFinite(pid)) {
+    try {
+      process.kill(-pid, sig);
+    } catch (error) {
+      if (error?.code !== "ESRCH") {
+        try {
+          child.kill(sig);
+        } catch {
+        }
+      }
+    }
+  }
+  try {
+    child.kill(sig);
+  } catch {
+  }
 }
 function parseJsonOutput(output) {
   if (output && typeof output === "object") return output;
@@ -2744,54 +3465,81 @@ function runCliCommand(command, args, {
   providerId
 } = {}) {
   return new Promise((resolve2, reject) => {
+    const detached = PROCESS_GROUP_PLATFORM;
     const child = spawn3(command, args, {
       env,
       ...cwd ? { cwd } : {},
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      detached,
       ...signal ? { signal } : {}
     });
     const stdout = [];
     const stderr = [];
+    const stdoutSize = { total: 0 };
+    const stderrSize = { total: 0 };
     let timedOut = false;
-    let forceTimer = null;
+    let abortRequested = Boolean(signal?.aborted);
+    let settled = false;
     let terminationRequested = false;
+    let forceTimer = null;
+    let timer = null;
+    const finish = (settle, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      signal?.removeEventListener?.("abort", onAbort);
+      settle(value);
+    };
     const terminate = () => {
       if (terminationRequested) return;
       terminationRequested = true;
-      try {
-        child.kill("SIGTERM");
-      } catch {
-      }
+      killProcessTree(child, "SIGTERM", { detached });
       forceTimer = setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-        }
-      }, 1e3);
+        killProcessTree(child, "SIGKILL", { detached });
+      }, KILL_GRACE_MS);
       forceTimer.unref?.();
     };
-    const timer = setTimeout(() => {
+    const onAbort = () => {
+      abortRequested = true;
+      terminate();
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
       timedOut = true;
       terminate();
     }, timeoutMs);
-    child.stdout.on("data", (chunk) => stdout.push(chunk));
-    child.stderr.on("data", (chunk) => stderr.push(chunk));
+    timer.unref?.();
+    child.stdout.on("data", (chunk) => appendBounded(stdout, chunk, stdoutSize));
+    child.stderr.on("data", (chunk) => appendBounded(stderr, chunk, stderrSize));
     child.once("error", (error) => {
-      clearTimeout(timer);
-      if (forceTimer) clearTimeout(forceTimer);
-      reject(error);
-    });
-    child.once("close", (code, closeSignal) => {
-      clearTimeout(timer);
-      if (forceTimer) clearTimeout(forceTimer);
-      const output = Buffer.concat(stdout).toString("utf8");
-      const errorOutput = Buffer.concat(stderr).toString("utf8");
-      if (code === 0) {
-        resolve2({ output, errorOutput });
+      if (error?.name === "AbortError" || abortRequested || signal?.aborted) {
+        finish(reject, cliAbortError(
+          providerId,
+          Buffer.concat(stdout).toString("utf8"),
+          Buffer.concat(stderr).toString("utf8")
+        ));
         return;
       }
-      reject(cliFailure(code, timedOut ? "SIGTERM" : closeSignal, output, errorOutput, providerId));
+      finish(reject, error);
+    });
+    child.once("close", (code, closeSignal) => {
+      const output = Buffer.concat(stdout).toString("utf8");
+      const errorOutput = Buffer.concat(stderr).toString("utf8");
+      if (timedOut) {
+        finish(reject, cliTimeoutError(providerId, output, errorOutput));
+        return;
+      }
+      if (abortRequested || signal?.aborted) {
+        finish(reject, cliAbortError(providerId, output, errorOutput));
+        return;
+      }
+      if (code === 0) {
+        finish(resolve2, { output, errorOutput });
+        return;
+      }
+      finish(reject, cliFailure(code, closeSignal, output, errorOutput, providerId));
     });
   });
 }
@@ -2800,7 +3548,7 @@ var cliAgentTransportConstants = Object.freeze({
 });
 
 // modules/provider-antigravity/src/native-transport.mjs
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join5 } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -2810,7 +3558,7 @@ function numericStatus(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }
-function isLoopbackHostname(hostname) {
+function isLoopbackHostname4(hostname) {
   const normalized = String(hostname ?? "").toLowerCase().replace(/^\[|\]$/g, "");
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
@@ -2830,7 +3578,7 @@ function validateNativeEndpoint(value, { providerId = "provider" } = {}) {
   if (url.hash) {
     throw new Error(`${providerId} endpoint must not include a URL fragment`);
   }
-  const localHttp = url.protocol === "http:" && isLoopbackHostname(url.hostname);
+  const localHttp = url.protocol === "http:" && isLoopbackHostname4(url.hostname);
   if (url.protocol !== "https:" && !localHttp) {
     throw new Error(`${providerId} endpoint must use HTTPS; HTTP is only allowed for loopback development`);
   }
@@ -2848,12 +3596,12 @@ function diagnosticText(value) {
 function errorDetails(value) {
   if (value === void 0 || value === null) return {};
   if (typeof value === "string") {
-    const text2 = value.replace(/\s+/g, " ").trim();
-    if (!text2) return {};
+    const text3 = value.replace(/\s+/g, " ").trim();
+    if (!text3) return {};
     try {
       return errorDetails(JSON.parse(value));
     } catch {
-      return { message: text2 };
+      return { message: text3 };
     }
   }
   if (typeof value !== "object") return { message: String(value) };
@@ -2879,14 +3627,28 @@ function errorDetails(value) {
     ...status !== void 0 ? { status } : {}
   };
 }
-function isAuthenticationFailure(message, body) {
-  const text2 = `${diagnosticText(message)} ${diagnosticText(body)}`.toLowerCase().replace(/[_-]+/g, " ");
+function boundedErrorBody(value, limit = 4096) {
+  if (typeof value === "string") return value.slice(0, limit);
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized.length <= limit ? value : `${serialized.slice(0, limit)}\u2026`;
+  } catch {
+    return String(value ?? "").slice(0, limit);
+  }
+}
+function isAuthenticationFailure(message, body, { status = null, code = null } = {}) {
+  const text3 = `${diagnosticText(message)} ${diagnosticText(body)}`.toLowerCase().replace(/[_-]+/g, " ");
+  if (/\b(?:token|tokens)\s+(?:count|limit|length|budget)\b|\b(?:max|input|output)_?tokens?\b/.test(text3)) return false;
+  const normalizedCode = String(code ?? body?.error?.code ?? body?.code ?? "").toLowerCase();
+  if (/invalid[_ -]?grant|invalid[_ -]?token|token[_ -]?expired|unauthorized|authentication[_ -]?failed/.test(normalizedCode)) return true;
+  if (Number(status) === 401) return true;
+  if (Number(status) === 403 && /(?:access token|oauth|credential|api key|authentication|unauthorized)/.test(text3)) return true;
   return [
     /access token.{0,80}(?:could not be validated|invalid|expired|revok|not valid|unauthor)/,
-    /(?:invalid|expired|revok|unauthor|not valid).{0,80}(?:access token|token|credential)/,
+    /(?:invalid|expired|revok|unauthor|not valid).{0,80}(?:access token|oauth token|refresh token|credential|api key)/,
     /\b(?:unauthorized|authentication failed|login required)\b/,
-    /\bcredentials?\b.{0,50}\b(?:invalid|expired|missing|unavailable)\b/
-  ].some((pattern) => pattern.test(text2));
+    /\b(?:credentials?|api keys?)\b.{0,50}\b(?:invalid|expired|missing|unavailable|not valid)\b/
+  ].some((pattern) => pattern.test(text3));
 }
 function nativeProviderError(providerId, message, { status, body, code } = {}) {
   const bodyDetails = errorDetails(body);
@@ -2909,14 +3671,59 @@ function nativeProviderError(providerId, message, { status, body, code } = {}) {
   }
   if (resolvedMessage) error.upstreamMessage = resolvedMessage;
   if (upstreamStatus !== void 0 && upstreamStatus !== null) error.upstreamStatus = upstreamStatus;
-  error.authExpired = statusCode === 401 || isAuthenticationFailure(resolvedMessage, body);
+  error.authExpired = isAuthenticationFailure(resolvedMessage, body, {
+    status: statusCode,
+    code: resolvedCode ?? upstreamStatus
+  });
   error.authForbidden = !error.authExpired && statusCode === 403;
   error.quotaExhausted = quotaExhausted;
   error.rateLimited = rateLimited;
-  if (body !== void 0) error.body = body;
+  if (body !== void 0) error.body = boundedErrorBody(body);
   return error;
 }
 var nativeResponseControls = /* @__PURE__ */ new WeakMap();
+var MAX_SSE_EVENT_BYTES = 4 * 1024 * 1024;
+var MAX_ERROR_BODY_BYTES = 64 * 1024;
+async function readBoundedResponseText(response, limit = MAX_ERROR_BODY_BYTES) {
+  const reader = response?.body?.getReader?.();
+  if (reader) {
+    const decoder = new TextDecoder();
+    let text3 = "";
+    let total = 0;
+    try {
+      while (total < limit) {
+        const next = await reader.read();
+        if (next.done) break;
+        const bytes = next.value instanceof Uint8Array ? next.value : Uint8Array.from(next.value ?? []);
+        const accepted = bytes.slice(0, limit - total);
+        total += accepted.byteLength;
+        text3 += decoder.decode(accepted, { stream: total < limit });
+        if (accepted.byteLength < bytes.byteLength) {
+          await reader.cancel?.();
+          break;
+        }
+      }
+      return `${text3}${decoder.decode()}`;
+    } finally {
+      reader.releaseLock?.();
+    }
+  }
+  if (response?.body && typeof response.body[Symbol.asyncIterator] === "function") {
+    const decoder = new TextDecoder();
+    let text3 = "";
+    let total = 0;
+    for await (const chunk of response.body) {
+      const bytes = chunk instanceof Uint8Array ? chunk : Uint8Array.from(chunk ?? []);
+      const accepted = bytes.slice(0, limit - total);
+      total += accepted.byteLength;
+      text3 += decoder.decode(accepted, { stream: total < limit });
+      if (accepted.byteLength < bytes.byteLength) break;
+    }
+    return `${text3}${decoder.decode()}`;
+  }
+  const raw = typeof response?.text === "function" ? await response.text() : "";
+  return String(raw ?? "").slice(0, limit);
+}
 async function fetchNativeResponse(url, init = {}, {
   providerId,
   timeoutMs = 3e5,
@@ -2939,7 +3746,7 @@ async function fetchNativeResponse(url, init = {}, {
     clearTimeout(timer);
     upstreamSignal?.removeEventListener?.("abort", abort);
   };
-  const control = { cleanup, get timedOut() {
+  const control = { providerId, cleanup, get timedOut() {
     return timedOut;
   }, timeoutError };
   let handedOff = false;
@@ -2952,7 +3759,7 @@ async function fetchNativeResponse(url, init = {}, {
     if (response.ok === false || response.status !== void 0 && response.status >= 400) {
       let body = null;
       try {
-        body = await response.text();
+        body = await readBoundedResponseText(response);
       } catch {
       }
       const details = errorDetails(body);
@@ -2974,13 +3781,26 @@ async function fetchNativeResponse(url, init = {}, {
     if (!handedOff) cleanup();
   }
 }
+function cleanupNativeResponse(response) {
+  const control = nativeResponseControls.get(response);
+  control?.cleanup();
+  nativeResponseControls.delete(response);
+}
 async function* responseChunks(response) {
-  if (!response?.body) return;
-  if (typeof response.body[Symbol.asyncIterator] === "function") {
-    for await (const chunk of response.body) yield chunk;
+  const body = response?.body;
+  if (!body) return;
+  if (typeof body[Symbol.asyncIterator] === "function") {
+    try {
+      for await (const chunk of body) yield chunk;
+    } finally {
+      try {
+        await body.cancel?.();
+      } catch {
+      }
+    }
     return;
   }
-  const reader = response.body.getReader?.();
+  const reader = body.getReader?.();
   if (!reader) return;
   try {
     while (true) {
@@ -2989,6 +3809,10 @@ async function* responseChunks(response) {
       yield next.value;
     }
   } finally {
+    try {
+      await reader.cancel?.();
+    } catch {
+    }
     reader.releaseLock?.();
   }
 }
@@ -3006,39 +3830,101 @@ function parseSseEvent(lines) {
   if (data.length === 0) return null;
   const raw = data.join("\n");
   if (raw.trim() === "[DONE]") return { event, data: null, done: true };
+  let parsed;
   try {
-    return { event, data: JSON.parse(raw), raw };
-  } catch {
-    return { event, data: raw, raw };
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return { event, data: raw, raw, parseError: error };
   }
+  return { event, data: parsed, raw };
+}
+function sseProtocolError(providerId, event, raw, cause) {
+  const snippet = String(raw ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+  const error = new Error(
+    `${providerId ?? "provider"} SSE data payload is not valid JSON${event ? ` (event: ${event})` : ""}${snippet ? `: ${snippet}` : ""}${cause?.message ? ` [${cause.message}]` : ""}`
+  );
+  error.code = "SSE_PROTOCOL_ERROR";
+  error.providerId = providerId ?? null;
+  if (event) error.sseEvent = event;
+  if (cause !== void 0) error.cause = cause;
+  return error;
 }
 async function* readSseEvents(response) {
   const control = nativeResponseControls.get(response);
   const decoder = new TextDecoder();
-  let buffer = "";
+  let pendingLine = "";
   let lines = [];
+  let eventBytes = 0;
+  let trailingCarriageReturn = false;
+  const oversizeError = () => nativeProviderError(
+    control?.providerId,
+    "SSE event exceeded the maximum allowed size"
+  );
+  const scanChunk = (rawText) => {
+    let text3 = rawText;
+    if (trailingCarriageReturn) {
+      trailingCarriageReturn = false;
+      if (text3.startsWith("\n")) text3 = text3.slice(1);
+    }
+    const completeLines = [];
+    eventBytes -= pendingLine.length;
+    let start = 0;
+    for (let index = 0; index < text3.length; index += 1) {
+      const character = text3[index];
+      if (character !== "\n" && character !== "\r") continue;
+      let end = index;
+      if (character === "\r") {
+        if (text3[index + 1] === "\n") index += 1;
+        else trailingCarriageReturn = true;
+      }
+      completeLines.push(pendingLine + text3.slice(start, end));
+      pendingLine = "";
+      start = index + 1;
+    }
+    pendingLine += text3.slice(start);
+    eventBytes += pendingLine.length;
+    return completeLines;
+  };
+  const drainLines = (completeLines, { final = false } = {}) => {
+    const events = [];
+    const ingest = (line) => {
+      if (line !== "") {
+        eventBytes += line.length + (lines.length > 0 ? 1 : 0);
+        lines.push(line);
+        if (eventBytes > MAX_SSE_EVENT_BYTES) throw oversizeError();
+        return;
+      }
+      const parsed = parseSseEvent(lines);
+      lines = [];
+      eventBytes = pendingLine.length;
+      if (!parsed) return;
+      if (parsed.parseError) {
+        throw sseProtocolError(control?.providerId, parsed.event, parsed.raw, parsed.parseError);
+      }
+      events.push(parsed);
+    };
+    for (const line of completeLines) ingest(line);
+    if (final && pendingLine) {
+      const line = pendingLine;
+      pendingLine = "";
+      eventBytes = 0;
+      ingest(line);
+    }
+    return events;
+  };
   try {
     for await (const chunk of responseChunks(response)) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const parts = buffer.split(/\r?\n/);
-      buffer = parts.pop() ?? "";
-      for (const line of parts) {
-        if (line !== "") {
-          lines.push(line);
-          continue;
-        }
-        const parsed2 = parseSseEvent(lines);
-        lines = [];
-        if (parsed2) {
-          yield parsed2;
-          if (parsed2.done) return;
-        }
+      const batch = drainLines(scanChunk(decoder.decode(chunk, { stream: true })));
+      for (const parsed of batch) {
+        yield parsed;
+        if (parsed.done) return;
       }
     }
-    buffer += decoder.decode();
-    if (buffer) lines.push(buffer);
-    const parsed = parseSseEvent(lines);
-    if (parsed) yield parsed;
+    const finalBatch = drainLines(scanChunk(decoder.decode()), { final: true });
+    for (const parsed of finalBatch) {
+      yield parsed;
+      if (parsed.done) return;
+    }
   } catch (error) {
     if (control?.timedOut && !error?.providerId) throw control.timeoutError;
     throw error;
@@ -3135,6 +4021,11 @@ function finishReason(value, fallback = "stop") {
 var PROVIDER_ID2 = "antigravity";
 var DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
 var DEFAULT_QUOTA_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+var DEFAULT_PROJECT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+var MACOS_SECURITY_BIN = "/usr/bin/security";
+var AGY_KEYCHAIN_SERVICE = "gemini";
+var AGY_KEYCHAIN_ACCOUNT = "antigravity";
+var AGY_KEYCHAIN_VALUE_PREFIX = "go-keyring-base64:";
 var ANTIGRAVITY_INFO_PATHS = [
   "/Applications/Antigravity.app/Contents/Info.plist",
   join5(homedir4(), "Applications/Antigravity.app/Contents/Info.plist")
@@ -3159,6 +4050,126 @@ function detectAntigravityUserAgent() {
 }
 function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+var THOUGHT_SIGNATURE_CACHE_LIMIT = 4096;
+var thoughtSignaturesByToolId = /* @__PURE__ */ new Map();
+function rememberThoughtSignature(id, signature) {
+  if (typeof id !== "string" || id.length === 0) return;
+  if (typeof signature !== "string" || signature.length === 0) return;
+  if (thoughtSignaturesByToolId.has(id)) thoughtSignaturesByToolId.delete(id);
+  thoughtSignaturesByToolId.set(id, signature);
+  if (thoughtSignaturesByToolId.size > THOUGHT_SIGNATURE_CACHE_LIMIT) {
+    const oldest = thoughtSignaturesByToolId.keys().next().value;
+    thoughtSignaturesByToolId.delete(oldest);
+  }
+}
+function thoughtSignatureFrom(value) {
+  if (!value || typeof value !== "object") return null;
+  return firstString(
+    value.thoughtSignature,
+    value.thought_signature,
+    value.providerMetadata?.thoughtSignature,
+    value.providerMetadata?.thought_signature,
+    value.providerMetadata?.google?.thoughtSignature,
+    value.providerMetadata?.google?.thought_signature,
+    value.providerMetadata?.antigravity?.thoughtSignature,
+    value.providerMetadata?.antigravity?.thought_signature,
+    value.function?.thoughtSignature,
+    value.function?.thought_signature,
+    value.functionCall?.thoughtSignature,
+    value.functionCall?.thought_signature,
+    value.function_call?.thoughtSignature,
+    value.function_call?.thought_signature
+  );
+}
+function thoughtSignatureForToolPart(part) {
+  return thoughtSignatureFrom(part) ?? thoughtSignaturesByToolId.get(part?.id) ?? thoughtSignaturesByToolId.get(part?.toolCallId) ?? null;
+}
+function partTypeKey(part) {
+  return String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
+}
+function isToolCallPart(part) {
+  if (!part || typeof part !== "object") return false;
+  if (part.functionCall || part.function_call) return true;
+  const type = partTypeKey(part);
+  return type === "toolcall" || type === "functioncall";
+}
+function isToolResultPart(part) {
+  if (!part || typeof part !== "object") return false;
+  if (part.functionResponse || part.function_response) return true;
+  const type = partTypeKey(part);
+  return type === "toolresult" || type === "functionresponse";
+}
+function toolCallIdOf(part) {
+  return firstString(part?.id, part?.toolCallId, part?.tool_call_id, part?.functionCall?.id);
+}
+function toolCallNameOf(part) {
+  return firstString(
+    part?.name,
+    part?.toolName,
+    part?.function?.name,
+    part?.functionCall?.name,
+    part?.function_call?.name,
+    part?.functionResponse?.name,
+    part?.function_response?.name
+  ) ?? "tool";
+}
+function toolCallArgsOf(part) {
+  return parseToolArguments(
+    part?.arguments ?? part?.input ?? part?.function?.arguments ?? part?.functionCall?.args ?? part?.functionCall?.arguments ?? part?.function_call?.args ?? part?.function_call?.arguments
+  );
+}
+function toolCallText(name2, args) {
+  const serialized = typeof args === "string" ? args : JSON.stringify(args ?? {});
+  return `[tool call: ${name2}] ${serialized}`;
+}
+function toolResultText(part) {
+  const name2 = toolCallNameOf(part);
+  if (part?.functionResponse || part?.function_response) {
+    const response = part.functionResponse?.response ?? part.function_response?.response;
+    const content = response?.content ?? response ?? part?.content ?? part?.output ?? part?.result ?? part?.text;
+    return `[tool result: ${name2}] ${textFromContent(content)}`;
+  }
+  return `[tool result: ${name2}] ${textFromContent(part?.content ?? part?.output ?? part?.result ?? part?.text)}`;
+}
+function messageContentValues(message) {
+  const parts = [];
+  if (Array.isArray(message?.content)) {
+    parts.push(...message.content);
+  } else if (Array.isArray(message?.parts)) {
+    parts.push(...message.parts);
+  } else if (message?.content != null && message.content !== "") {
+    parts.push(message.content);
+  } else if (message?.text != null && message.text !== "") {
+    parts.push(message.text);
+  }
+  if (Array.isArray(message?.tool_calls)) {
+    parts.push(...message.tool_calls.map((call) => ({
+      type: "tool-call",
+      id: call?.id,
+      name: call?.function?.name ?? call?.name,
+      arguments: call?.function?.arguments ?? call?.arguments,
+      thoughtSignature: call?.thoughtSignature ?? call?.thought_signature,
+      thought_signature: call?.thought_signature ?? call?.thoughtSignature
+    })));
+  }
+  return parts.length > 0 ? parts : message != null ? [message] : [];
+}
+function collectSignedToolCallIds(messages) {
+  const signed = /* @__PURE__ */ new Set();
+  for (const message of Array.isArray(messages) ? messages : []) {
+    for (const part of messageContentValues(message)) {
+      if (!isToolCallPart(part)) continue;
+      const signature = thoughtSignatureForToolPart(part);
+      if (!signature) continue;
+      const id = toolCallIdOf(part);
+      if (id) {
+        rememberThoughtSignature(id, signature);
+        signed.add(id);
+      }
+    }
+  }
+  return signed;
 }
 function emailFromObject(value, depth = 0) {
   if (!value || typeof value !== "object" || depth > 5) return null;
@@ -3189,11 +4200,34 @@ function tokenFromObject(value, depth = 0) {
   }
   return null;
 }
+function oauthRecordFromObject(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 5) return null;
+  const token = firstString(value.access_token, value.accessToken);
+  if (token) {
+    const expiresAt = isoFromEpoch(
+      value.expires_at ?? value.expiresAt ?? value.expiry_date ?? value.expiryDate ?? value.expiry
+    ) ?? addSecondsIso(value.expires_in ?? value.expiresIn);
+    return {
+      token,
+      refreshToken: firstString(value.refresh_token, value.refreshToken),
+      ...expiresAt ? { expiresAt } : {}
+    };
+  }
+  for (const child of Object.values(value)) {
+    const record = oauthRecordFromObject(child, depth + 1);
+    if (record) return record;
+  }
+  return null;
+}
 function readOfficialTokenFile(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
-    const token = tokenFromObject(parsed);
-    return token ? { token, kind: "oauth", email: emailFromObject(parsed) } : null;
+    const record = oauthRecordFromObject(parsed);
+    return record ? {
+      ...record,
+      kind: "oauth",
+      email: emailFromObject(parsed)
+    } : null;
   } catch {
     return null;
   }
@@ -3202,6 +4236,59 @@ function readAntigravityTokenFile({ env = process.env, home = homedir4() } = {})
   return readOfficialTokenFile(
     env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join5(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
   );
+}
+function parseAntigravityKeychainValue(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  const encoded = raw.startsWith(AGY_KEYCHAIN_VALUE_PREFIX) ? raw.slice(AGY_KEYCHAIN_VALUE_PREFIX.length) : null;
+  const decoded = encoded ? Buffer.from(encoded, "base64").toString("utf8") : raw;
+  try {
+    const parsed = JSON.parse(decoded);
+    const record = oauthRecordFromObject(parsed);
+    return record ? {
+      ...record,
+      kind: "oauth",
+      source: "antigravity_keychain",
+      email: emailFromObject(parsed)
+    } : null;
+  } catch {
+    return null;
+  }
+}
+var cachedKeychainToken = null;
+var lastKeychainReadTime = 0;
+var KEYCHAIN_CACHE_TTL_MS = 6e4;
+function readAntigravityKeychainToken({ home = homedir4() } = {}) {
+  if (process.platform !== "darwin") return null;
+  const now = Date.now();
+  if (cachedKeychainToken && now - lastKeychainReadTime < KEYCHAIN_CACHE_TTL_MS) {
+    return cachedKeychainToken;
+  }
+  try {
+    const keychainPath = join5(home, "Library", "Keychains", "login.keychain-db");
+    const value = execFileSync(MACOS_SECURITY_BIN, [
+      "find-generic-password",
+      "-s",
+      AGY_KEYCHAIN_SERVICE,
+      "-a",
+      AGY_KEYCHAIN_ACCOUNT,
+      "-w",
+      keychainPath
+    ], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2e3,
+      maxBuffer: 1048576
+    });
+    const parsed = parseAntigravityKeychainValue(value);
+    if (parsed) {
+      cachedKeychainToken = parsed;
+      lastKeychainReadTime = now;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
 }
 function resolveAntigravityAccessToken({ credential, env = process.env, home = homedir4() } = {}) {
   const stored = firstString(credential?.access, credential?.token);
@@ -3214,9 +4301,83 @@ function resolveAntigravityAccessToken({ credential, env = process.env, home = h
   }
   const fromEnv = firstString(env.DOCKYARD_ANTIGRAVITY_ACCESS_TOKEN, env.GEMINI_ACCESS_TOKEN);
   if (fromEnv) return { token: fromEnv, kind: "oauth" };
+  if (!env.DOCKYARD_ANTIGRAVITY_TOKEN_FILE) {
+    const fromKeychain = readAntigravityKeychainToken({ home });
+    if (fromKeychain?.token) return fromKeychain;
+  }
   return readAntigravityTokenFile({ env, home });
 }
-async function geminiParts(content, attachments) {
+function projectIdFromLoadCodeAssist(value, depth = 0) {
+  if (!value || typeof value !== "object" || depth > 5) return null;
+  for (const key of ["cloudaicompanionProject", "cloudaicompanion_project", "projectId", "project_id", "project"]) {
+    const candidate2 = value[key];
+    if (typeof candidate2 === "string" && candidate2.trim()) return candidate2.trim();
+    if (candidate2 && typeof candidate2 === "object") {
+      const nested = firstString(candidate2.id, candidate2.projectId, candidate2.project_id, candidate2.name);
+      if (nested) return nested.trim();
+    }
+  }
+  for (const child of Object.values(value)) {
+    const nested = projectIdFromLoadCodeAssist(child, depth + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+function createAntigravityProjectResolver({
+  endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
+  env = process.env,
+  home = homedir4(),
+  timeoutMs = 2e4,
+  fetchImpl = fetch,
+  tokenResolver = resolveAntigravityAccessToken,
+  project = void 0,
+  userAgent = process.env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent()
+} = {}) {
+  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID2 });
+  const configuredProject = typeof project === "string" && project.trim() ? project.trim() : null;
+  const cache = /* @__PURE__ */ new Map();
+  return async ({ credential = null, account = null, context = {} } = {}) => {
+    if (configuredProject) return configuredProject;
+    const cacheKey = account?.accountId ?? context.accountId ?? "default";
+    const cached = cache.get(cacheKey);
+    if (cached) return cached;
+    const auth = await tokenResolver({
+      credential,
+      env: { ...env, ...context.env ?? {} },
+      home
+    });
+    if (!auth?.token) {
+      const error = nativeProviderError(PROVIDER_ID2, "Antigravity OAuth token is unavailable; authorize Antigravity first");
+      error.authExpired = true;
+      throw error;
+    }
+    const headers = {
+      authorization: `Bearer ${auth.token}`,
+      "content-type": "application/json",
+      accept: "application/json"
+    };
+    if (userAgent) headers["user-agent"] = userAgent;
+    const response = await fetchNativeResponse(safeEndpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+      signal: context.signal
+    }, { providerId: PROVIDER_ID2, timeoutMs, fetchImpl });
+    let raw;
+    try {
+      raw = typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
+    } finally {
+      cleanupNativeResponse(response);
+    }
+    const resolved = projectIdFromLoadCodeAssist(raw);
+    if (!resolved) {
+      throw nativeProviderError(PROVIDER_ID2, "Antigravity did not return a Code Assist project for the selected account", { body: raw });
+    }
+    cache.set(cacheKey, resolved);
+    return resolved;
+  };
+}
+async function geminiParts(content, attachments, { signedToolCallIds = /* @__PURE__ */ new Set(), requireThoughtSignatures = false } = {}) {
   const values = Array.isArray(content) ? content : [content];
   const parts = [];
   for (const part of values) {
@@ -3231,24 +4392,139 @@ async function geminiParts(content, attachments) {
       parts.push({ inlineData: { mimeType: image.mediaType, data: image.data } });
       continue;
     }
-    if (part.type === "tool-result" || part.type === "tool_result") {
-      parts.push({ text: `[Tool Result ${part.toolCallId ?? part.id ?? ""}]
-${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}` });
+    if (isToolResultPart(part)) {
+      const callName = toolCallNameOf(part);
+      const callId = toolCallIdOf(part);
+      const keepFunctionResponse = !requireThoughtSignatures || Boolean(callId && signedToolCallIds.has(callId));
+      if (keepFunctionResponse) {
+        parts.push({
+          functionResponse: {
+            name: callName,
+            response: {
+              name: callName,
+              content: textFromContent(part.content ?? part.output ?? part.result ?? part.text)
+            }
+          }
+        });
+      } else {
+        parts.push({ text: toolResultText(part) });
+      }
       continue;
     }
-    if (part.type === "tool-call" || part.type === "tool_call" || part.type === "function-call") {
-      parts.push({ functionCall: { name: part.name ?? part.function?.name ?? "tool", args: parseToolArguments(part.arguments ?? part.input ?? part.function?.arguments) } });
+    if (isToolCallPart(part)) {
+      const name2 = toolCallNameOf(part);
+      const args = toolCallArgsOf(part);
+      const signature = thoughtSignatureForToolPart(part);
+      const callId = toolCallIdOf(part);
+      if (signature) {
+        if (callId) {
+          rememberThoughtSignature(callId, signature);
+          signedToolCallIds.add(callId);
+        }
+        parts.push({
+          functionCall: {
+            name: name2,
+            args,
+            thoughtSignature: signature,
+            thought_signature: signature
+          },
+          thoughtSignature: signature,
+          thought_signature: signature
+        });
+      } else if (requireThoughtSignatures) {
+        parts.push({ text: toolCallText(name2, args) });
+      } else {
+        parts.push({ functionCall: { name: name2, args } });
+      }
       continue;
     }
-    const text2 = textFromContent(part);
-    if (text2) parts.push({ text: text2 });
+    const extracted = textFromContent(part);
+    if (extracted) parts.push({ text: extracted });
   }
   return parts;
 }
+function modelRequiresThoughtSignatures(model) {
+  const id = String(model ?? "").toLowerCase();
+  if (id === "gemini-2.5-flash") return false;
+  return true;
+}
+var DEFAULT_SLIDING_WINDOW_MESSAGES = 40;
+function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WINDOW_MESSAGES } = {}) {
+  if (!Array.isArray(messages) || messages.length <= maxMessages) return messages;
+  const initialIndex = messages.findIndex((m) => m?.role === "user" || m?.role === "system");
+  const prefix = initialIndex >= 0 ? [messages[initialIndex]] : [];
+  const windowCount = Math.max(10, maxMessages - prefix.length - 1);
+  const recent = messages.slice(-windowCount);
+  const startIndex = messages.length - windowCount;
+  if (startIndex > 0) {
+    const firstRecent = recent[0];
+    const isToolResult = firstRecent?.role === "tool" || Array.isArray(firstRecent?.content) && firstRecent.content.some(isToolResultPart);
+    if (isToolResult && messages[startIndex - 1]) {
+      recent.unshift(messages[startIndex - 1]);
+    }
+  }
+  const compactedCount = messages.length - prefix.length - recent.length;
+  if (compactedCount <= 0) return messages;
+  const milestone = {
+    role: "user",
+    content: `[System Note: Context sliding window active. ${compactedCount} intermediate messages were dynamically compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]`
+  };
+  return [...prefix, milestone, ...recent];
+}
+function sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures) {
+  if (!requireThoughtSignatures || !Array.isArray(contents)) return contents;
+  const hasUnsignedFunctionCall = contents.some(
+    (content) => (content?.parts ?? []).some((part) => part?.functionCall && !thoughtSignatureFrom(part))
+  );
+  if (hasUnsignedFunctionCall) {
+    return contents.map((content) => ({
+      ...content,
+      parts: (content?.parts ?? []).map((part) => {
+        if (part?.functionCall) {
+          return { text: toolCallText(part.functionCall.name, part.functionCall.args) };
+        }
+        if (part?.functionResponse) {
+          const name2 = part.functionResponse.name ?? "tool";
+          const result = part.functionResponse.response?.content ?? part.functionResponse.response ?? "";
+          return { text: `[tool result: ${name2}] ${typeof result === "string" ? result : JSON.stringify(result)}` };
+        }
+        return part;
+      })
+    }));
+  }
+  return contents.map((content) => ({
+    ...content,
+    parts: (content?.parts ?? []).map((part) => {
+      if (part?.functionCall) {
+        const signature = thoughtSignatureFrom(part);
+        if (signature) {
+          return {
+            ...part,
+            thoughtSignature: signature,
+            thought_signature: signature,
+            functionCall: {
+              ...part.functionCall,
+              thoughtSignature: signature,
+              thought_signature: signature
+            }
+          };
+        }
+      }
+      return part;
+    })
+  }));
+}
 async function buildGeminiContents(request, attachments) {
+  const rawMessages = Array.isArray(request.messages) ? request.messages : [];
+  const messages = compactMessagesForContext(rawMessages);
+  const signedToolCallIds = collectSignedToolCallIds(messages);
+  const requireThoughtSignatures = modelRequiresThoughtSignatures(request.model);
   const contents = [];
-  for (const message of Array.isArray(request.messages) ? request.messages : []) {
-    const parts = await geminiParts(message?.content ?? message?.text, attachments);
+  for (const message of messages) {
+    const parts = await geminiParts(messageContentValues(message), attachments, {
+      signedToolCallIds,
+      requireThoughtSignatures
+    });
     if (parts.length === 0) continue;
     contents.push({
       role: message?.role === "assistant" ? "model" : "user",
@@ -3256,7 +4532,7 @@ async function buildGeminiContents(request, attachments) {
     });
   }
   if (contents.length === 0) contents.push({ role: "user", parts: [{ text: "Continue the conversation." }] });
-  return contents;
+  return sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures);
 }
 function sanitizeSchema(value) {
   if (Array.isArray(value)) return value.map(sanitizeSchema);
@@ -3281,47 +4557,132 @@ async function buildAntigravityRequest(request = {}, context = {}) {
   const nativeRequest = {
     contents: await buildGeminiContents(request, context.attachments)
   };
-  if (typeof request.system === "string" && request.system.length > 0) {
+  const tools = buildGeminiTools(request.tools);
+  if (tools) {
+    nativeRequest.tools = tools;
+    const toolRule = "IMPORTANT: You MUST invoke tools using native function calls. NEVER output '[tool call: ...]' or pseudo-code text.";
+    const existingSystem = typeof request.system === "string" && request.system.length > 0 ? `${request.system}
+
+` : "";
+    nativeRequest.systemInstruction = { parts: [{ text: `${existingSystem}${toolRule}` }] };
+  } else if (typeof request.system === "string" && request.system.length > 0) {
     nativeRequest.systemInstruction = { parts: [{ text: request.system }] };
   }
   nativeRequest.generationConfig = {
     temperature: request.temperature ?? 0.7,
-    maxOutputTokens: request.maxTokens ?? 4096
+    maxOutputTokens: request.maxTokens ?? 4096,
+    ...Array.isArray(request.responseModalities) ? { responseModalities: request.responseModalities } : request.modalities ? { responseModalities: request.modalities } : {}
   };
-  const tools = buildGeminiTools(request.tools);
-  if (tools) nativeRequest.tools = tools;
   return nativeRequest;
 }
 function responsePayload(value) {
   if (!value || typeof value !== "object") return null;
   return value.response && typeof value.response === "object" ? value.response : value;
 }
-async function* streamAntigravityResponse(response) {
-  let text2 = "";
+function googleErrorStatusText(error) {
+  const raw = firstString(
+    typeof error?.status === "string" ? error.status : null,
+    typeof error?.code === "string" ? error.code : null
+  );
+  return String(raw ?? "").trim().toUpperCase();
+}
+function extensionFromMimeType(mimeType) {
+  const normalized = String(mimeType ?? "").toLowerCase();
+  if (normalized.includes("png")) return "png";
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("gif")) return "gif";
+  return "png";
+}
+function saveInlineImageToArtifacts(inlineData, workingDir = process.cwd()) {
+  try {
+    const mediaType = inlineData?.mimeType ?? inlineData?.mediaType ?? "image/png";
+    const base64Data = inlineData?.data;
+    if (!base64Data || typeof base64Data !== "string") return null;
+    const ext = extensionFromMimeType(mediaType);
+    const artifactsDir = join5(workingDir, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+    const filename = `imagen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const filePath = join5(artifactsDir, filename);
+    writeFileSync(filePath, Buffer.from(base64Data, "base64"));
+    return `/artifacts/${filename}`;
+  } catch {
+    return null;
+  }
+}
+function parseTextToolCall(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  const match = trimmed.match(/^\[(?:tool call|Tool Call):\s*([a-zA-Z0-9_.:-]+)\]\s*([\s\S]*)$/i);
+  if (!match) return null;
+  const name2 = match[1];
+  let argumentsValue = match[2].trim();
+  if (argumentsValue.startsWith("{") && argumentsValue.endsWith("}")) {
+    try {
+      JSON.parse(argumentsValue);
+    } catch {
+      argumentsValue = JSON.stringify({ input: argumentsValue });
+    }
+  } else if (argumentsValue) {
+    argumentsValue = JSON.stringify({ input: argumentsValue });
+  } else {
+    argumentsValue = "{}";
+  }
+  return { name: name2, argumentsValue };
+}
+function isPotentialTextToolCall(text3) {
+  if (typeof text3 !== "string" || text3.length === 0) return false;
+  if (!text3.startsWith("[")) return false;
+  const prefix = "[tool call:";
+  const lower = text3.toLowerCase();
+  return prefix.startsWith(lower) || lower.startsWith(prefix);
+}
+async function* streamAntigravityResponse(response, context) {
+  let text3 = "";
   let textIndex = 0;
-  let textOpen = true;
+  let textOpen = false;
+  let textStarted = false;
+  let textBuffered = false;
   let nextIndex = 1;
   let usage = null;
   let stop = "stop";
   let reasoning = null;
-  yield { type: "block-start", index: textIndex, blockType: "text" };
+  let pendingThoughtSignature = null;
   for await (const event of readSseEvents(response)) {
     const payload = responsePayload(event.data);
     if (!payload) continue;
     if (payload.error) {
-      throw nativeProviderError(PROVIDER_ID2, payload.error.message ?? "Antigravity returned an error", {
-        status: payload.error.code,
-        body: payload.error
+      const upstreamError = payload.error;
+      const error = nativeProviderError(PROVIDER_ID2, upstreamError.message ?? "Antigravity returned an error", {
+        status: upstreamError.code,
+        body: upstreamError
       });
+      const statusText = googleErrorStatusText(upstreamError);
+      if (statusText === "UNAUTHENTICATED" || statusText === "NOTAUTHENTICATED") {
+        error.authExpired = true;
+      } else if (statusText === "PERMISSION_DENIED") {
+        error.authForbidden = true;
+      } else if (statusText === "RESOURCE_EXHAUSTED") {
+        error.quotaExhausted = true;
+        error.rateLimited = true;
+      }
+      throw error;
     }
     usage = normalizeUsage(payload.usageMetadata ?? payload.usage) ?? usage;
     const candidate2 = payload.candidates?.[0] ?? payload.candidate ?? payload;
     stop = candidate2.finishReason ?? stop;
     for (const part of candidate2.content?.parts ?? candidate2.parts ?? []) {
       if (part?.text) {
-        if (part.thought === true || part.thoughtSignature) {
+        if (part.thought === true || part.thoughtSignature || part.thought_signature) {
+          const thoughtPartSignature = thoughtSignatureFrom(part);
+          if (thoughtPartSignature) pendingThoughtSignature = thoughtPartSignature;
           if (textOpen) {
-            yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+            if (textBuffered) {
+              yield { type: "block-start", index: textIndex, blockType: "text" };
+              yield { type: "text-delta", index: textIndex, text: text3 };
+              textBuffered = false;
+            }
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
             textOpen = false;
           }
           if (!reasoning) {
@@ -3338,14 +4699,64 @@ async function* streamAntigravityResponse(response) {
         }
         if (!textOpen) {
           textIndex = nextIndex++;
-          text2 = "";
+          text3 = "";
           textOpen = true;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
+          textStarted = false;
+          textBuffered = false;
         }
-        text2 += part.text;
-        yield { type: "text-delta", index: textIndex, text: part.text };
+        text3 += part.text;
+        if (!textStarted && isPotentialTextToolCall(text3)) {
+          textBuffered = true;
+        } else {
+          if (!textStarted) {
+            yield { type: "block-start", index: textIndex, blockType: "text" };
+            textStarted = true;
+            textBuffered = false;
+            yield { type: "text-delta", index: textIndex, text: text3 };
+          } else {
+            yield { type: "text-delta", index: textIndex, text: part.text };
+          }
+        }
         continue;
       }
+      const inlineData = part?.inlineData ?? part?.inline_data;
+      if (inlineData?.data) {
+        if (reasoning) {
+          yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
+          reasoning = null;
+        }
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          textStarted = true;
+          textBuffered = false;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        } else if (textBuffered) {
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+          yield { type: "text-delta", index: textIndex, text: text3 };
+          textStarted = true;
+          textBuffered = false;
+        }
+        const savedPath = saveInlineImageToArtifacts(inlineData, context?.cwd ?? process.cwd());
+        const mediaType = inlineData?.mimeType ?? inlineData?.mediaType ?? "image/png";
+        const imageMarkdown = savedPath ? `
+
+![Generated Image](${savedPath})
+
+*(Image saved to \`${savedPath}\`)*
+
+` : `
+
+![Generated Image](data:${mediaType};base64,${inlineData.data})
+
+`;
+        text3 += imageMarkdown;
+        yield { type: "text-delta", index: textIndex, text: imageMarkdown };
+        continue;
+      }
+      const partSignature = thoughtSignatureFrom(part);
+      if (partSignature) pendingThoughtSignature = partSignature;
       const call = part?.functionCall ?? part?.function_call;
       if (!call) continue;
       if (reasoning) {
@@ -3353,27 +4764,71 @@ async function* streamAntigravityResponse(response) {
         reasoning = null;
       }
       if (textOpen) {
-        yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+        const textTool = parseTextToolCall(text3);
+        if (textTool) {
+          const toolIndex = nextIndex++;
+          const toolId = firstString(textTool.name, `tool-${toolIndex}`);
+          const toolBlock = { type: "tool-call", id: toolId, name: textTool.name, arguments: textTool.argumentsValue };
+          yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
+          yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: textTool.name, argumentsDelta: textTool.argumentsValue };
+          yield { type: "block-end", index: toolIndex, block: toolBlock };
+        } else {
+          if (textBuffered) {
+            yield { type: "block-start", index: textIndex, blockType: "text" };
+            yield { type: "text-delta", index: textIndex, text: text3 };
+          }
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+        }
         textOpen = false;
+        textStarted = false;
+        textBuffered = false;
       }
       const index = nextIndex++;
-      const id = firstString(call.id, call.name, `tool-${index}`);
       const name2 = firstString(call.name, "tool");
+      const id = firstString(call.id, `${name2}-${index}`);
       const argumentsValue = JSON.stringify(call.args ?? call.arguments ?? {});
+      const thoughtSignature = thoughtSignatureFrom(part) ?? thoughtSignatureFrom(call) ?? pendingThoughtSignature;
+      pendingThoughtSignature = null;
+      if (thoughtSignature) rememberThoughtSignature(id, thoughtSignature);
+      const block = { type: "tool-call", id, name: name2, arguments: argumentsValue };
+      if (thoughtSignature) {
+        block.thoughtSignature = thoughtSignature;
+        block.thought_signature = thoughtSignature;
+      }
       yield { type: "block-start", index, blockType: "tool-call" };
       yield { type: "tool-call-delta", index, id, name: name2, argumentsDelta: argumentsValue };
-      yield { type: "block-end", index, block: { type: "tool-call", id, name: name2, arguments: argumentsValue } };
+      yield { type: "block-end", index, block };
       stop = "tool_calls";
     }
   }
   if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+  if (textOpen) {
+    const textTool = parseTextToolCall(text3);
+    if (textTool) {
+      const toolIndex = nextIndex++;
+      const toolId = firstString(textTool.name, `tool-${toolIndex}`);
+      const toolBlock = { type: "tool-call", id: toolId, name: textTool.name, arguments: textTool.argumentsValue };
+      yield { type: "block-start", index: toolIndex, blockType: "tool-call" };
+      yield { type: "tool-call-delta", index: toolIndex, id: toolId, name: textTool.name, argumentsDelta: textTool.argumentsValue };
+      yield { type: "block-end", index: toolIndex, block: toolBlock };
+      stop = "tool_calls";
+    } else {
+      if (textBuffered) {
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+        yield { type: "text-delta", index: textIndex, text: text3 };
+      }
+      yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+    }
+  }
   if (usage) yield { type: "usage", usage };
   yield { type: "finish", reason: finishReason(stop) };
 }
 function createAntigravityNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_ENDPOINT || DEFAULT_ENDPOINT,
-  project = process.env.DOCKYARD_ANTIGRAVITY_PROJECT || "default-cli-project",
+  // Never fabricate an upstream project: when neither configuration nor a
+  // resolver yields the account's Code Assist project, the request fails with
+  // a clear diagnostic instead of sending a guessed envelope value.
+  project = process.env.DOCKYARD_ANTIGRAVITY_PROJECT || null,
   env = process.env,
   timeoutMs = 3e5,
   fetchImpl = fetch,
@@ -3388,20 +4843,31 @@ function createAntigravityNativeExecutor({
       const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
       if (ref) credential = await context.secretStore.read(ref);
     }
-    const auth = await tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home: homedir4() });
+    const authPromise = tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home: homedir4() });
+    const projectPromise = typeof projectResolver === "function" ? projectResolver({ credential, account: invocation?.account, context }) : Promise.resolve(project);
+    const nativeRequestPromise = buildAntigravityRequest(request, context);
+    const [auth, resolvedProject, nativeRequest] = await Promise.all([
+      authPromise,
+      projectPromise,
+      nativeRequestPromise
+    ]);
     if (!auth?.token) {
       const error = nativeProviderError(PROVIDER_ID2, "Antigravity OAuth token is unavailable; authorize Antigravity first");
       error.authExpired = true;
       throw error;
     }
-    const resolvedProject = typeof projectResolver === "function" ? await projectResolver({ credential, account: invocation?.account, context }) : project;
     if (!resolvedProject) {
-      throw nativeProviderError(PROVIDER_ID2, "Antigravity Code Assist project is unavailable for the selected account");
+      const error = nativeProviderError(
+        PROVIDER_ID2,
+        "Antigravity Code Assist project is unavailable for the selected account; set DOCKYARD_ANTIGRAVITY_PROJECT or reauthorize so loadCodeAssist can resolve it"
+      );
+      error.degraded = true;
+      throw error;
     }
     const body = {
       project: resolvedProject,
       model: request.model,
-      request: await buildAntigravityRequest(request, context)
+      request: nativeRequest
     };
     const headers = {
       authorization: `Bearer ${auth.token}`,
@@ -3415,7 +4881,7 @@ function createAntigravityNativeExecutor({
       body: JSON.stringify(body),
       signal: context.signal
     }, { providerId: PROVIDER_ID2, timeoutMs, fetchImpl });
-    return streamAntigravityResponse(response);
+    return streamAntigravityResponse(response, context);
   };
   executor.nativeTransport = "gemini-stream-generate-content";
   return executor;
@@ -3458,7 +4924,12 @@ function createAntigravityNativeQuotaReader({
       body: JSON.stringify(body),
       signal: context.signal
     }, { providerId: PROVIDER_ID2, timeoutMs, fetchImpl });
-    const raw = typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
+    let raw;
+    try {
+      raw = typeof response.json === "function" ? await response.json() : JSON.parse(await response.text());
+    } finally {
+      cleanupNativeResponse(response);
+    }
     if (!raw || typeof raw !== "object") {
       throw nativeProviderError(PROVIDER_ID2, "quota summary response was not an object");
     }
@@ -3477,6 +4948,11 @@ var DEFAULT_CLI = "agy";
 var DEFAULT_CATALOG_TTL_MS = 6e4;
 var DEFAULT_AUTH_TIMEOUT_MS = 10 * 60 * 1e3;
 var CREDENTIAL_SLOT2 = Symbol("dockyard-antigravity-session");
+var ANTIGRAVITY_CREDENTIAL_REFRESH_MODES = Object.freeze({
+  DSH_BROWSER_OAUTH: "dockyard_browser_oauth",
+  AGY_SESSION: "agy_session"
+});
+var AGY_FILE_STORAGE_ENV = "GEMINI_FORCE_FILE_STORAGE";
 var ANTIGRAVITY_BROWSER_CLIENT_ID = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_ID || "";
 var ANTIGRAVITY_BROWSER_CLIENT_SECRET = process.env.DOCKYARD_ANTIGRAVITY_CLIENT_SECRET || "";
 var ANTIGRAVITY_BROWSER_AUTHORIZATION_URL = process.env.DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL || "https://accounts.google.com/o/oauth2/v2/auth";
@@ -3484,11 +4960,12 @@ var ANTIGRAVITY_BROWSER_TOKEN_URL = process.env.DOCKYARD_ANTIGRAVITY_TOKEN_URL |
 var ANTIGRAVITY_BROWSER_USERINFO_URL = process.env.DOCKYARD_ANTIGRAVITY_USERINFO_URL || "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
 var ANTIGRAVITY_BROWSER_REDIRECT_URI = process.env.DOCKYARD_ANTIGRAVITY_REDIRECT_URI || "http://localhost:51121/oauth-callback";
 var ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE || [
+  // The same OAuth token is used both for userinfo and Google's Code Assist
+  // endpoints. Keep the upstream API scope instead of authorizing a token
+  // that can identify the user but cannot call streamGenerateContent.
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile",
-  "https://www.googleapis.com/auth/cclog",
-  "https://www.googleapis.com/auth/experimentsandconfigs"
+  "https://www.googleapis.com/auth/userinfo.profile"
 ].join(" ");
 var OFFICIAL_ANTIGRAVITY_MODEL_METADATA = Object.freeze([
   Object.freeze({
@@ -3585,8 +5062,8 @@ function extractAntigravityAccountEmail(...values) {
     if (direct) return direct;
     const nested = findEmailField(value);
     if (nested) return nested;
-    const text2 = typeof value === "string" ? value : "";
-    const explicit = text2.match(
+    const text3 = typeof value === "string" ? value : "";
+    const explicit = text3.match(
       /(?:applyAuthResult:\s*)?email\s*=\s*([^\s,;]+)|authenticated\s+successfully\s+as\s+([^\s,;]+)/i
     );
     const matched = normalizeEmail(explicit?.[1] ?? explicit?.[2]);
@@ -3620,6 +5097,23 @@ function tokenNeedsRefresh(credential, now, leewayMs = 6e4) {
   const expiresAt = Date.parse(credential.expiresAt);
   return !Number.isFinite(expiresAt) || expiresAt <= now.getTime() + leewayMs;
 }
+function officialAntigravityTokenPath(environment) {
+  const home = environment?.HOME || homedir5();
+  return environment?.DOCKYARD_ANTIGRAVITY_TOKEN_FILE || join6(home, ".gemini", "antigravity-cli", "antigravity-oauth-token");
+}
+function agyRefreshEnvironment(environment, tokenPath) {
+  return {
+    ...environment,
+    DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath,
+    [AGY_FILE_STORAGE_ENV]: "true",
+    AGY_CLI_HIDE_ACCOUNT_INFO: "1"
+  };
+}
+function credentialRefreshMode(account) {
+  const explicit = account?.resources?.credentialRefreshMode;
+  if (explicit) return explicit;
+  return account?.resources?.sessionPersistence === "captured" ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION : null;
+}
 function cliFailure2(code, signal, output, errorOutput) {
   const error = new Error(`Antigravity CLI failed (${signal ?? code})`);
   error.code = code;
@@ -3646,22 +5140,41 @@ function runCommand(command, args, {
     });
     const stdout = [];
     const stderr = [];
-    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+    let timedOut = false;
+    let killTimer = null;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+      }
+      killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }, 2e3);
+      killTimer.unref?.();
+    }, timeoutMs);
     child.stdout.on("data", (chunk) => stdout.push(chunk));
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.on("error", (error) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       reject(error);
     });
-    child.on("close", (code, signal2) => {
+    child.on("close", (code, closeSignal) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       const output = Buffer.concat(stdout).toString("utf8");
       const errorOutput = Buffer.concat(stderr).toString("utf8");
-      if (code === 0) {
+      if (!timedOut && code === 0) {
         resolve2({ output, errorOutput });
         return;
       }
-      reject(cliFailure2(code, signal2, output, errorOutput));
+      const failure = cliFailure2(code, closeSignal, output, errorOutput);
+      if (timedOut) failure.message = `Antigravity CLI timed out after ${timeoutMs}ms`;
+      reject(failure);
     });
   });
 }
@@ -3726,12 +5239,17 @@ function registryModels(value) {
   if (Array.isArray(value?.models)) return value.models;
   return [];
 }
-function mergedAntigravityRegistry(registry) {
-  const byId = new Map(OFFICIAL_ANTIGRAVITY_MODEL_METADATA.map((model) => [model.id, { ...model }]));
+function mergedAntigravityRegistry(registry, liveModelIds = []) {
+  const byId = /* @__PURE__ */ new Map();
   for (const candidate2 of registryModels(registry)) {
     if (!candidate2 || typeof candidate2.id !== "string" || candidate2.id.length === 0) continue;
     const defined = Object.fromEntries(Object.entries(candidate2).filter(([, value]) => value !== void 0 && value !== null));
     byId.set(candidate2.id, { ...byId.get(candidate2.id) ?? {}, ...defined });
+  }
+  for (const official of OFFICIAL_ANTIGRAVITY_MODEL_METADATA) {
+    const referenced = byId.has(official.id) || liveModelIds.some((id) => id === official.id || id.startsWith(`${official.id}-`));
+    if (!referenced) continue;
+    byId.set(official.id, { ...official, ...byId.get(official.id) ?? {} });
   }
   return [...byId.values()];
 }
@@ -3855,7 +5373,10 @@ function createAntigravityCatalogLoader({
         }
       }
       const liveModels = parseAntigravityModelCatalog(result.output);
-      const models = enrichAntigravityModelCatalog(liveModels, mergedAntigravityRegistry(registry));
+      const models = enrichAntigravityModelCatalog(
+        liveModels,
+        mergedAntigravityRegistry(registry, liveModels.map((model) => model.id))
+      );
       const enriched = models.some((model, index) => {
         const original = liveModels[index];
         return model.contextWindow !== original?.contextWindow || model.maxTokens !== original?.maxTokens;
@@ -3952,6 +5473,13 @@ function findCreditsData(value, depth = 0, seen = /* @__PURE__ */ new Set()) {
   }
   return null;
 }
+function creditsFromData(data) {
+  if (!data || typeof data !== "object") return null;
+  const remaining = finiteNumber(data.remaining_credits ?? data.remainingCredits);
+  const upgradeUri = stringValue(data.upgrade_uri ?? data.upgradeUri);
+  if (remaining === null && upgradeUri === null) return null;
+  return { remaining, upgradeUri };
+}
 function parseQuotaData(data, now = /* @__PURE__ */ new Date(), source = "antigravity_cli") {
   const windows = [];
   for (const group of quotaGroups(data)) {
@@ -3973,9 +5501,9 @@ function parseQuotaData(data, now = /* @__PURE__ */ new Date(), source = "antigr
   }
   return windows;
 }
-function parseQuotaText(text2, now = /* @__PURE__ */ new Date(), source = "antigravity_cli") {
+function parseQuotaText(text3, now = /* @__PURE__ */ new Date(), source = "antigravity_cli") {
   const windows = [];
-  for (const line of text2.split(/\r?\n/)) {
+  for (const line of text3.split(/\r?\n/)) {
     const parts = line.split("	");
     if (parts.length < 3 || !/%$/.test(parts[2])) continue;
     const remaining = finiteNumber(parts[2].replace(/%$/, ""));
@@ -4013,7 +5541,8 @@ function candidate(now, {
   session = null,
   existingAccounts = [],
   source = "official_antigravity_cli",
-  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI
+  sourceKind = OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+  credentialRefreshMode: credentialRefreshMode2 = null
 } = {}) {
   const normalizedEmail = normalizeEmail(email);
   const capturedSession = normalizedEmail && session && !session.email ? { ...session, email: normalizedEmail } : session;
@@ -4045,6 +5574,7 @@ function candidate(now, {
     credentialRef,
     resources: {
       ...officialSessionResources({ sourceKind, authSource: source }),
+      ...credentialRefreshMode2 ? { credentialRefreshMode: credentialRefreshMode2 } : {},
       identitySource,
       identityLabel,
       ...fingerprint ? { sessionFingerprint: fingerprint } : {},
@@ -4082,7 +5612,7 @@ function summarizeAntigravityCandidate(value) {
     diagnostic: value.diagnostic ?? null
   };
 }
-var ANTIGRAVITY_AUTH_URL_PATTERN = /https:\/\/accounts\.google\.com\/o\/oauth2\/auth\?[^\s"'<>]+/i;
+var ANTIGRAVITY_AUTH_URL_PATTERN = /https:\/\/accounts\.google\.com\/o\/oauth2\/(?:v2\/)?auth\?[^\s"'<>]+/i;
 function cleanAntigravityAuthUrl(value) {
   return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[),.;]+$/, "");
 }
@@ -4155,9 +5685,12 @@ function createAntigravityOAuthAuthorizer({
           // agy's isolated temporary profile is a browser OAuth session, not
           // the user's active local CLI session. Mark it accordingly so quota
           // refresh and request execution use the captured credential instead
-          // of rejecting it as a session mismatch.
+          // of rejecting it as a session mismatch. Its refresh token belongs
+          // to agy's own OAuth client, so DSH must not exchange it with an
+          // unrelated/empty browser client.
           source: "official_antigravity_browser_oauth",
-          sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+          sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+          credentialRefreshMode: ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION
         });
         session.status = "completed";
         session.result = {
@@ -4297,6 +5830,11 @@ var AntigravityOfficialSessionDriver = class {
     env = process.env,
     timeoutMs = 3e4,
     commandRunner = runCommand,
+    ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
+    // Background refresh is a non-interactive `agy models` call. The PTY is
+    // only needed for the browser bootstrap authorizer; wrapping this refresh
+    // in a PTY makes agy report a false exit-code failure on macOS.
+    usePtyForSessionRefresh = false,
     requestExecutor = null,
     catalogLoader = null,
     quotaReader = null,
@@ -4316,13 +5854,16 @@ var AntigravityOfficialSessionDriver = class {
     fetchImpl = fetch,
     authorizationTimeoutMs = DEFAULT_AUTH_TIMEOUT_MS
   } = {}) {
+    assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_ANTIGRAVITY_AUTHORIZATION_URL");
     this.cliPath = cliPath;
     this.env = env;
     this.timeoutMs = timeoutMs;
     this.commandRunner = commandRunner;
+    this.ptyPythonPath = ptyPythonPath;
+    this.usePtyForSessionRefresh = usePtyForSessionRefresh;
     this.fetchImpl = fetchImpl;
-    this.browserTokenUrl = tokenUrl;
-    this.browserUserInfoUrl = userInfoUrl;
+    this.browserTokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_ANTIGRAVITY_TOKEN_URL");
+    this.browserUserInfoUrl = userInfoUrl ? assertSecureEndpointUrl(userInfoUrl, "DOCKYARD_ANTIGRAVITY_USERINFO_URL") : userInfoUrl;
     this.browserClientId = clientId;
     this.browserClientSecret = clientSecret;
     this.requestExecutor = requestExecutor;
@@ -4397,7 +5938,8 @@ var AntigravityOfficialSessionDriver = class {
           },
           existingAccounts: context.accounts ?? [],
           source: "official_antigravity_browser_oauth",
-          sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER
+          sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
+          credentialRefreshMode: ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.DSH_BROWSER_OAUTH
         });
         return [await this.importAccount(candidateValue, context)];
       }
@@ -4447,6 +5989,7 @@ var AntigravityOfficialSessionDriver = class {
         throw activeSessionError("Antigravity OAuth session is unavailable; authorize again");
       }
       if (!current?.token || sessionFingerprint(current) !== expectedFingerprint) {
+        if (current?.token && context.allowSessionTokenRotation === true) return;
         const currentEmail = await this.#resolveSessionEmail(current, context);
         if (currentEmail && account.email && sameEmail(currentEmail, account.email)) return;
         throw activeSessionError(
@@ -4470,6 +6013,152 @@ var AntigravityOfficialSessionDriver = class {
       { mismatch: true }
     );
   }
+  async #refreshOfficialCredential(account, context = {}) {
+    if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
+    if (typeof this.tokenResolver !== "function") return null;
+    let current;
+    try {
+      current = await this.tokenResolver({ env: this.env });
+    } catch (error) {
+      const wrapped = activeSessionError(`Antigravity official session could not be read: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+    if (!current?.token) return null;
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    const credential = {
+      type: OFFICIAL_SESSION_AUTH_KIND,
+      providerId: PROVIDER_ID3,
+      access: current.token,
+      ...current.refreshToken ? { refresh: current.refreshToken } : {},
+      ...current.expiresAt ? { expiresAt: current.expiresAt } : {}
+    };
+    if (!tokenNeedsRefresh(credential, now)) {
+      const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+      if (current.source === "antigravity_keychain" && credentialRef && typeof context.secretStore?.write === "function") {
+        await context.secretStore.write(credentialRef, credential);
+      }
+      return { session: current, credential, rotated: false };
+    }
+    if (!current.refreshToken) {
+      throw activeSessionError("Antigravity official session has expired; authorize again");
+    }
+    const officialTokenPath = officialAntigravityTokenPath(this.env);
+    const officialHome = this.env.HOME || homedir5();
+    const childEnv = agyRefreshEnvironment(this.env, officialTokenPath);
+    try {
+      await mkdir4(dirname3(officialTokenPath), { recursive: true, mode: 448 });
+      const refreshCommand = this.usePtyForSessionRefresh ? this.ptyPythonPath : this.cliPath;
+      const refreshArgs = this.usePtyForSessionRefresh ? ["-u", "-c", ANTIGRAVITY_PTY_SCRIPT, this.cliPath, "models"] : ["models"];
+      await this.commandRunner(refreshCommand, refreshArgs, {
+        env: childEnv,
+        timeoutMs: this.timeoutMs,
+        signal: context.signal
+      });
+      let refreshed = null;
+      try {
+        refreshed = await this.tokenResolver({ env: this.env });
+      } catch {
+      }
+      refreshed = refreshed?.token ? refreshed : readAntigravityTokenFile({ env: childEnv, home: officialHome });
+      if (!refreshed?.token) throw new Error("agy did not persist a refreshed OAuth token");
+      const nextCredential = {
+        ...credential,
+        access: refreshed.token,
+        ...refreshed.refreshToken ? { refresh: refreshed.refreshToken } : {},
+        ...refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {},
+        lastRefreshedAt: now.toISOString()
+      };
+      const expiry = nextCredential.expiresAt ? Date.parse(nextCredential.expiresAt) : Number.NaN;
+      const expiryAdvanced = Number.isFinite(expiry) && expiry > now.getTime() + 6e4;
+      if (nextCredential.access === credential.access && !expiryAdvanced) {
+        throw new Error("agy did not advance the Antigravity OAuth token expiry");
+      }
+      await mkdir4(dirname3(officialTokenPath), { recursive: true, mode: 448 });
+      const persistedPath = `${officialTokenPath}.${randomUUID4()}.tmp`;
+      try {
+        await writeFile3(persistedPath, JSON.stringify({
+          auth_method: "consumer",
+          token: {
+            access_token: nextCredential.access,
+            refresh_token: nextCredential.refresh,
+            token_type: "Bearer",
+            ...nextCredential.expiresAt ? { expiry: nextCredential.expiresAt } : {}
+          }
+        }), { encoding: "utf8", mode: 384 });
+        await rename2(persistedPath, officialTokenPath);
+      } finally {
+        await rm4(persistedPath, { force: true }).catch(() => {
+        });
+      }
+      const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
+      if (credentialRef && typeof context.secretStore?.write === "function") {
+        await context.secretStore.write(credentialRef, nextCredential);
+      }
+      return { session: refreshed, credential: nextCredential, rotated: true };
+    } catch (error) {
+      if (error?.authExpired) throw error;
+      const wrapped = activeSessionError(`Antigravity official session refresh failed: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+  }
+  async #refreshAgyCredential(credential, context = {}) {
+    if (!credential?.refresh) {
+      throw activeSessionError("Antigravity agy session has no refresh token; authorize again");
+    }
+    const tokenPath = officialAntigravityTokenPath(this.env);
+    const officialHome = this.env.HOME || homedir5();
+    const childEnv = agyRefreshEnvironment(this.env, tokenPath);
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    try {
+      await mkdir4(dirname3(tokenPath), { recursive: true, mode: 448 });
+      if (!readAntigravityTokenFile({ env: childEnv, home: officialHome })?.token) {
+        await writeFile3(tokenPath, JSON.stringify({
+          auth_method: "consumer",
+          token: {
+            access_token: credential.access,
+            refresh_token: credential.refresh,
+            token_type: "Bearer",
+            ...credential.expiresAt ? { expiry: credential.expiresAt } : {}
+          }
+        }), { encoding: "utf8", mode: 384 });
+      }
+      await this.commandRunner(this.cliPath, ["models"], {
+        env: childEnv,
+        timeoutMs: this.timeoutMs,
+        signal: context.signal
+      });
+      let refreshed = null;
+      try {
+        refreshed = await this.tokenResolver({ env: this.env });
+      } catch {
+      }
+      refreshed = refreshed?.token ? refreshed : readAntigravityTokenFile({ env: childEnv, home: officialHome });
+      if (!refreshed?.token) {
+        throw new Error("agy did not persist a refreshed OAuth token");
+      }
+      const next = {
+        ...credential,
+        access: refreshed.token,
+        ...refreshed.refreshToken ? { refresh: refreshed.refreshToken } : {},
+        ...refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {},
+        lastRefreshedAt: now.toISOString()
+      };
+      const accessChanged = next.access !== credential.access;
+      const expiry = next.expiresAt ? Date.parse(next.expiresAt) : Number.NaN;
+      const expiryAdvanced = Number.isFinite(expiry) && expiry > now.getTime() + 6e4;
+      if (!accessChanged && !expiryAdvanced) {
+        throw new Error("agy did not advance the Antigravity OAuth token expiry");
+      }
+      return next;
+    } catch (error) {
+      if (error?.authExpired) throw error;
+      const wrapped = activeSessionError(`Antigravity agy session refresh failed: ${redactError(error)}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+  }
   async #refreshBrowserCredential(account, context = {}) {
     if (account?.resources?.sessionSource !== OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) return null;
     const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
@@ -4480,7 +6169,16 @@ var AntigravityOfficialSessionDriver = class {
     if (!credential?.access) {
       throw activeSessionError("Antigravity browser OAuth credential is missing; authorize again");
     }
+    const refreshMode = credentialRefreshMode(account);
+    const dshManagedRefresh = refreshMode !== ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION;
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    if (refreshMode === ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION) {
+      if (!tokenNeedsRefresh(credential, now)) return credential;
+      const updated2 = await this.#refreshAgyCredential(credential, context);
+      await context.secretStore.write(credentialRef, updated2);
+      return updated2;
+    }
+    if (!dshManagedRefresh || !this.browserClientId || !this.browserClientSecret) return credential;
     if (!tokenNeedsRefresh(credential, now)) return credential;
     if (!credential.refresh) {
       throw activeSessionError("Antigravity browser OAuth token expired; authorize again");
@@ -4525,6 +6223,8 @@ var AntigravityOfficialSessionDriver = class {
     const credentialRef = account?.auth?.credentialRef;
     if (account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER) {
       credential = await this.#refreshBrowserCredential(account, context);
+    } else if (context.officialCredential) {
+      credential = context.officialCredential;
     } else if (credentialRef && context.secretStore && typeof context.secretStore.read === "function") {
       credential = await context.secretStore.read(credentialRef);
     }
@@ -4637,8 +6337,14 @@ var AntigravityOfficialSessionDriver = class {
         accounts: [account],
         diagnostic: null
       };
-    } catch {
-      return null;
+    } catch (error) {
+      return {
+        status: "failed",
+        providerId: PROVIDER_ID3,
+        instructions: "\u672A\u80FD\u8BFB\u53D6 Antigravity \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u8BF7\u91CD\u65B0\u626B\u63CF\u6216\u767B\u5F55\u3002",
+        accounts: [],
+        diagnostic: redactError(error)
+      };
     }
   }
   async startAuthorization(context = {}) {
@@ -4663,21 +6369,29 @@ var AntigravityOfficialSessionDriver = class {
     return this.#authorizationAuthorizer(sessionId).cancel(sessionId, context);
   }
   async refreshAccount(account, context = {}) {
-    await this.#refreshBrowserCredential(account, context);
-    await this.#assertActiveSession(account, context);
+    const browserCredential = await this.#refreshBrowserCredential(account, context);
+    const officialCredential = await this.#refreshOfficialCredential(account, context);
+    await this.#assertActiveSession(account, {
+      ...context,
+      ...officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}
+    });
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
-    let session = null;
+    let session = officialCredential?.session ?? null;
     try {
-      session = await this.tokenResolver({ env: this.env });
+      session = session ?? await this.tokenResolver({ env: this.env });
     } catch {
     }
     const sessionEmail = await this.#resolveSessionEmail(session, context);
     const fingerprint = sessionFingerprint(sessionEmail && session && !session.email ? { ...session, email: sessionEmail } : session);
     const fingerprintResources = fingerprint ? { sessionFingerprint: fingerprint } : {};
+    const persistedRefreshMode = account?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER ? credentialRefreshMode(account) ?? (!this.browserClientId || !this.browserClientSecret ? ANTIGRAVITY_CREDENTIAL_REFRESH_MODES.AGY_SESSION : null) : null;
     const identityPatch = sessionEmail ? { email: sessionEmail } : {};
     let nativeError = null;
     try {
-      const native = await this.#nativeQuota(account, context, now);
+      const native = await this.#nativeQuota(account, {
+        ...context,
+        ...officialCredential?.credential ? { officialCredential: officialCredential.credential } : {}
+      }, now);
       if (native) {
         const primary2 = selectPrimaryQuotaWindow(native.windows);
         return {
@@ -4689,12 +6403,16 @@ var AntigravityOfficialSessionDriver = class {
             source: "antigravity_native"
           },
           credits: native.credits,
-          resources: { quotaSource: "antigravity_native", ...fingerprintResources },
+          resources: {
+            quotaSource: "antigravity_native",
+            ...persistedRefreshMode ? { credentialRefreshMode: persistedRefreshMode } : {},
+            ...fingerprintResources
+          },
           refresh: {
-            accessTokenExpiresAt: null,
+            accessTokenExpiresAt: browserCredential?.expiresAt ?? officialCredential?.credential?.expiresAt ?? account.refresh?.accessTokenExpiresAt ?? null,
             nextRefreshAt: null,
-            lastRefreshedAt: now.toISOString(),
-            refreshable: null
+            lastRefreshedAt: browserCredential?.lastRefreshedAt ?? account.refresh?.lastRefreshedAt ?? now.toISOString(),
+            refreshable: browserCredential ? Boolean(browserCredential.refresh) : officialCredential?.credential ? Boolean(officialCredential.credential.refresh) : account.refresh?.refreshable ?? null
           }
         };
       }
@@ -4722,10 +6440,7 @@ var AntigravityOfficialSessionDriver = class {
         updatedAt: now.toISOString(),
         source: "antigravity_cli"
       },
-      credits: creditsResult?.parsed?.command?.data ? {
-        remaining: finiteNumber(creditsResult.parsed.command.data.remaining_credits),
-        upgradeUri: stringValue(creditsResult.parsed.command.data.upgrade_uri)
-      } : null,
+      credits: creditsFromData(creditsResult?.parsed?.command?.data),
       resources: fingerprintResources,
       refresh: {
         accessTokenExpiresAt: null,
@@ -4736,11 +6451,20 @@ var AntigravityOfficialSessionDriver = class {
     };
   }
   async getQuota(account, context = {}) {
-    await this.#assertActiveSession(account, context);
+    const browserCredential = await this.#refreshBrowserCredential(account, context);
+    const officialCredential = await this.#refreshOfficialCredential(account, context);
+    await this.#assertActiveSession(account, {
+      ...context,
+      ...officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}
+    });
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     let nativeError = null;
     try {
-      const native = await this.#nativeQuota(account, context, now);
+      const native = await this.#nativeQuota(account, {
+        ...context,
+        ...browserCredential ? { browserCredential } : {},
+        ...officialCredential?.credential ? { officialCredential: officialCredential.credential } : {}
+      }, now);
       if (native) {
         const primary2 = selectPrimaryQuotaWindow(native.windows);
         return {
@@ -4773,7 +6497,7 @@ var AntigravityOfficialSessionDriver = class {
     const data = quotaResult.parsed?.command?.data;
     const windows = parseQuotaData(data, now);
     const fallbackWindows = windows.length ? windows : parseQuotaText(quotaResult.parsed?.response ?? "", now);
-    const credits = creditsResult?.parsed?.command?.data ?? null;
+    const credits = creditsFromData(creditsResult?.parsed?.command?.data);
     const primary = selectPrimaryQuotaWindow(fallbackWindows);
     return {
       quota: {
@@ -4782,7 +6506,7 @@ var AntigravityOfficialSessionDriver = class {
         updatedAt: now.toISOString(),
         source: "antigravity_cli"
       },
-      credits: credits ? { remaining: finiteNumber(credits.remaining_credits), upgradeUri: stringValue(credits.upgrade_uri) } : null,
+      credits,
       refresh: {
         accessTokenExpiresAt: null,
         nextRefreshAt: null,
@@ -4799,7 +6523,11 @@ var AntigravityOfficialSessionDriver = class {
   }
   async invoke(request, invocation, context = {}) {
     await this.#refreshBrowserCredential(invocation?.account, context);
-    await this.#assertActiveSession(invocation?.account, context);
+    const officialCredential = await this.#refreshOfficialCredential(invocation?.account, context);
+    await this.#assertActiveSession(invocation?.account, {
+      ...context,
+      ...officialCredential?.rotated ? { allowSessionTokenRotation: true } : {}
+    });
     const executor = context.requestExecutor ?? this.requestExecutor;
     if (typeof executor !== "function") {
       throw new Error("Antigravity native invocation transport is not mounted");
@@ -4858,6 +6586,14 @@ function hash3(value) {
 function firstString2(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
+function grokTokenExpiresAt(value, payload = {}, now = /* @__PURE__ */ new Date()) {
+  return isoFromEpoch(value?.expires_at ?? value?.expiresAt ?? payload.exp) ?? addSecondsIso(value?.expires_in ?? value?.expiresIn, now);
+}
+function grokTokenNeedsRefresh(credential, now = /* @__PURE__ */ new Date(), leewayMs = 6e4) {
+  if (!credential?.refresh || !credential.expiresAt) return false;
+  const expiresAt = Date.parse(credential.expiresAt);
+  return Number.isFinite(expiresAt) && expiresAt <= now.getTime() + leewayMs;
+}
 function grokHomePath({ env = process.env, home = homedir6(), grokHome } = {}) {
   return grokHome ?? env.GROK_HOME ?? join7(home, ".grok");
 }
@@ -4876,11 +6612,7 @@ function parseGrokAuth(raw) {
     const access2 = firstString2(value.key, value.access_token, value.accessToken);
     if (!access2) return null;
     const accessPayload = decodeJwtPayload(access2) ?? {};
-    const expiresAt = firstString2(
-      value.expires_at,
-      value.expiresAt,
-      isoFromEpoch(accessPayload.exp)
-    );
+    const expiresAt = grokTokenExpiresAt(value, accessPayload);
     const accountId = firstString2(
       value.user_id,
       value.userId,
@@ -5182,7 +6914,8 @@ var GrokOAuthDriver = class {
     this.tokenHeader = String(tokenHeader || DEFAULT_GROK_TOKEN_HEADER);
     this.clientVersion = String(clientVersion || DEFAULT_GROK_CLIENT_VERSION);
     this.timeoutMs = timeoutMs;
-    this.tokenUrl = tokenUrl;
+    this.authorizationUrl = assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_GROK_AUTHORIZATION_URL");
+    this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_GROK_TOKEN_URL");
     this.clientId = clientId;
     this.oauthScope = oauthScope;
     this.catalogLoader = catalogLoader ?? createGrokCatalogLoader({
@@ -5366,6 +7099,52 @@ var GrokOAuthDriver = class {
     }
     return { ...credential, accountId: credential.accountId ?? account.accountId };
   }
+  async #refreshOAuthCredential(account, context = {}, { strict = false } = {}) {
+    const credential = await this.#readCredential(account, context);
+    const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
+    if (!grokTokenNeedsRefresh(credential, now)) return credential;
+    if (!credential.refresh) {
+      if (!strict) return credential;
+      const error = new Error("Grok OAuth access token expired; authorize again");
+      error.authExpired = true;
+      throw error;
+    }
+    let response;
+    try {
+      response = await this.fetchImpl(this.tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: new URLSearchParams({
+          client_id: credential.clientId ?? this.clientId,
+          grant_type: "refresh_token",
+          refresh_token: credential.refresh
+        }),
+        ...context.signal ? { signal: context.signal } : {}
+      });
+    } catch (cause) {
+      const error = new Error("Grok OAuth refresh failed; authorize again");
+      error.authExpired = true;
+      error.cause = cause;
+      throw error;
+    }
+    const body = await response.json().catch(() => ({}));
+    const access2 = firstString2(body.access_token, body.accessToken, body.key);
+    if (!response.ok || !access2) {
+      const error = new Error("Grok OAuth refresh failed; authorize again");
+      error.status = response.status;
+      error.authExpired = response.status === 401 || response.status === 400;
+      throw error;
+    }
+    const updated = {
+      ...credential,
+      access: access2,
+      refresh: firstString2(body.refresh_token, body.refreshToken, credential.refresh),
+      expiresAt: grokTokenExpiresAt(body, decodeJwtPayload(access2) ?? {}, now) ?? credential.expiresAt,
+      lastRefreshedAt: now.toISOString()
+    };
+    await context.secretStore.write(account.auth?.credentialRef ?? account.credentialRef, updated);
+    return updated;
+  }
   async #prepareCredentialEnvironment(account, context = {}) {
     const credential = await this.#readCredential(account, context);
     const profileDir = await mkdtemp3(join7(tmpdir3(), "dockyard-grok-run-"));
@@ -5408,6 +7187,7 @@ var GrokOAuthDriver = class {
     }
   }
   async refreshAccount(account, context = {}) {
+    await this.#refreshOAuthCredential(account, context);
     const prepared = await this.#prepareCredentialEnvironment(account, context);
     let updated = null;
     let commandError2 = null;
@@ -5446,7 +7226,7 @@ var GrokOAuthDriver = class {
   }
   async getQuota(account, context = {}) {
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
-    const credential = await this.#readCredential(account, context);
+    const credential = await this.#refreshOAuthCredential(account, context, { strict: true });
     const accountId = credential.accountId ?? account.accountId;
     const response = await this.fetchImpl(this.creditsUrl, {
       method: "GET",
@@ -5483,7 +7263,7 @@ var GrokOAuthDriver = class {
     if (typeof executor !== "function") throw new Error("Grok native invocation transport is not mounted");
     const account = invocation?.account;
     if (executor.nativeTransport === "xai-chat-completions") {
-      const credential = account && context.secretStore ? await this.#readCredential(account, context) : null;
+      const credential = account && context.secretStore ? await this.#refreshOAuthCredential(account, context, { strict: true }) : null;
       return executor({ request, invocation, credential, context });
     }
     if (!account || !context.secretStore) return executor({ request, invocation, context });
@@ -5568,8 +7348,8 @@ ${textFromContent(part.content ?? part.output ?? part.result ?? part.text)}` });
       blocks.push({ type: "text", text: `[Tool Call ${call.name ?? call.function?.name ?? "tool"}] ${JSON.stringify(parseToolArguments(call.arguments ?? call.input ?? call.function?.arguments))}` });
       continue;
     }
-    const text2 = textFromContent(part);
-    if (text2) blocks.push({ type: "text", text: text2 });
+    const text3 = textFromContent(part);
+    if (text3) blocks.push({ type: "text", text: text3 });
   }
   return blocks;
 }
@@ -5635,7 +7415,7 @@ async function buildGrokRequest(request = {}, context = {}) {
   return body;
 }
 async function* streamGrokResponse(response) {
-  let text2 = "";
+  let text3 = "";
   let textIndex = 0;
   let textOpen = true;
   let nextIndex = 1;
@@ -5643,8 +7423,13 @@ async function* streamGrokResponse(response) {
   let stop = "stop";
   let reasoning = null;
   const tools = /* @__PURE__ */ new Map();
+  let terminated = false;
   yield { type: "block-start", index: textIndex, blockType: "text" };
   for await (const event of readSseEvents(response)) {
+    if (event?.done) {
+      terminated = true;
+      continue;
+    }
     const payload = event.data;
     if (!payload || typeof payload !== "object") continue;
     if (payload.error) {
@@ -5657,6 +7442,7 @@ async function* streamGrokResponse(response) {
     const choice = payload.choices?.[0];
     if (!choice) continue;
     stop = choice.finish_reason ?? stop;
+    if (typeof choice.finish_reason === "string" && choice.finish_reason.trim()) terminated = true;
     const delta = choice.delta ?? {};
     const content = typeof delta.content === "string" ? delta.content : textFromContent(delta.content);
     if (content) {
@@ -5666,17 +7452,17 @@ async function* streamGrokResponse(response) {
       }
       if (!textOpen) {
         textIndex = nextIndex++;
-        text2 = "";
+        text3 = "";
         textOpen = true;
         yield { type: "block-start", index: textIndex, blockType: "text" };
       }
-      text2 += content;
+      text3 += content;
       yield { type: "text-delta", index: textIndex, text: content };
     }
     const reasoningDelta = delta.reasoning_content ?? delta.reasoningContent;
     if (reasoningDelta) {
       if (textOpen) {
-        yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
         textOpen = false;
       }
       if (!reasoning) {
@@ -5695,7 +7481,7 @@ async function* streamGrokResponse(response) {
           reasoning = null;
         }
         if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
           textOpen = false;
         }
         const state2 = {
@@ -5717,8 +7503,15 @@ async function* streamGrokResponse(response) {
       }
     }
   }
+  if (!terminated) {
+    throw nativeProviderError(
+      PROVIDER_ID5,
+      "xAI stream ended without a finish_reason or [DONE] terminator; the response may be truncated",
+      { code: "GROK_TRUNCATED_STREAM" }
+    );
+  }
   if (reasoning) yield { type: "block-end", index: reasoning.index, block: { type: "reasoning", text: reasoning.text } };
-  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
   for (const state of tools.values()) {
     yield { type: "block-end", index: state.index, block: { type: "tool-call", id: state.id, name: state.name, arguments: state.arguments || "{}" } };
   }
@@ -5785,15 +7578,12 @@ function createGrokModule({ driver = {} } = {}) {
 
 // modules/provider-claude/src/driver.mjs
 import { createHash as createHash6 } from "node:crypto";
+import { homedir as homedir8 } from "node:os";
 
 // packages/oauth/src/cli-status-authorizer.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { spawn as spawn5 } from "node:child_process";
-var URL_PATTERN2 = /https?:\/\/[^\s"'<>]+/gi;
 var CHILD_STOP_GRACE_MS2 = 2e3;
-function cleanUrl2(value) {
-  return String(value ?? "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[),.;]+$/, "");
-}
 function publicSession3(session) {
   return {
     sessionId: session.sessionId,
@@ -5858,8 +7648,7 @@ function createCliStatusAuthorizer({
   function capture(session, chunk) {
     session.output = `${session.output}${String(chunk ?? "")}`.slice(-32e3);
     if (!session.authorizationUrl) {
-      const match = session.output.match(URL_PATTERN2);
-      if (match?.[0]) session.authorizationUrl = cleanUrl2(match[0]);
+      session.authorizationUrl = extractSafeAuthorizationUrl(session.output);
     }
   }
   async function finalize(session, context) {
@@ -6078,18 +7867,385 @@ var officialSessionAuthorizerConstants = Object.freeze({
   defaultTimeoutMs: DEFAULT_TIMEOUT_MS3
 });
 
-// modules/provider-claude/src/driver.mjs
+// modules/provider-claude/src/native-transport.mjs
+import { readFile as readFile7 } from "node:fs/promises";
+import { homedir as homedir7 } from "node:os";
+import { join as join8 } from "node:path";
 var PROVIDER_ID6 = "claude";
+var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
+function firstString4(...values) {
+  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+async function readJson(path) {
+  try {
+    return JSON.parse(await readFile7(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function oauthTokenFromJson(value) {
+  const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
+  const token = firstString4(oauth?.accessToken, oauth?.access_token, value?.accessToken, value?.access_token);
+  return token ? { token, kind: "oauth" } : null;
+}
+function claudeOAuthCredentialFromJson(value) {
+  const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
+  const access2 = firstString4(oauth?.accessToken, oauth?.access_token, value?.accessToken, value?.access_token);
+  if (!access2) return null;
+  const refresh = firstString4(oauth?.refreshToken, oauth?.refresh_token, value?.refreshToken, value?.refresh_token);
+  const expiresAt = isoFromEpoch(
+    oauth?.expiresAt ?? oauth?.expires_at ?? oauth?.expiryDate ?? oauth?.expiry_date ?? value?.expiresAt ?? value?.expires_at
+  ) ?? addSecondsIso(oauth?.expiresIn ?? oauth?.expires_in ?? value?.expiresIn ?? value?.expires_in);
+  return {
+    type: "oauth",
+    providerId: "claude",
+    access: access2,
+    ...refresh ? { refresh } : {},
+    ...expiresAt ? { expiresAt } : {},
+    ...Array.isArray(oauth?.scopes) ? { scopes: oauth.scopes.map(String) } : {}
+  };
+}
+async function readClaudeOAuthCredential({ home = homedir7() } = {}) {
+  for (const path of [
+    join8(home, ".claude", ".credentials.json"),
+    join8(home, ".opencodex", "claude_desktop_auth.json")
+  ]) {
+    const credential = claudeOAuthCredentialFromJson(await readJson(path));
+    if (credential) return credential;
+  }
+  return null;
+}
+async function resolveClaudeAccessToken({
+  credential,
+  env = process.env,
+  home = homedir7(),
+  accountBound = false
+} = {}) {
+  const stored = firstString4(credential?.access, credential?.token);
+  if (stored) return { token: stored, kind: credential?.type === "api_key" ? "apiKey" : "oauth" };
+  if (accountBound) return null;
+  const apiKey = firstString4(env.ANTHROPIC_API_KEY);
+  if (apiKey) return { token: apiKey, kind: "apiKey" };
+  const envToken = firstString4(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
+  if (envToken) return { token: envToken, kind: "oauth" };
+  for (const path of [
+    join8(home, ".claude", ".credentials.json"),
+    join8(home, ".opencodex", "claude_desktop_auth.json")
+  ]) {
+    const found = oauthTokenFromJson(await readJson(path));
+    if (found) return found;
+  }
+  return null;
+}
+function toolCallPart2(part) {
+  const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
+  return type === "toolcall" || type === "tooluse" || type === "functioncall" ? part : null;
+}
+async function anthropicContent(content, attachments) {
+  const values = Array.isArray(content) ? content : [content];
+  const blocks = [];
+  for (const part of values) {
+    if (typeof part === "string") {
+      if (part) blocks.push({ type: "text", text: part });
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    if (part.type === "image") {
+      const image = await resolveImageData(part, attachments);
+      if (!image) throw nativeProviderError(PROVIDER_ID6, "image attachment could not be resolved");
+      blocks.push({ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } });
+      continue;
+    }
+    if (part.type === "tool-result" || part.type === "tool_result") {
+      blocks.push({
+        type: "tool_result",
+        tool_use_id: firstString4(part.toolCallId, part.tool_call_id, part.id, "tool-result"),
+        content: textFromContent(part.content ?? part.output ?? part.result ?? part.text),
+        ...part.isError || part.is_error ? { is_error: true } : {}
+      });
+      continue;
+    }
+    const tool = toolCallPart2(part);
+    if (tool) {
+      blocks.push({
+        type: "tool_use",
+        id: firstString4(tool.id, tool.toolCallId, tool.tool_call_id, `tool-${blocks.length}`),
+        name: firstString4(tool.name, tool.function?.name, "tool"),
+        input: parseToolArguments(tool.arguments ?? tool.input ?? tool.function?.arguments)
+      });
+      continue;
+    }
+    const text3 = textFromContent(part);
+    if (text3) blocks.push({ type: "text", text: text3 });
+  }
+  return blocks;
+}
+async function buildAnthropicMessages(request, attachments) {
+  const messages = [];
+  for (const message of Array.isArray(request.messages) ? request.messages : []) {
+    const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "user" : "user";
+    const content = await anthropicContent(message?.content ?? message?.text, attachments);
+    if (role === "user" && message?.role === "tool" && content.length === 0) continue;
+    if (content.length > 0) messages.push({ role, content: content.length === 1 && content[0].type === "text" ? content[0].text : content });
+  }
+  if (messages.length === 0) messages.push({ role: "user", content: "Continue the conversation." });
+  return messages;
+}
+function buildAnthropicTools(tools) {
+  if (!Array.isArray(tools)) return void 0;
+  const result = tools.map((tool) => ({
+    name: firstString4(tool?.name, tool?.function?.name, "tool"),
+    ...tool?.description ? { description: String(tool.description) } : {},
+    input_schema: tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" }
+  }));
+  return result.length > 0 ? result : void 0;
+}
+function thinkingBudget(request) {
+  const value = request?.reasoningBudget ?? request?.thinkingBudget;
+  if (Number.isInteger(value) && value > 0) return value;
+  const effort = String(request?.reasoningEffort ?? "").toLowerCase();
+  if (effort === "high" || effort === "xhigh") return 16e3;
+  if (effort === "medium") return 8e3;
+  if (effort === "low") return 4e3;
+  return null;
+}
+function invalidRequestError(message) {
+  const error = new Error(message);
+  error.code = "INVALID_ARGUMENT";
+  error.providerId = PROVIDER_ID6;
+  return error;
+}
+function resolveMaxTokens(request) {
+  const value = Number.isInteger(request.maxTokens) ? request.maxTokens : Number.isInteger(request.modelContext?.maxTokens) ? request.modelContext.maxTokens : 4096;
+  if (!Number.isInteger(value) || value <= 0) {
+    throw invalidRequestError(`Claude max_tokens must be a positive integer, received ${value}`);
+  }
+  return value;
+}
+async function buildClaudeRequest(request = {}, context = {}) {
+  const body = {
+    model: request.model,
+    messages: await buildAnthropicMessages(request, context.attachments),
+    max_tokens: resolveMaxTokens(request),
+    stream: true
+  };
+  if (typeof request.system === "string" && request.system.length > 0) body.system = request.system;
+  const tools = buildAnthropicTools(request.tools);
+  if (tools) body.tools = tools;
+  const budget = thinkingBudget(request);
+  if (budget && body.max_tokens > budget) {
+    body.thinking = { type: "enabled", budget_tokens: budget };
+  } else if (request.temperature !== void 0) {
+    body.temperature = request.temperature;
+  }
+  return body;
+}
+function headersForToken(auth) {
+  const headers = {
+    "content-type": "application/json",
+    accept: "text/event-stream",
+    "anthropic-version": "2023-06-01"
+  };
+  if (auth.kind === "apiKey" || auth.token.startsWith("sk-ant-")) {
+    headers["x-api-key"] = auth.token;
+  } else {
+    headers.authorization = `Bearer ${auth.token}`;
+    headers["anthropic-beta"] = "oauth-2025-04-20";
+    headers["anthropic-client-platform"] = "DESKTOP_APP";
+    headers["anthropic-client-version"] = "1.0.0";
+  }
+  return headers;
+}
+function mergeUsage(previous, next) {
+  return next ? { ...previous ?? {}, ...next } : previous;
+}
+function claudeStreamProtocolError() {
+  const error = nativeProviderError(PROVIDER_ID6, "SSE stream ended before message_stop; the response was truncated");
+  error.code = "SSE_PROTOCOL_ERROR";
+  error.protocolError = true;
+  return error;
+}
+async function* streamClaudeResponse(response) {
+  let text3 = "";
+  let textIndex = 0;
+  let textOpen = true;
+  let nextIndex = 1;
+  let usage = null;
+  let stop = "stop";
+  let messageOpened = false;
+  let terminated = false;
+  const tools = /* @__PURE__ */ new Map();
+  const reasoning = /* @__PURE__ */ new Map();
+  yield { type: "block-start", index: textIndex, blockType: "text" };
+  for await (const event of readSseEvents(response)) {
+    const payload = event.data;
+    if (!payload || typeof payload !== "object") continue;
+    if (payload.type === "message_start") {
+      messageOpened = true;
+      usage = mergeUsage(usage, normalizeUsage(payload.message?.usage));
+      continue;
+    }
+    if (payload.type === "content_block_start") {
+      const block = payload.content_block ?? {};
+      if (block.type === "tool_use" || block.type === "thinking" || block.type === "redacted_thinking") {
+        if (textOpen) {
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+          textOpen = false;
+        }
+        const index = nextIndex++;
+        if (block.type === "tool_use") {
+          tools.set(payload.index, {
+            index,
+            id: firstString4(block.id, `tool-${payload.index}`),
+            name: firstString4(block.name, "tool"),
+            arguments: ""
+          });
+          yield { type: "block-start", index, blockType: "tool-call" };
+        } else {
+          reasoning.set(payload.index, { index, text: "" });
+          yield { type: "block-start", index, blockType: "reasoning" };
+        }
+        continue;
+      }
+      if (block.type === "text" && !textOpen) {
+        textIndex = nextIndex++;
+        text3 = "";
+        textOpen = true;
+        yield { type: "block-start", index: textIndex, blockType: "text" };
+      }
+      continue;
+    }
+    if (payload.type === "content_block_delta") {
+      const delta = payload.delta ?? {};
+      if (delta.type === "text_delta" && delta.text) {
+        if (!textOpen) {
+          textIndex = nextIndex++;
+          text3 = "";
+          textOpen = true;
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+        }
+        text3 += delta.text;
+        yield { type: "text-delta", index: textIndex, text: delta.text };
+      } else if (delta.type === "thinking_delta" && delta.thinking) {
+        let state = reasoning.get(payload.index);
+        if (!state) {
+          if (textOpen) {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+            textOpen = false;
+          }
+          state = { index: nextIndex++, text: "" };
+          reasoning.set(payload.index, state);
+          yield { type: "block-start", index: state.index, blockType: "reasoning" };
+        }
+        state.text += delta.thinking;
+        yield { type: "reasoning-delta", index: state.index, text: delta.thinking };
+      } else if (delta.type === "input_json_delta" && tools.has(payload.index)) {
+        const tool = tools.get(payload.index);
+        tool.arguments += delta.partial_json ?? "";
+        yield { type: "tool-call-delta", index: tool.index, id: tool.id, name: tool.name, argumentsDelta: delta.partial_json ?? "" };
+      }
+      continue;
+    }
+    if (payload.type === "content_block_stop") {
+      const thought = reasoning.get(payload.index);
+      if (thought) {
+        yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
+        reasoning.delete(payload.index);
+      }
+      const tool = tools.get(payload.index);
+      if (tool) {
+        yield {
+          type: "block-end",
+          index: tool.index,
+          block: { type: "tool-call", id: tool.id, name: tool.name, arguments: tool.arguments || "{}" }
+        };
+        tools.delete(payload.index);
+      }
+      continue;
+    }
+    if (payload.type === "message_delta") {
+      terminated = true;
+      stop = payload.delta?.stop_reason ?? stop;
+      usage = mergeUsage(usage, normalizeUsage(payload.usage));
+      continue;
+    }
+    if (payload.type === "message_stop") {
+      terminated = true;
+      continue;
+    }
+    if (payload.type === "error") {
+      throw nativeProviderError(PROVIDER_ID6, payload.error?.message ?? "Anthropic returned an error", {
+        status: payload.error?.status,
+        body: payload.error
+      });
+    }
+  }
+  if (messageOpened && !terminated) throw claudeStreamProtocolError();
+  for (const thought of reasoning.values()) {
+    yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
+  }
+  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
+  for (const tool of tools.values()) {
+    yield {
+      type: "block-end",
+      index: tool.index,
+      block: { type: "tool-call", id: tool.id, name: tool.name, arguments: tool.arguments || "{}" }
+    };
+  }
+  if (usage) yield { type: "usage", usage };
+  yield { type: "finish", reason: finishReason(stop) };
+}
+function createClaudeNativeExecutor({
+  endpoint: endpoint2 = process.env.DOCKYARD_CLAUDE_ENDPOINT || DEFAULT_ENDPOINT3,
+  env = process.env,
+  home = homedir7(),
+  timeoutMs = 3e5,
+  fetchImpl = fetch,
+  tokenResolver = resolveClaudeAccessToken
+} = {}) {
+  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID6 });
+  const executor = async ({ request = {}, invocation, context = {} } = {}) => {
+    let credential = null;
+    const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
+    const accountBound = Boolean(ref || invocation?.account?.accountId);
+    if (context.secretStore && ref) {
+      credential = await context.secretStore.read(ref);
+    }
+    const auth = await tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home, accountBound });
+    if (!auth?.token) {
+      const error = nativeProviderError(PROVIDER_ID6, accountBound ? "Claude subscription OAuth token is unavailable for the selected account; authorize Claude again" : "Claude OAuth token is unavailable; authorize Claude first");
+      error.authExpired = true;
+      throw error;
+    }
+    const body = await buildClaudeRequest(request, context);
+    const response = await fetchNativeResponse(safeEndpoint, {
+      method: "POST",
+      headers: headersForToken(auth),
+      body: JSON.stringify(body),
+      signal: context.signal
+    }, { providerId: PROVIDER_ID6, timeoutMs, fetchImpl });
+    return streamClaudeResponse(response);
+  };
+  executor.nativeTransport = "anthropic-messages";
+  return executor;
+}
+var claudeNativeTransportConstants = Object.freeze({
+  providerId: PROVIDER_ID6,
+  endpoint: DEFAULT_ENDPOINT3
+});
+
+// modules/provider-claude/src/driver.mjs
+var PROVIDER_ID7 = "claude";
 var DEFAULT_BROWSER_AUTHORIZATION_URL = "https://claude.com/cai/oauth/authorize";
 var DEFAULT_BROWSER_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 var DEFAULT_BROWSER_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 var DEFAULT_BROWSER_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
-var DEFAULT_BROWSER_SCOPE = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+var DEFAULT_BROWSER_SCOPE = "user:profile user:inference";
 var CREDENTIAL_SLOT4 = Symbol("dockyard-claude-session");
 function hash4(value) {
   return createHash6("sha256").update(String(value)).digest("hex");
 }
-function firstString4(...values) {
+function firstString5(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
 }
 function statusObject(raw, output = "") {
@@ -6114,8 +8270,8 @@ function isSubscriptionStatus(value) {
 }
 function statusIdentity(value) {
   const profile = value.profile ?? value.user ?? value.account ?? {};
-  const email = firstString4(value.email, value.userEmail, profile.email, profile.userEmail);
-  const accountId = firstString4(
+  const email = firstString5(value.email, value.userEmail, profile.email, profile.userEmail);
+  const accountId = firstString5(
     value.accountId,
     value.account_id,
     value.userId,
@@ -6124,7 +8280,7 @@ function statusIdentity(value) {
     profile.id,
     email
   ) ?? "claude:active";
-  const plan = firstString4(
+  const plan = firstString5(
     value.plan,
     value.planName,
     value.plan_type,
@@ -6132,7 +8288,7 @@ function statusIdentity(value) {
     value.subscription?.plan,
     value.subscription?.name
   );
-  const displayName = firstString4(value.name, profile.name, email, accountId);
+  const displayName = firstString5(value.name, profile.name, email, accountId);
   return { accountId, email, plan, displayName };
 }
 function parseClaudeAuthStatus(output) {
@@ -6140,9 +8296,9 @@ function parseClaudeAuthStatus(output) {
   const identity = statusIdentity(value);
   return {
     loggedIn: statusLoggedIn(value, output),
-    authMethod: firstString4(value.authMethod, value.auth_method),
-    apiProvider: firstString4(value.apiProvider, value.api_provider),
-    apiKeySource: firstString4(value.apiKeySource, value.api_key_source),
+    authMethod: firstString5(value.authMethod, value.auth_method),
+    apiProvider: firstString5(value.apiProvider, value.api_provider),
+    apiKeySource: firstString5(value.apiKeySource, value.api_key_source),
     isApiKey: isApiKeyStatus(value),
     isSubscription: isSubscriptionStatus(value),
     ...identity,
@@ -6161,20 +8317,27 @@ function candidateFromStatus(status, {
   imported = false,
   credential = null
 } = {}) {
-  const credentialRef = createCredentialRef(PROVIDER_ID6, status.accountId);
+  const sourceCredential = credential ?? status.credential ?? null;
+  const persistedCredential = sourceCredential?.access && sourceCredential?.refresh ? {
+    ...sourceCredential,
+    type: sourceCredential.type ?? "oauth",
+    providerId: PROVIDER_ID7,
+    accountId: sourceCredential.accountId ?? status.accountId
+  } : null;
+  const credentialRef = createCredentialRef(PROVIDER_ID7, status.accountId);
   const candidate2 = {
     candidateId: `claude:${hash4(status.accountId).slice(0, 20)}`,
-    providerId: PROVIDER_ID6,
+    providerId: PROVIDER_ID7,
     source,
     accountId: status.accountId,
     displayName: status.displayName ?? status.accountId,
     email: status.email,
     subscription: { plan: status.plan, status: status.isSubscription ? "active" : null, expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: null,
+      accessTokenExpiresAt: persistedCredential?.expiresAt ?? null,
       nextRefreshAt: null,
-      lastRefreshedAt: null,
-      refreshable: false
+      lastRefreshedAt: persistedCredential?.lastRefreshedAt ?? null,
+      refreshable: Boolean(persistedCredential?.refresh)
     },
     credentialRef,
     resources: officialSessionResources({ sourceKind, authSource: source }),
@@ -6183,9 +8346,9 @@ function candidateFromStatus(status, {
     diagnostic: status.isApiKey ? "\u5F53\u524D Claude \u5B98\u65B9\u4F1A\u8BDD\u4F7F\u7528 API key\uFF0C\u4E0D\u662F Claude Pro/Max \u8BA2\u9605 OAuth" : status.isSubscription ? null : "Claude \u5B98\u65B9\u4F1A\u8BDD\u6CA1\u6709\u8FD4\u56DE\u53EF\u8BC6\u522B\u7684\u8BA2\u9605 OAuth \u72B6\u6001"
   };
   Object.defineProperty(candidate2, CREDENTIAL_SLOT4, {
-    value: credential ?? {
+    value: persistedCredential ?? {
       type: OFFICIAL_SESSION_AUTH_KIND,
-      providerId: PROVIDER_ID6,
+      providerId: PROVIDER_ID7,
       accountId: status.accountId,
       authMethod: status.authMethod,
       sourceKind
@@ -6200,13 +8363,13 @@ function browserTokenExpiry(raw, now = /* @__PURE__ */ new Date()) {
   return Number.isFinite(expiresIn) ? new Date(now.getTime() + expiresIn * 1e3).toISOString() : null;
 }
 function candidateFromBrowserToken(raw, { source = "official_claude_browser_oauth", now = /* @__PURE__ */ new Date() } = {}) {
-  const access2 = firstString4(raw?.access_token, raw?.accessToken);
-  const refresh = firstString4(raw?.refresh_token, raw?.refreshToken);
+  const access2 = firstString5(raw?.access_token, raw?.accessToken);
+  const refresh = firstString5(raw?.refresh_token, raw?.refreshToken);
   if (!access2 || !refresh) throw new Error("Claude browser OAuth response is missing access and refresh tokens");
   const account = raw.account ?? {};
   const organization = raw.organization ?? {};
-  const email = firstString4(raw.email, account.email, account.email_address, account.emailAddress);
-  const accountId = firstString4(raw.accountId, raw.account_id, account.uuid, account.id, email) ?? "claude:active";
+  const email = firstString5(raw.email, account.email, account.email_address, account.emailAddress);
+  const accountId = firstString5(raw.accountId, raw.account_id, account.uuid, account.id, email) ?? "claude:active";
   const candidate2 = candidateFromStatus({
     loggedIn: true,
     authMethod: "oauth",
@@ -6215,14 +8378,14 @@ function candidateFromBrowserToken(raw, { source = "official_claude_browser_oaut
     isSubscription: true,
     accountId,
     email,
-    displayName: firstString4(raw.name, account.name, email, accountId),
-    plan: firstString4(raw.plan, raw.plan_type, organization.name)
+    displayName: firstString5(raw.name, account.name, email, accountId),
+    plan: firstString5(raw.plan, raw.plan_type, organization.name)
   }, {
     source,
     sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.BROWSER,
     credential: {
       type: "oauth",
-      providerId: PROVIDER_ID6,
+      providerId: PROVIDER_ID7,
       accountId,
       access: access2,
       refresh,
@@ -6240,7 +8403,7 @@ function candidateFromBrowserToken(raw, { source = "official_claude_browser_oaut
 }
 function summarizeClaudeCandidate(candidate2) {
   return {
-    providerId: PROVIDER_ID6,
+    providerId: PROVIDER_ID7,
     candidateId: candidate2.candidateId,
     source: candidate2.source,
     accountId: candidate2.accountId,
@@ -6317,21 +8480,24 @@ var ClaudeSubscriptionDriver = class {
     clientId = env.DOCKYARD_CLAUDE_CLIENT_ID || DEFAULT_BROWSER_CLIENT_ID,
     redirectUri = env.DOCKYARD_CLAUDE_REDIRECT_URI || DEFAULT_BROWSER_REDIRECT_URI,
     oauthScope = env.DOCKYARD_CLAUDE_OAUTH_SCOPE || DEFAULT_BROWSER_SCOPE,
+    home = homedir8(),
     fetchImpl = fetch
   } = {}) {
+    assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_CLAUDE_AUTHORIZATION_URL");
     this.cliPath = cliPath;
     this.env = env;
     this.commandRunner = commandRunner;
     this.requestExecutor = requestExecutor;
     this.fetchImpl = fetchImpl;
-    this.browserTokenUrl = tokenUrl;
+    this.home = home;
+    this.browserTokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_CLAUDE_TOKEN_URL");
     this.browserClientId = clientId;
     this.sessionReader = sessionReader;
     this.sessionSource = sessionSource;
     this.sessionSourceKind = sessionSourceKind;
     this.catalogLoader = catalogLoader ?? createClaudeCatalogLoader();
     this.clientSessionAuthorizer = typeof sessionReader === "function" ? createOfficialSessionAuthorizer({
-      providerId: PROVIDER_ID6,
+      providerId: PROVIDER_ID7,
       source: sessionSource,
       instructions: "\u8BF7\u5728 Claude \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
       readSession: async (context = {}) => {
@@ -6344,7 +8510,7 @@ var ClaudeSubscriptionDriver = class {
       }
     }) : null;
     this.cliAuthorizer = createCliStatusAuthorizer({
-      providerId: PROVIDER_ID6,
+      providerId: PROVIDER_ID7,
       cliPath,
       loginArgs: ["auth", "login", "--claudeai"],
       environment: env,
@@ -6360,7 +8526,7 @@ var ClaudeSubscriptionDriver = class {
       }
     });
     this.browserAuthorizer = browserAuthorizer ?? (browserOAuth ? createBrowserOAuthAuthorizer({
-      providerId: PROVIDER_ID6,
+      providerId: PROVIDER_ID7,
       redirectUri,
       callbackPort: 0,
       authorizationCodeRequired: true,
@@ -6418,34 +8584,46 @@ var ClaudeSubscriptionDriver = class {
     return {
       ...status,
       source: normalized?.source ?? defaults.source ?? "official_claude_cli",
-      sourceKind: normalized?.sourceKind ?? defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI
+      sourceKind: normalized?.sourceKind ?? defaults.sourceKind ?? OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+      credential: normalized?.credential ?? null
     };
+  }
+  async #persistedOAuthCredential() {
+    try {
+      return await readClaudeOAuthCredential({ home: this.home });
+    } catch {
+      return null;
+    }
   }
   async #readStatus(signal) {
     if (typeof this.sessionReader === "function") {
       try {
         const value = await this.sessionReader({ env: this.env, signal });
-        const normalized = normalizeOfficialSessionResult(value, {
+        const normalized2 = normalizeOfficialSessionResult(value, {
           source: this.sessionSource,
           sourceKind: this.sessionSourceKind
         });
-        if (normalized) return normalized;
+        if (normalized2) return {
+          ...normalized2,
+          credential: normalized2.credential ?? await this.#persistedOAuthCredential()
+        };
       } catch {
       }
     }
     const result = await this.commandRunner(this.cliPath, ["auth", "status", "--json"], {
       env: this.env,
-      providerId: PROVIDER_ID6,
+      providerId: PROVIDER_ID7,
       timeoutMs: 3e4,
       ...signal ? { signal } : {}
     });
-    return normalizeOfficialSessionResult(result, {
+    const normalized = normalizeOfficialSessionResult(result, {
       source: "official_claude_cli",
       sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI
     });
+    return normalized ? { ...normalized, credential: normalized.credential ?? await this.#persistedOAuthCredential() } : null;
   }
   #isBrowserAccount(account) {
-    return account?.resources?.authSource === "official_claude_browser_oauth";
+    return account?.resources?.authSource === "official_claude_browser_oauth" || account?.refresh?.refreshable === true;
   }
   async #readBrowserCredential(account, context = {}) {
     if (!context.secretStore) throw new Error("A secure credential store is required");
@@ -6556,7 +8734,7 @@ var ClaudeSubscriptionDriver = class {
     if (!context.secretStore) throw new Error("A secure credential store is required");
     await context.secretStore.write(candidate2.credentialRef, session);
     return {
-      providerId: PROVIDER_ID6,
+      providerId: PROVIDER_ID7,
       accountId: candidate2.accountId,
       credentialRef: candidate2.credentialRef,
       displayName: candidate2.displayName,
@@ -6584,7 +8762,7 @@ var ClaudeSubscriptionDriver = class {
       const account = await this.importAccount(candidate2, context);
       return {
         status: "completed",
-        providerId: PROVIDER_ID6,
+        providerId: PROVIDER_ID7,
         instructions: "\u5DF2\u68C0\u6D4B\u5230 Claude \u5B98\u65B9\u4F1A\u8BDD\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard DSH\u3002",
         accounts: [account],
         diagnostic: null
@@ -6667,313 +8845,7 @@ var ClaudeSubscriptionDriver = class {
 function createClaudeDriver(options = {}) {
   return new ClaudeSubscriptionDriver(options);
 }
-var claudeDriverConstants = Object.freeze({ providerId: PROVIDER_ID6 });
-
-// modules/provider-claude/src/native-transport.mjs
-import { readFile as readFile7 } from "node:fs/promises";
-import { homedir as homedir7 } from "node:os";
-import { join as join8 } from "node:path";
-var PROVIDER_ID7 = "claude";
-var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
-function firstString5(...values) {
-  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
-}
-async function readJson(path) {
-  try {
-    return JSON.parse(await readFile7(path, "utf8"));
-  } catch {
-    return null;
-  }
-}
-function oauthTokenFromJson(value) {
-  const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
-  const token = firstString5(oauth?.accessToken, oauth?.access_token, value?.accessToken, value?.access_token);
-  return token ? { token, kind: "oauth" } : null;
-}
-async function resolveClaudeAccessToken({
-  credential,
-  env = process.env,
-  home = homedir7()
-} = {}) {
-  const stored = firstString5(credential?.access, credential?.token);
-  if (stored) return { token: stored, kind: credential?.type === "api_key" ? "apiKey" : "oauth" };
-  const apiKey = firstString5(env.ANTHROPIC_API_KEY);
-  if (apiKey) return { token: apiKey, kind: "apiKey" };
-  const envToken = firstString5(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
-  if (envToken) return { token: envToken, kind: "oauth" };
-  for (const path of [
-    join8(home, ".claude", ".credentials.json"),
-    join8(home, ".opencodex", "claude_desktop_auth.json")
-  ]) {
-    const found = oauthTokenFromJson(await readJson(path));
-    if (found) return found;
-  }
-  return null;
-}
-function toolCallPart2(part) {
-  const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
-  return type === "toolcall" || type === "tooluse" || type === "functioncall" ? part : null;
-}
-async function anthropicContent(content, attachments) {
-  const values = Array.isArray(content) ? content : [content];
-  const blocks = [];
-  for (const part of values) {
-    if (typeof part === "string") {
-      if (part) blocks.push({ type: "text", text: part });
-      continue;
-    }
-    if (!part || typeof part !== "object") continue;
-    if (part.type === "image") {
-      const image = await resolveImageData(part, attachments);
-      if (!image) throw nativeProviderError(PROVIDER_ID7, "image attachment could not be resolved");
-      blocks.push({ type: "image", source: { type: "base64", media_type: image.mediaType, data: image.data } });
-      continue;
-    }
-    if (part.type === "tool-result" || part.type === "tool_result") {
-      blocks.push({
-        type: "tool_result",
-        tool_use_id: firstString5(part.toolCallId, part.tool_call_id, part.id, "tool-result"),
-        content: textFromContent(part.content ?? part.output ?? part.result ?? part.text),
-        ...part.isError || part.is_error ? { is_error: true } : {}
-      });
-      continue;
-    }
-    const tool = toolCallPart2(part);
-    if (tool) {
-      blocks.push({
-        type: "tool_use",
-        id: firstString5(tool.id, tool.toolCallId, tool.tool_call_id, `tool-${blocks.length}`),
-        name: firstString5(tool.name, tool.function?.name, "tool"),
-        input: parseToolArguments(tool.arguments ?? tool.input ?? tool.function?.arguments)
-      });
-      continue;
-    }
-    const text2 = textFromContent(part);
-    if (text2) blocks.push({ type: "text", text: text2 });
-  }
-  return blocks;
-}
-async function buildAnthropicMessages(request, attachments) {
-  const messages = [];
-  for (const message of Array.isArray(request.messages) ? request.messages : []) {
-    const role = message?.role === "assistant" ? "assistant" : message?.role === "tool" ? "user" : "user";
-    const content = await anthropicContent(message?.content ?? message?.text, attachments);
-    if (role === "user" && message?.role === "tool" && content.length === 0) continue;
-    if (content.length > 0) messages.push({ role, content: content.length === 1 && content[0].type === "text" ? content[0].text : content });
-  }
-  if (messages.length === 0) messages.push({ role: "user", content: "Continue the conversation." });
-  return messages;
-}
-function buildAnthropicTools(tools) {
-  if (!Array.isArray(tools)) return void 0;
-  const result = tools.map((tool) => ({
-    name: firstString5(tool?.name, tool?.function?.name, "tool"),
-    ...tool?.description ? { description: String(tool.description) } : {},
-    input_schema: tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" }
-  }));
-  return result.length > 0 ? result : void 0;
-}
-function thinkingBudget(request) {
-  const value = request?.reasoningBudget ?? request?.thinkingBudget;
-  if (Number.isInteger(value) && value > 0) return value;
-  const effort = String(request?.reasoningEffort ?? "").toLowerCase();
-  if (effort === "high" || effort === "xhigh") return 16e3;
-  if (effort === "medium") return 8e3;
-  if (effort === "low") return 4e3;
-  return null;
-}
-async function buildClaudeRequest(request = {}, context = {}) {
-  const body = {
-    model: request.model,
-    messages: await buildAnthropicMessages(request, context.attachments),
-    max_tokens: Number.isInteger(request.maxTokens) ? request.maxTokens : Number.isInteger(request.modelContext?.maxTokens) ? request.modelContext.maxTokens : 4096,
-    stream: true
-  };
-  if (typeof request.system === "string" && request.system.length > 0) body.system = request.system;
-  if (request.temperature !== void 0) body.temperature = request.temperature;
-  const tools = buildAnthropicTools(request.tools);
-  if (tools) body.tools = tools;
-  const budget = thinkingBudget(request);
-  if (budget && body.max_tokens > budget) body.thinking = { type: "enabled", budget_tokens: budget };
-  return body;
-}
-function headersForToken(auth) {
-  const headers = {
-    "content-type": "application/json",
-    accept: "text/event-stream",
-    "anthropic-version": "2023-06-01"
-  };
-  if (auth.kind === "apiKey" || auth.token.startsWith("sk-ant-")) {
-    headers["x-api-key"] = auth.token;
-  } else {
-    headers.authorization = `Bearer ${auth.token}`;
-    headers["anthropic-beta"] = "oauth-2025-04-20";
-    headers["anthropic-client-platform"] = "DESKTOP_APP";
-    headers["anthropic-client-version"] = "1.0.0";
-  }
-  return headers;
-}
-function mergeUsage(previous, next) {
-  return next ? { ...previous ?? {}, ...next } : previous;
-}
-async function* streamClaudeResponse(response) {
-  let text2 = "";
-  let textIndex = 0;
-  let textOpen = true;
-  let nextIndex = 1;
-  let usage = null;
-  let stop = "stop";
-  const tools = /* @__PURE__ */ new Map();
-  const reasoning = /* @__PURE__ */ new Map();
-  yield { type: "block-start", index: textIndex, blockType: "text" };
-  for await (const event of readSseEvents(response)) {
-    const payload = event.data;
-    if (!payload || typeof payload !== "object") continue;
-    if (payload.type === "message_start") {
-      usage = mergeUsage(usage, normalizeUsage(payload.message?.usage));
-      continue;
-    }
-    if (payload.type === "content_block_start") {
-      const block = payload.content_block ?? {};
-      if (block.type === "tool_use" || block.type === "thinking" || block.type === "redacted_thinking") {
-        if (textOpen) {
-          yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
-          textOpen = false;
-        }
-        const index = nextIndex++;
-        if (block.type === "tool_use") {
-          tools.set(payload.index, {
-            index,
-            id: firstString5(block.id, `tool-${payload.index}`),
-            name: firstString5(block.name, "tool"),
-            arguments: ""
-          });
-          yield { type: "block-start", index, blockType: "tool-call" };
-        } else {
-          reasoning.set(payload.index, { index, text: "" });
-          yield { type: "block-start", index, blockType: "reasoning" };
-        }
-        continue;
-      }
-      if (block.type === "text" && !textOpen) {
-        textIndex = nextIndex++;
-        text2 = "";
-        textOpen = true;
-        yield { type: "block-start", index: textIndex, blockType: "text" };
-      }
-      continue;
-    }
-    if (payload.type === "content_block_delta") {
-      const delta = payload.delta ?? {};
-      if (delta.type === "text_delta" && delta.text) {
-        if (!textOpen) {
-          textIndex = nextIndex++;
-          text2 = "";
-          textOpen = true;
-          yield { type: "block-start", index: textIndex, blockType: "text" };
-        }
-        text2 += delta.text;
-        yield { type: "text-delta", index: textIndex, text: delta.text };
-      } else if (delta.type === "thinking_delta" && delta.thinking) {
-        let state = reasoning.get(payload.index);
-        if (!state) {
-          if (textOpen) {
-            yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
-            textOpen = false;
-          }
-          state = { index: nextIndex++, text: "" };
-          reasoning.set(payload.index, state);
-          yield { type: "block-start", index: state.index, blockType: "reasoning" };
-        }
-        state.text += delta.thinking;
-        yield { type: "reasoning-delta", index: state.index, text: delta.thinking };
-      } else if (delta.type === "input_json_delta" && tools.has(payload.index)) {
-        const tool = tools.get(payload.index);
-        tool.arguments += delta.partial_json ?? "";
-        yield { type: "tool-call-delta", index: tool.index, id: tool.id, name: tool.name, argumentsDelta: delta.partial_json ?? "" };
-      }
-      continue;
-    }
-    if (payload.type === "content_block_stop") {
-      const thought = reasoning.get(payload.index);
-      if (thought) {
-        yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
-        reasoning.delete(payload.index);
-      }
-      const tool = tools.get(payload.index);
-      if (tool) {
-        yield {
-          type: "block-end",
-          index: tool.index,
-          block: { type: "tool-call", id: tool.id, name: tool.name, arguments: tool.arguments || "{}" }
-        };
-        tools.delete(payload.index);
-      }
-      continue;
-    }
-    if (payload.type === "message_delta") {
-      stop = payload.delta?.stop_reason ?? stop;
-      usage = mergeUsage(usage, normalizeUsage(payload.usage));
-      continue;
-    }
-    if (payload.type === "error") {
-      throw nativeProviderError(PROVIDER_ID7, payload.error?.message ?? "Anthropic returned an error", {
-        status: payload.error?.status,
-        body: payload.error
-      });
-    }
-  }
-  for (const thought of reasoning.values()) {
-    yield { type: "block-end", index: thought.index, block: { type: "reasoning", text: thought.text } };
-  }
-  if (textOpen) yield { type: "block-end", index: textIndex, block: { type: "text", text: text2 } };
-  for (const tool of tools.values()) {
-    yield {
-      type: "block-end",
-      index: tool.index,
-      block: { type: "tool-call", id: tool.id, name: tool.name, arguments: tool.arguments || "{}" }
-    };
-  }
-  if (usage) yield { type: "usage", usage };
-  yield { type: "finish", reason: finishReason(stop) };
-}
-function createClaudeNativeExecutor({
-  endpoint: endpoint2 = process.env.DOCKYARD_CLAUDE_ENDPOINT || DEFAULT_ENDPOINT3,
-  env = process.env,
-  home = homedir7(),
-  timeoutMs = 3e5,
-  fetchImpl = fetch,
-  tokenResolver = resolveClaudeAccessToken
-} = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID7 });
-  const executor = async ({ request = {}, invocation, context = {} } = {}) => {
-    let credential = null;
-    if (context.secretStore) {
-      const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
-      if (ref) credential = await context.secretStore.read(ref);
-    }
-    const auth = await tokenResolver({ credential, env: { ...env, ...context.env ?? {} }, home });
-    if (!auth?.token) {
-      const error = nativeProviderError(PROVIDER_ID7, "Claude OAuth token is unavailable; authorize Claude first");
-      error.authExpired = true;
-      throw error;
-    }
-    const body = await buildClaudeRequest(request, context);
-    const response = await fetchNativeResponse(safeEndpoint, {
-      method: "POST",
-      headers: headersForToken(auth),
-      body: JSON.stringify(body),
-      signal: context.signal
-    }, { providerId: PROVIDER_ID7, timeoutMs, fetchImpl });
-    return streamClaudeResponse(response);
-  };
-  executor.nativeTransport = "anthropic-messages";
-  return executor;
-}
-var claudeNativeTransportConstants = Object.freeze({
-  providerId: PROVIDER_ID7,
-  endpoint: DEFAULT_ENDPOINT3
-});
+var claudeDriverConstants = Object.freeze({ providerId: PROVIDER_ID7 });
 
 // modules/provider-claude/src/index.mjs
 function createClaudeModule({ driver = {} } = {}) {
@@ -6996,12 +8868,12 @@ function createClaudeModule({ driver = {} } = {}) {
 
 // modules/provider-cursor/src/driver.mjs
 import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as randomUUID9 } from "node:crypto";
-import { homedir as homedir9 } from "node:os";
+import { homedir as homedir10 } from "node:os";
 
 // modules/provider-cursor/src/native-transport.mjs
 import { execFileSync as execFileSync2 } from "node:child_process";
 import * as http2 from "node:http2";
-import { homedir as homedir8 } from "node:os";
+import { homedir as homedir9 } from "node:os";
 import { join as join9 } from "node:path";
 import { randomBytes as randomBytes2, randomUUID as randomUUID8 } from "node:crypto";
 
@@ -7123,11 +8995,28 @@ function putBlob(store, value) {
 function jsonBlob(store, value) {
   return putBlob(store, textEncoder.encode(JSON.stringify(value)));
 }
+function isInlineBase64(value) {
+  const compact = value.replace(/\s+/g, "");
+  return compact.length > 0 && compact.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(compact);
+}
 function normalizeText(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) return content.map(normalizeText).filter(Boolean).join("");
   if (!content || typeof content !== "object") return "";
-  if (content.type === "image") return "[image attachment]";
+  if (content.type === "image") {
+    const mimeType = String(content.mimeType ?? content.mediaType ?? content.source?.media_type ?? "image/png");
+    const raw = content.data ?? content.source?.data ?? content.source?.url ?? null;
+    if (raw instanceof Uint8Array || Buffer.isBuffer(raw)) {
+      return `[Image ${mimeType}] data:${mimeType};base64,${Buffer.from(raw).toString("base64")}`;
+    }
+    if (typeof raw === "string" && raw.length > 0) {
+      if (/^https?:\/\//i.test(raw)) return `[Image ${mimeType}] ${raw}`;
+      if (raw.startsWith("data:")) return `[Image ${mimeType}] ${raw}`;
+      if (!isInlineBase64(raw)) return "[image attachment without inline data]";
+      return `[Image ${mimeType}] data:${mimeType};base64,${raw}`;
+    }
+    return "[image attachment without inline data]";
+  }
   if (content.type === "tool-result" || content.type === "tool_result") {
     return `[Tool Result]
 ${normalizeText(content.content ?? content.output ?? content.result ?? content.text)}`;
@@ -7143,11 +9032,11 @@ function normalizedMessages(messages) {
     content: normalizeText(message?.content ?? message?.text).trim()
   })).filter((message) => message.content.length > 0);
 }
-function encodeUserMessage(text2, messageId, mode = 1) {
-  return concatBytes([stringField(1, text2), stringField(2, messageId), varintField(4, mode)]);
+function encodeUserMessage(text3, messageId, mode = 1) {
+  return concatBytes([stringField(1, text3), stringField(2, messageId), varintField(4, mode)]);
 }
-function encodeAssistantStep(text2) {
-  const assistantMessage = stringField(1, text2);
+function encodeAssistantStep(text3) {
+  const assistantMessage = stringField(1, text3);
   const conversationStep = bytesField(1, assistantMessage);
   return conversationStep;
 }
@@ -7293,19 +9182,107 @@ function cursorFrameMetadata(message, flags = null) {
   };
 }
 function decodeCursorConnectTrailer(payload) {
-  const text2 = textDecoder.decode(payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? [])).trim();
-  if (!text2) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(text2);
-  } catch {
-    return { code: "CURSOR_CONNECT_ERROR", message: text2.slice(0, 500) };
+  const bytes = payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? []);
+  const text3 = textDecoder.decode(bytes).trim();
+  if (!text3) return null;
+  if (text3.startsWith("{")) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(text3);
+    } catch {
+      parsed = null;
+    }
+    if (parsed && typeof parsed === "object") {
+      const error = parsed.error && typeof parsed.error === "object" ? parsed.error : null;
+      const rawCode = error ? error.code : parsed.status ?? parsed.code;
+      const label = rawCode === void 0 || rawCode === null || !String(rawCode).trim() ? null : grpcStatusLabel(rawCode);
+      if (!label) {
+        if (!error) return null;
+        const fallbackMessage = typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 500) : "CURSOR_CONNECT_ERROR";
+        return { code: "CURSOR_CONNECT_ERROR", message: fallbackMessage };
+      }
+      const messageSource = error?.message ?? parsed.message;
+      return {
+        code: label,
+        message: typeof messageSource === "string" && messageSource.trim() ? messageSource.trim().slice(0, 500) : label
+      };
+    }
   }
-  const error = parsed?.error && typeof parsed.error === "object" ? parsed.error : null;
-  if (!error) return null;
-  const code = typeof error.code === "string" && error.code.trim() ? error.code.trim() : "CURSOR_CONNECT_ERROR";
-  const message = typeof error.message === "string" && error.message.trim() ? error.message.trim().slice(0, 500) : code;
-  return { code, message };
+  const status = decodeGoogleRpcStatus(bytes);
+  if (status) {
+    const code = grpcStatusLabel(status.code);
+    return {
+      code,
+      message: status.message.trim() ? status.message.trim().slice(0, 500) : code
+    };
+  }
+  return { code: "CURSOR_CONNECT_ERROR", message: text3.slice(0, 500) };
+}
+var GRPC_STATUS_NAMES = /* @__PURE__ */ new Map([
+  [0, "OK"],
+  [1, "CANCELLED"],
+  [2, "UNKNOWN"],
+  [3, "INVALID_ARGUMENT"],
+  [4, "DEADLINE_EXCEEDED"],
+  [5, "NOT_FOUND"],
+  [6, "ALREADY_EXISTS"],
+  [7, "PERMISSION_DENIED"],
+  [8, "RESOURCE_EXHAUSTED"],
+  [9, "FAILED_PRECONDITION"],
+  [10, "ABORTED"],
+  [11, "OUT_OF_RANGE"],
+  [12, "UNIMPLEMENTED"],
+  [13, "INTERNAL"],
+  [14, "UNAVAILABLE"],
+  [15, "DATA_LOSS"],
+  [16, "UNAUTHENTICATED"]
+]);
+function grpcStatusLabel(value) {
+  const text3 = String(value ?? "").trim();
+  if (/^\d+$/.test(text3)) return GRPC_STATUS_NAMES.get(Number(text3)) ?? text3;
+  return text3;
+}
+function cursorGrpcStatusFlags(code) {
+  const label = grpcStatusLabel(code).toUpperCase();
+  const flags = {};
+  if (label === "UNAUTHENTICATED") flags.authExpired = true;
+  else if (label === "PERMISSION_DENIED") flags.authForbidden = true;
+  if (label === "RESOURCE_EXHAUSTED") flags.quotaExhausted = true;
+  return flags;
+}
+function decodeGoogleRpcStatus(payload) {
+  const bytes = payload instanceof Uint8Array ? payload : Uint8Array.from(payload ?? []);
+  let offset = 0;
+  let code = null;
+  let message = "";
+  while (offset < bytes.length) {
+    const key = readVarint(bytes, offset);
+    if (!key) return null;
+    offset = key.offset;
+    const field = Number(key.value >> 3n);
+    const wireType = Number(key.value & 7n);
+    if (field === 1 && wireType === 0) {
+      const value = readVarint(bytes, offset);
+      if (!value) return null;
+      const numeric = Number(BigInt.asIntN(32, value.value));
+      if (!Number.isInteger(numeric) || numeric < 0 || numeric > 16) return null;
+      code = numeric;
+      offset = value.offset;
+      continue;
+    }
+    if ((field === 2 || field === 3) && wireType === 2) {
+      const length = readVarint(bytes, offset);
+      if (!length) return null;
+      const end = length.offset + Number(length.value);
+      if (end > bytes.length) return null;
+      if (field === 2) message = textDecoder.decode(bytes.slice(length.offset, end));
+      offset = end;
+      continue;
+    }
+    return null;
+  }
+  if (code === null && message.length === 0) return null;
+  return { code: code ?? 2, message };
 }
 function decodeCursorText(message) {
   try {
@@ -7350,6 +9327,68 @@ function encodeKvResponse(request, blobs) {
 function decodeCursorKvRequest(message) {
   return decodeKvRequest(message);
 }
+var CURSOR_TOOL_CALL_UPDATE_FIELDS = /* @__PURE__ */ new Map([
+  [2, "tool_call_started"],
+  [3, "tool_call_completed"],
+  [7, "partial_tool_call"],
+  [15, "tool_call_delta"]
+]);
+var CURSOR_TOOL_KINDS = /* @__PURE__ */ new Map([
+  [1, "shell"],
+  [3, "delete"],
+  [4, "glob"],
+  [5, "grep"],
+  [8, "read"],
+  [9, "update-todos"],
+  [10, "read-todos"],
+  [12, "edit"],
+  [13, "ls"],
+  [14, "read-lints"],
+  [15, "mcp"],
+  [16, "sem-search"],
+  [17, "create-plan"],
+  [18, "web-search"],
+  [19, "task"],
+  [20, "list-mcp-resources"],
+  [21, "read-mcp-resource"],
+  [22, "apply-agent-diff"],
+  [23, "ask-question"],
+  [24, "fetch"],
+  [25, "switch-mode"],
+  [26, "exa-search"],
+  [27, "exa-fetch"],
+  [28, "generate-image"],
+  [29, "record-screen"],
+  [30, "computer-use"],
+  [31, "write-shell-stdin"],
+  [32, "reflect"],
+  [33, "setup-vm-environment"],
+  [34, "truncated-tool-call"]
+]);
+function decodeCursorToolMessage(message) {
+  try {
+    const interaction = firstBytes(decodeProtoFields(message), 1);
+    if (!interaction) return null;
+    const updates = decodeProtoFields(interaction).filter((field) => field.wireType === 2 && CURSOR_TOOL_CALL_UPDATE_FIELDS.has(field.field));
+    if (updates.length === 0) return null;
+    let callId = "";
+    let toolKind = null;
+    for (const update of updates.slice(0, 8)) {
+      const fields = decodeProtoFields(update.value);
+      callId = callId || firstString6(fields, 1);
+      const toolCall = firstBytes(fields, 2);
+      const kindField = toolCall ? decodeProtoFields(toolCall).find((field) => CURSOR_TOOL_KINDS.has(field.field)) : null;
+      if (kindField) toolKind = CURSOR_TOOL_KINDS.get(kindField.field);
+    }
+    return {
+      updates: updates.map((update) => CURSOR_TOOL_CALL_UPDATE_FIELDS.get(update.field)),
+      ...callId ? { callId } : {},
+      ...toolKind ? { toolKind } : {}
+    };
+  } catch {
+    return null;
+  }
+}
 var cursorNativeProtocolConstants = Object.freeze({
   endpoint: "https://agent.api5.cursor.sh/agent.v1.AgentService/Run",
   providerIdentifier: "opencodex-responses"
@@ -7358,6 +9397,9 @@ var cursorNativeProtocolConstants = Object.freeze({
 // modules/provider-cursor/src/native-transport.mjs
 var PROVIDER_ID8 = "cursor";
 var DEFAULT_ENDPOINT4 = cursorNativeProtocolConstants.endpoint;
+var DEFAULT_TOTAL_TIMEOUT_MS = 12e4;
+var DEFAULT_IDLE_TIMEOUT_MS = 3e4;
+var DEFAULT_CURSOR_CLIENT_VERSION = "cli-2025.09.17-agent-host";
 var CURSOR_SESSION_KEYS = [
   "cursorAuth/accessToken",
   "cursorAuth/refreshToken",
@@ -7403,7 +9445,7 @@ function createAsyncQueue() {
 function readCursorDesktopSession({
   credential,
   env = process.env,
-  home = homedir8()
+  home = homedir9()
 } = {}) {
   const stored = firstString7(credential?.access, credential?.token);
   if (stored) {
@@ -7448,7 +9490,7 @@ function resolveCursorAccessToken(options = {}) {
   return session ? { token: session.token, kind: session.kind, ...session.expiresAt ? { expiresAt: session.expiresAt } : {} } : null;
 }
 function cursorHeaders(endpoint2, token, requestId, env) {
-  const clientVersion = env.DOCKYARD_CURSOR_CLIENT_VERSION ?? `cli-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10).replace(/-/g, ".")}-agent-host`;
+  const clientVersion = env.DOCKYARD_CURSOR_CLIENT_VERSION || DEFAULT_CURSOR_CLIENT_VERSION;
   const clientKey = randomBytes2(32).toString("hex");
   return {
     ":method": "POST",
@@ -7469,7 +9511,15 @@ function cursorHeaders(endpoint2, token, requestId, env) {
 function cursorStatusError(status) {
   return nativeProviderError(PROVIDER_ID8, `Cursor AgentService returned HTTP ${status}`, { status });
 }
-function streamCursor({ endpoint: endpoint2, token, request, context, http2Module = http2 }) {
+function streamCursor({
+  endpoint: endpoint2,
+  token,
+  request,
+  context,
+  http2Module = http2,
+  timeoutMs = DEFAULT_TOTAL_TIMEOUT_MS,
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS
+}) {
   return (async function* cursorStream() {
     const requestId = firstString7(request.requestId, context.requestId, randomUUID8());
     const conversationId = firstString7(request.sessionId, context.sessionId, requestId);
@@ -7508,10 +9558,26 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
     let completed = false;
     let cleaned = false;
     let heartbeat;
+    let totalTimer;
+    let idleTimer;
+    const timeoutFailure = (message, code) => {
+      const error = nativeProviderError(PROVIDER_ID8, message, { code });
+      error.code = code;
+      queue.fail(error);
+      stream?.close(http2Module.constants?.NGHTTP2_CANCEL);
+      session.close();
+    };
+    const armIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => timeoutFailure("Cursor AgentService response idle timeout", "ETIMEDOUT"), idleTimeoutMs);
+      idleTimer.unref?.();
+    };
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       clearInterval(heartbeat);
+      clearTimeout(totalTimer);
+      clearTimeout(idleTimer);
       context.signal?.removeEventListener?.("abort", onAbort);
       if (stream && !stream.destroyed && !stream.closed) stream.close();
       if (!session.closed && !session.destroyed) session.close();
@@ -7523,14 +9589,21 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
       stream?.close(http2Module.constants?.NGHTTP2_CANCEL);
       session.close();
     };
+    totalTimer = setTimeout(() => timeoutFailure("Cursor AgentService total request timeout", "ETIMEDOUT"), timeoutMs);
+    totalTimer.unref?.();
+    armIdleTimer();
+    context.signal?.addEventListener?.("abort", onAbort, { once: true });
+    if (context.signal?.aborted) onAbort();
     session.once("error", (error) => queue.fail(error));
     try {
       stream = session.request(cursorHeaders(url, token, requestId, context.env ?? process.env));
       stream.once("response", (headers) => {
+        armIdleTimer();
         responseStatus = Number(headers[":status"] ?? 0);
         if (responseStatus >= 400) queue.fail(cursorStatusError(responseStatus));
       });
       stream.on("data", (chunk) => {
+        armIdleTimer();
         const incoming = new Uint8Array(chunk);
         const merged = new Uint8Array(responseBuffer.byteLength + incoming.byteLength);
         merged.set(responseBuffer);
@@ -7541,10 +9614,12 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
           if ((frame.flags & 2) !== 0) {
             const trailer = decodeCursorConnectTrailer(frame.payload);
             if (trailer) {
-              queue.fail(nativeProviderError(PROVIDER_ID8, trailer.message, {
+              const error = nativeProviderError(PROVIDER_ID8, trailer.message, {
                 code: trailer.code,
                 body: { code: trailer.code, message: trailer.message }
-              }));
+              });
+              Object.assign(error, cursorGrpcStatusFlags(trailer.code));
+              queue.fail(error);
             } else {
               completed = true;
               queue.push({ type: "complete" });
@@ -7565,10 +9640,18 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
             }
             continue;
           }
-          const text3 = decodeCursorText(frame.payload);
+          const toolCall = decodeCursorToolMessage(frame.payload);
+          if (toolCall) {
+            queue.fail(protocolError(
+              `Cursor AgentService requested an unsupported native tool call${toolCall.toolKind ? ` (${toolCall.toolKind})` : ""}${toolCall.callId ? ` [${toolCall.callId}]` : ""}; DSH's Cursor transport does not execute server-side tools`,
+              "CURSOR_UNSUPPORTED_TOOL_CALL"
+            ));
+            continue;
+          }
+          const text4 = decodeCursorText(frame.payload);
           const turnComplete = cursorTurnComplete(frame.payload);
-          if (text3) queue.push({ type: "text", text: text3 });
-          if (!text3) responseDiagnostics.push(cursorFrameMetadata(frame.payload, frame.flags));
+          if (text4) queue.push({ type: "text", text: text4 });
+          if (!text4) responseDiagnostics.push(cursorFrameMetadata(frame.payload, frame.flags));
           if (turnComplete) {
             completed = true;
             queue.push({ type: "complete" });
@@ -7595,14 +9678,13 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
         } catch {
         }
       }, 5e3);
-      context.signal?.addEventListener?.("abort", onAbort, { once: true });
-      let text2 = "";
+      let text3 = "";
       let failed = false;
       yield { type: "block-start", index: 0, blockType: "text" };
       try {
         for await (const item of queue) {
           if (item.type === "text") {
-            text2 += item.text;
+            text3 += item.text;
             yield { type: "text-delta", index: 0, text: item.text };
           } else if (item.type === "complete") {
             completed = true;
@@ -7620,10 +9702,10 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
         if (!completed) {
           throw protocolError("Cursor AgentService ended before completing the turn", "CURSOR_INCOMPLETE_RESPONSE");
         }
-        if (text2.trim().length === 0) {
+        if (text3.trim().length === 0) {
           throw protocolError("Cursor AgentService completed without assistant text", "CURSOR_EMPTY_RESPONSE");
         }
-        yield { type: "block-end", index: 0, block: { type: "text", text: text2 } };
+        yield { type: "block-end", index: 0, block: { type: "text", text: text3 } };
         yield { type: "finish", reason: { kind: "stop" } };
       }
     } catch (error) {
@@ -7635,9 +9717,11 @@ function streamCursor({ endpoint: endpoint2, token, request, context, http2Modul
 function createCursorNativeExecutor({
   endpoint: endpoint2 = process.env.DOCKYARD_CURSOR_ENDPOINT || DEFAULT_ENDPOINT4,
   env = process.env,
-  home = homedir8(),
+  home = homedir9(),
   tokenResolver = resolveCursorAccessToken,
-  http2Module = http2
+  http2Module = http2,
+  timeoutMs = Number(process.env.DOCKYARD_CURSOR_TIMEOUT_MS) || DEFAULT_TOTAL_TIMEOUT_MS,
+  idleTimeoutMs = Number(process.env.DOCKYARD_CURSOR_IDLE_TIMEOUT_MS) || DEFAULT_IDLE_TIMEOUT_MS
 } = {}) {
   const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID8 });
   const executor = async ({ request = {}, invocation, context = {} } = {}) => {
@@ -7662,14 +9746,25 @@ function createCursorNativeExecutor({
         throw error;
       }
     }
-    return streamCursor({ endpoint: safeEndpoint, token: auth.token, request, context, http2Module });
+    return streamCursor({
+      endpoint: safeEndpoint,
+      token: auth.token,
+      request,
+      context,
+      http2Module,
+      timeoutMs,
+      idleTimeoutMs
+    });
   };
   executor.nativeTransport = "cursor-connect-agent-service";
   return executor;
 }
 var cursorNativeTransportConstants = Object.freeze({
   providerId: PROVIDER_ID8,
-  endpoint: DEFAULT_ENDPOINT4
+  endpoint: DEFAULT_ENDPOINT4,
+  clientVersion: DEFAULT_CURSOR_CLIENT_VERSION,
+  totalTimeoutMs: DEFAULT_TOTAL_TIMEOUT_MS,
+  idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS
 });
 
 // modules/provider-cursor/src/driver.mjs
@@ -7733,8 +9828,8 @@ function parseCursorAuthStatus(output) {
     parseTextEmail(output)
   );
   const explicitLoggedIn = statusValue(raw, "loggedIn", "authenticated", "isAuthenticated");
-  const text2 = String(output);
-  const loggedIn = typeof explicitLoggedIn === "boolean" ? explicitLoggedIn : !/not authenticated|not logged in|unauthenticated|please login/i.test(text2) && /authenticated|logged in|account|endpoint/i.test(text2);
+  const text3 = String(output);
+  const loggedIn = typeof explicitLoggedIn === "boolean" ? explicitLoggedIn : !/not authenticated|not logged in|unauthenticated|please login/i.test(text3) && /authenticated|logged in|account|endpoint/i.test(text3);
   const accountId = firstString8(
     statusValue(raw, "accountId", "account_id", "userId", "user_id", "user.id", "account.id"),
     email,
@@ -7806,7 +9901,7 @@ function candidateFromStatus2(status, {
 async function resolveCursorBrowserEmail(raw, access2, {
   fetchImpl = null,
   apiBaseUrl = "https://api2.cursor.sh",
-  home = homedir9(),
+  home = homedir10(),
   signal
 } = {}) {
   const payload = decodeJwtPayload(access2) ?? {};
@@ -7902,6 +9997,7 @@ function statusFromDesktopSession(session) {
 }
 function candidateFromDesktopSession(session) {
   const accountId = session.accountId ?? desktopSessionAccountId(session);
+  const expiresAt = cursorTokenExpiresAt({}, decodeJwtPayload(session.token) ?? {});
   const candidate2 = {
     candidateId: `cursor:desktop:${hash5(accountId).slice(0, 20)}`,
     providerId: PROVIDER_ID9,
@@ -7911,7 +10007,7 @@ function candidateFromDesktopSession(session) {
     email: session.email,
     subscription: { plan: session.plan, status: "active", expiresAt: null },
     refresh: {
-      accessTokenExpiresAt: null,
+      accessTokenExpiresAt: expiresAt,
       nextRefreshAt: null,
       lastRefreshedAt: null,
       refreshable: Boolean(session.refreshToken)
@@ -7937,7 +10033,8 @@ function candidateFromDesktopSession(session) {
       providerId: PROVIDER_ID9,
       accountId,
       access: session.token,
-      ...session.refreshToken ? { refresh: session.refreshToken } : {}
+      ...session.refreshToken ? { refresh: session.refreshToken } : {},
+      ...expiresAt ? { expiresAt } : {}
     },
     enumerable: false
   });
@@ -7984,6 +10081,9 @@ function normalizeModel(value) {
     ...value.supportsThinking || value.supports_thinking ? { reasoning: { supported: true } } : {}
   };
 }
+function browserCatalogAccount(accounts) {
+  return (Array.isArray(accounts) ? accounts : []).find((entry) => entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER || entry?.resources?.authSource === "official_cursor_browser_oauth");
+}
 function createCursorCatalogLoader({
   cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
   env = process.env,
@@ -7991,11 +10091,16 @@ function createCursorCatalogLoader({
   apiBaseUrl = process.env.CURSOR_API_BASE_URL || "https://api2.cursor.sh",
   fetchImpl = fetch
 } = {}) {
-  let cached = null;
-  let pending = null;
+  const cachedBuckets = /* @__PURE__ */ new Map();
+  const pendingBuckets = /* @__PURE__ */ new Map();
   const normalizedApiBaseUrl = apiBaseUrl.replace(/\/+$/, "");
+  function catalogBucketKey(accounts) {
+    const account = browserCatalogAccount(accounts);
+    const identity = account?.auth?.credentialRef ?? account?.credentialRef ?? account?.accountId;
+    return identity ? String(identity) : "shared";
+  }
   async function loadBrowserCatalog({ accounts, secretStore, signal }) {
-    const account = (Array.isArray(accounts) ? accounts : []).find((entry) => entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER || entry?.resources?.authSource === "official_cursor_browser_oauth");
+    const account = browserCatalogAccount(accounts);
     const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
     if (!account || !credentialRef || typeof secretStore?.read !== "function") return null;
     const credential = await secretStore.read(credentialRef);
@@ -8027,15 +10132,18 @@ function createCursorCatalogLoader({
     };
   }
   return async function loadCatalog({ force = false, accounts = [], secretStore, signal } = {}) {
-    const hasBrowserAccount = (Array.isArray(accounts) ? accounts : []).some((entry) => entry?.resources?.sessionSource === OFFICIAL_SESSION_SOURCE_KINDS.BROWSER || entry?.resources?.authSource === "official_cursor_browser_oauth");
+    const bucketKey = catalogBucketKey(accounts);
+    const hasBrowserAccount = bucketKey !== "shared";
+    const cached = cachedBuckets.get(bucketKey);
     if (!force && cached && (hasBrowserAccount ? cached.source === "official_cursor_browser_oauth_api" : cached.source !== "official_cursor_browser_oauth_api")) return cached;
+    const pending = pendingBuckets.get(bucketKey);
     if (pending) return pending;
-    pending = (async () => {
+    const promise = (async () => {
       try {
         const browser = await loadBrowserCatalog({ accounts, secretStore, signal });
         if (browser) {
-          cached = browser;
-          return cached;
+          cachedBuckets.set(bucketKey, browser);
+          return browser;
         }
       } catch {
       }
@@ -8053,7 +10161,8 @@ function createCursorCatalogLoader({
           source: "official_cursor_cli_status",
           ...models.length ? {} : { diagnostics: ["Cursor \u5B98\u65B9 status \u6CA1\u6709\u8FD4\u56DE\u6A21\u578B\u76EE\u5F55"] }
         };
-        cached = models.length ? catalog : null;
+        if (models.length) cachedBuckets.set(bucketKey, catalog);
+        else cachedBuckets.delete(bucketKey);
         return catalog;
       } catch (error) {
         const desktop = readCursorDesktopSession({ env });
@@ -8062,20 +10171,21 @@ function createCursorCatalogLoader({
           source: error?.code === "ENOENT" ? desktop ? "cursor_desktop_app" : "cursor_cli_not_found" : "official_cursor_cli_status",
           diagnostics: [desktop ? "\u5DF2\u68C0\u6D4B\u5230 Cursor \u5B98\u65B9 OAuth\uFF1B\u5B98\u65B9\u6A21\u578B\u76EE\u5F55\u8BF7\u6C42\u672A\u8FD4\u56DE\u7ED3\u679C" : `\u65E0\u6CD5\u8BFB\u53D6 Cursor \u5B98\u65B9\u6A21\u578B\u76EE\u5F55\uFF1A${error.message}`]
         };
-        cached = null;
+        cachedBuckets.delete(bucketKey);
         return catalog;
       }
     })().finally(() => {
-      pending = null;
+      pendingBuckets.delete(bucketKey);
     });
-    return pending;
+    pendingBuckets.set(bucketKey, promise);
+    return promise;
   };
 }
 var CursorSubscriptionDriver = class {
   constructor({
     cliPath = process.env.DOCKYARD_CURSOR_CLI || "cursor-agent",
     env = process.env,
-    home = homedir9(),
+    home = homedir10(),
     commandRunner = runCliCommand,
     requestExecutor = null,
     catalogLoader = null,
@@ -8240,7 +10350,7 @@ var CursorSubscriptionDriver = class {
     }
   }
   #isBrowserAccount(account) {
-    return account?.resources?.authSource === "official_cursor_browser_oauth";
+    return account?.resources?.authSource === "official_cursor_browser_oauth" || account?.refresh?.refreshable === true;
   }
   async #refreshBrowserCredential(account, context = {}) {
     const credentialRef = account?.auth?.credentialRef ?? account?.credentialRef;
@@ -8417,6 +10527,17 @@ var CursorSubscriptionDriver = class {
     const now = context.now instanceof Date ? context.now : /* @__PURE__ */ new Date();
     const quotaSource = this.#isBrowserAccount(account) ? "official_cursor_browser_oauth" : "cursor_cli_status";
     const windows = recursiveQuotaWindows(status.raw, { source: quotaSource, now, prefix: "cursor" });
+    if (windows.length === 0) {
+      return {
+        quota: null,
+        subscription: { plan: status.plan, status: status.loggedIn ? "active" : null, expiresAt: null },
+        resources: {
+          quotaSource,
+          quotaAvailable: false,
+          quotaDiagnostic: this.#isBrowserAccount(account) ? "Cursor \u5B98\u65B9\u6D4F\u89C8\u5668\u4F1A\u8BDD\u672A\u8FD4\u56DE\u4EFB\u4F55\u5B9E\u65F6\u989D\u5EA6\u7A97\u53E3\uFF1B\u989D\u5EA6\u6570\u636E\u6682\u4E0D\u53EF\u7528\uFF08degraded\uFF09\uFF0C\u8BF7\u4EE5 Cursor \u5B98\u65B9 Dashboard \u4E3A\u51C6" : "Cursor \u5B98\u65B9 CLI status \u672A\u8FD4\u56DE\u4EFB\u4F55\u5B9E\u65F6\u989D\u5EA6\u7A97\u53E3\uFF1B\u989D\u5EA6\u6570\u636E\u6682\u4E0D\u53EF\u7528\uFF08degraded\uFF09\uFF0C\u8BF7\u4EE5 Cursor \u5B98\u65B9 Dashboard \u4E3A\u51C6"
+        }
+      };
+    }
     const primary = selectPrimaryQuotaWindow(windows);
     return {
       quota: {
@@ -8430,7 +10551,8 @@ var CursorSubscriptionDriver = class {
       },
       subscription: { plan: status.plan, status: status.loggedIn ? "active" : null, expiresAt: null },
       resources: {
-        quotaDiagnostic: windows.length ? null : this.#isBrowserAccount(account) ? "Cursor \u5B98\u65B9\u6D4F\u89C8\u5668\u4F1A\u8BDD\u672A\u8FD4\u56DE\u5B9E\u65F6\u8BA2\u9605\u989D\u5EA6\uFF1B\u8BE6\u7EC6 usage \u4ECD\u4EE5 Cursor \u5B98\u65B9 Dashboard \u4E3A\u51C6" : "Cursor \u5B98\u65B9 CLI status \u672A\u8FD4\u56DE\u5B9E\u65F6\u8BA2\u9605\u989D\u5EA6\uFF1B\u8BE6\u7EC6 usage \u4ECD\u4EE5 Cursor \u5B98\u65B9 Dashboard \u4E3A\u51C6"
+        quotaAvailable: true,
+        quotaDiagnostic: null
       }
     };
   }
@@ -8484,7 +10606,7 @@ var candidateSummarizers = /* @__PURE__ */ new Map([
   ["claude", summarizeClaudeCandidate],
   ["cursor", summarizeCursorCandidate]
 ]);
-var DEFAULT_REFRESH_TIMEOUT_MS = 15e3;
+var DEFAULT_REFRESH_TIMEOUT_MS = 3e4;
 function numericOption(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -8496,9 +10618,9 @@ function refreshTimeoutError(providerId, accountId, timeoutMs) {
   error.timeoutMs = timeoutMs;
   return error;
 }
-function reportPostRefreshHealth(pool, accountId) {
+function reportPostRefreshHealth(pool, accountId, { allowExpiredRecovery = false } = {}) {
   const account = pool.get(accountId);
-  if (!account || account.health?.status === ACCOUNT_HEALTH.EXPIRED) return;
+  if (!account || account.health?.status === ACCOUNT_HEALTH.EXPIRED && !allowExpiredRecovery) return;
   const remaining = account.quota?.remaining;
   if (typeof remaining === "number" && remaining <= 0) {
     pool.report(accountId, {
@@ -8528,6 +10650,68 @@ function withRefreshTimeout(task, { providerId, accountId, timeoutMs }) {
 function withRequestExecutor(providerId, driverOptions, requestExecutors = {}) {
   const executor = requestExecutors[providerId];
   return executor ? { ...driverOptions ?? {}, requestExecutor: executor } : driverOptions;
+}
+function jsonEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+function providerStorageSnapshot(entry) {
+  return {
+    policy: entry.pool.policy,
+    defaultAccountId: entry.pool.getDefaultAccountId(),
+    accounts: entry.pool.listForStorage()
+  };
+}
+function restorePoolSnapshot(pool, snapshot) {
+  const desired = new Map((snapshot.accounts ?? []).map((account) => [account.accountId, account]));
+  for (const account of pool.list()) {
+    if (!desired.has(account.accountId)) pool.remove(account.accountId);
+  }
+  for (const account of desired.values()) {
+    pool.upsert({ ...account, credentialRef: account.auth?.credentialRef }, { resetHealth: false });
+  }
+  pool.setPolicy(snapshot.policy);
+  pool.setDefaultAccount(snapshot.defaultAccountId ?? null);
+}
+async function deleteUncommittedCredentials(secretStore, beforeRefs, accounts) {
+  if (typeof secretStore?.delete !== "function") return;
+  const refs = new Set(accounts.map((account) => account?.auth?.credentialRef ?? account?.credentialRef).filter(Boolean));
+  for (const ref of refs) {
+    if (!beforeRefs.has(ref)) await secretStore.delete(ref).catch(() => {
+    });
+  }
+}
+function mergeProviderStorage(latestInput, current, baseline = {}) {
+  const latest = latestInput && typeof latestInput === "object" ? latestInput : {};
+  const merged = { ...latest };
+  if (current.policy !== baseline.policy) merged.policy = current.policy;
+  if ((current.defaultAccountId ?? null) !== (baseline.defaultAccountId ?? null)) {
+    merged.defaultAccountId = current.defaultAccountId ?? null;
+  }
+  const latestById = new Map((Array.isArray(latest.accounts) ? latest.accounts : []).filter((account) => account?.accountId).map((account) => [account.accountId, account]));
+  const currentById = new Map((Array.isArray(current.accounts) ? current.accounts : []).filter((account) => account?.accountId).map((account) => [account.accountId, account]));
+  const baselineById = new Map((Array.isArray(baseline.accounts) ? baseline.accounts : []).filter((account) => account?.accountId).map((account) => [account.accountId, account]));
+  for (const [accountId, currentAccount] of currentById) {
+    const baselineAccount = baselineById.get(accountId);
+    const latestAccount = latestById.get(accountId);
+    if (!baselineAccount) {
+      latestById.set(accountId, structuredClone(currentAccount));
+      continue;
+    }
+    if (!latestAccount) {
+      continue;
+    }
+    if (jsonEqual(currentAccount, baselineAccount)) continue;
+    const changedAccount = { ...latestAccount };
+    for (const [key, value] of Object.entries(currentAccount)) {
+      if (!jsonEqual(value, baselineAccount[key])) changedAccount[key] = structuredClone(value);
+    }
+    latestById.set(accountId, changedAccount);
+  }
+  for (const accountId of baselineById.keys()) {
+    if (!currentById.has(accountId)) latestById.delete(accountId);
+  }
+  merged.accounts = [...latestById.values()];
+  return merged;
 }
 function createDefaultProviderEntries(options = {}) {
   const requestExecutors = options.requestExecutors ?? {};
@@ -8613,7 +10797,12 @@ var DockyardRuntime = class {
   #candidates = /* @__PURE__ */ new Map();
   #refreshPromises = /* @__PURE__ */ new Map();
   #accountRefreshPromises = /* @__PURE__ */ new Map();
+  #stateBaselines = /* @__PURE__ */ new Map();
   #saveQueue = Promise.resolve();
+  // Per-provider import transactions. Import work is async (OAuth, network);
+  // without serialization two concurrent imports could roll each other back
+  // through stale pool snapshots.
+  #providerImportQueues = /* @__PURE__ */ new Map();
   #initialized = false;
   #initPromise = null;
   constructor({
@@ -8630,7 +10819,12 @@ var DockyardRuntime = class {
     this.runtime = runtime;
     this.stateStore = stateStore;
     this.secretStore = secretStore;
-    this.bridge = new DshInjectionBridge({ runtime, adapter: dshAdapter });
+    this.contextWindowOverrides = new ContextWindowOverrideStore({ stateStore });
+    this.bridge = new DshInjectionBridge({
+      runtime,
+      adapter: dshAdapter,
+      contextWindowOverrides: this.contextWindowOverrides
+    });
     this.providers = providers;
     this.refreshTimeoutMs = refreshTimeoutMs;
   }
@@ -8646,9 +10840,15 @@ var DockyardRuntime = class {
     if (this.#initPromise) return this.#initPromise;
     this.#initPromise = (async () => {
       const state = await this.stateStore.load();
+      await this.contextWindowOverrides.ready();
       for (const entry of this.providers) {
         const providerId = entry.module.manifest.id;
         const stored = state.pools?.[providerId] ?? {};
+        this.#stateBaselines.set(providerId, structuredClone({
+          policy: stored.policy ?? ACCOUNT_SELECTION_POLICY.ROUND_ROBIN,
+          defaultAccountId: stored.defaultAccountId ?? null,
+          accounts: Array.isArray(stored.accounts) ? stored.accounts : []
+        }));
         const pool = new AccountPool({
           providerId,
           policy: stored.policy ?? ACCOUNT_SELECTION_POLICY.ROUND_ROBIN
@@ -8762,14 +10962,25 @@ var DockyardRuntime = class {
     const entry = this.#entry(providerId);
     const candidate2 = this.#candidates.get(providerId)?.get(candidateId);
     if (!candidate2) throw new Error("Candidate is missing; scan local OAuth states again");
-    const rawAccount = await entry.module.importAccount(candidate2, providerContext(this));
-    entry.pool.upsert(rawAccount, { resetHealth: true });
-    await this.#saveState([providerId]);
-    return {
-      account: entry.pool.get(rawAccount.accountId),
-      diagnostics: [],
-      needsRefresh: true
-    };
+    return this.#enqueueProviderImport(providerId, async () => {
+      const before = providerStorageSnapshot(entry);
+      const beforeRefs = new Set(before.accounts.map((account) => account?.auth?.credentialRef).filter(Boolean));
+      let rawAccount;
+      try {
+        rawAccount = await entry.module.importAccount(candidate2, providerContext(this));
+        entry.pool.upsert(rawAccount, { resetHealth: true });
+        await this.#saveState([providerId]);
+      } catch (error) {
+        restorePoolSnapshot(entry.pool, before);
+        await deleteUncommittedCredentials(this.secretStore, beforeRefs, rawAccount ? [rawAccount] : []);
+        throw error;
+      }
+      return {
+        account: entry.pool.get(rawAccount.accountId),
+        diagnostics: [],
+        needsRefresh: true
+      };
+    });
   }
   async importSource(providerId, source) {
     await this.init();
@@ -8777,15 +10988,27 @@ var DockyardRuntime = class {
     if (typeof entry.module.importSource !== "function") {
       throw new Error(`Provider ${providerId} does not support OAuth source import`);
     }
-    const imported = await entry.module.importSource(source, providerContext(this));
-    const rawAccounts = Array.isArray(imported) ? imported : Array.isArray(imported?.accounts) ? imported.accounts : [imported];
-    const accounts = rawAccounts.filter((account) => account?.accountId).map((account) => {
-      entry.pool.upsert(account, { resetHealth: true });
-      return entry.pool.get(account.accountId);
+    return this.#enqueueProviderImport(providerId, async () => {
+      const before = providerStorageSnapshot(entry);
+      const beforeRefs = new Set(before.accounts.map((account) => account?.auth?.credentialRef).filter(Boolean));
+      let rawAccounts = [];
+      try {
+        const imported = await entry.module.importSource(source, providerContext(this));
+        rawAccounts = Array.isArray(imported) ? imported : Array.isArray(imported?.accounts) ? imported.accounts : [imported];
+        const importable = rawAccounts.filter((account) => account?.accountId);
+        if (importable.length === 0) throw new Error("OAuth source did not contain an importable account");
+        for (const account of importable) entry.pool.upsert(account, { resetHealth: true });
+        await this.#saveState([providerId]);
+        return {
+          accounts: importable.map((account) => entry.pool.get(account.accountId)),
+          diagnostics: []
+        };
+      } catch (error) {
+        restorePoolSnapshot(entry.pool, before);
+        await deleteUncommittedCredentials(this.secretStore, beforeRefs, rawAccounts);
+        throw error;
+      }
     });
-    if (accounts.length === 0) throw new Error("OAuth source did not contain an importable account");
-    await this.#saveState([providerId]);
-    return { accounts, diagnostics: [] };
   }
   async startAuthorization(providerId) {
     await this.init();
@@ -8816,7 +11039,7 @@ var DockyardRuntime = class {
     }));
   }
   async refreshAccount(providerId, accountId, { force = false, tolerateFailure = false } = {}) {
-    const key = `${providerId}\0${accountId}`;
+    const key = `${providerId}\0${accountId}\0${force ? "force" : "auto"}\0${tolerateFailure ? "lenient" : "strict"}`;
     const existing = this.#accountRefreshPromises.get(key);
     if (existing) return existing;
     const promise = (async () => {
@@ -8855,6 +11078,7 @@ var DockyardRuntime = class {
         providerAccount2(entry.pool, accountId),
         providerContext(this, { force, signal })
       );
+      if (signal?.aborted) throw signal.reason ?? refreshTimeoutError(providerId, accountId, this.refreshTimeoutMs);
       this.#applyPatch(entry.pool, accountId, refresh);
     } catch (error) {
       if (signal?.aborted) throw error;
@@ -8873,7 +11097,9 @@ var DockyardRuntime = class {
     }
     try {
       if (refresh && Object.hasOwn(refresh, "quota")) {
-        reportPostRefreshHealth(entry.pool, accountId);
+        reportPostRefreshHealth(entry.pool, accountId, {
+          allowExpiredRecovery: refresh.resources?.quotaSource === "antigravity_native"
+        });
         await this.#saveState([providerId]);
         return { account: entry.pool.get(accountId), diagnostics };
       }
@@ -8881,8 +11107,11 @@ var DockyardRuntime = class {
         providerAccount2(entry.pool, accountId),
         providerContext(this, { signal })
       );
+      if (signal?.aborted) throw signal.reason ?? refreshTimeoutError(providerId, accountId, this.refreshTimeoutMs);
       this.#applyPatch(entry.pool, accountId, quota);
-      reportPostRefreshHealth(entry.pool, accountId);
+      reportPostRefreshHealth(entry.pool, accountId, {
+        allowExpiredRecovery: quota.resources?.quotaSource === "antigravity_native"
+      });
     } catch (error) {
       if (signal?.aborted) throw error;
       diagnostics.push(`\u5237\u65B0\u5B9E\u65F6\u989D\u5EA6\u5931\u8D25\uFF1A${redactError(error)}`);
@@ -8962,15 +11191,24 @@ var DockyardRuntime = class {
       diagnostics
     };
   }
-  async getCatalog(providerId) {
+  async getContextWindowOverride(input) {
+    await this.init();
+    return this.contextWindowOverrides.get(input);
+  }
+  async setContextWindowOverride(input, value) {
+    await this.init();
+    return this.contextWindowOverrides.set(input, value);
+  }
+  async getCatalog(providerId, context = {}) {
     await this.init();
     const entry = this.#entry(providerId);
     const accounts = entry.pool.list().map((account) => providerAccount2(entry.pool, account.accountId));
-    return entry.module.getCatalog(providerContext(this, { accounts }));
+    return entry.module.getCatalog(providerContext(this, { ...context, accounts }));
   }
   async invoke(providerId, request, context = {}) {
     await this.init();
     const route = this.bridge.getRoute(providerId);
+    if (!route) throw new Error(`Unknown Dockyard provider route: ${providerId}`);
     try {
       return await route.invoke(request, providerContext(this, context));
     } finally {
@@ -9022,9 +11260,34 @@ var DockyardRuntime = class {
   async #persistAuthorizationResult(entry, providerId, result) {
     if (result?.status !== "completed") return result;
     const rawAccounts = Array.isArray(result.accounts) ? result.accounts : result.account ? [result.account] : [];
-    const accounts = await this.#storeImportedAccounts(entry, rawAccounts);
-    await this.#saveState([providerId]);
-    return { ...result, accounts };
+    return this.#enqueueProviderImport(providerId, async () => {
+      const before = providerStorageSnapshot(entry);
+      const beforeRefs = new Set(before.accounts.map((account) => account?.auth?.credentialRef).filter(Boolean));
+      let accounts = [];
+      try {
+        accounts = await this.#storeImportedAccounts(entry, rawAccounts);
+        await this.#saveState([providerId]);
+      } catch (error) {
+        restorePoolSnapshot(entry.pool, before);
+        await deleteUncommittedCredentials(this.secretStore, beforeRefs, rawAccounts.filter((value) => value?.accountId));
+        throw error;
+      }
+      return { ...result, accounts };
+    });
+  }
+  /**
+   * Serialize per-provider import transactions (candidate/source imports and
+   * completed OAuth authorizations). Each task takes its pool snapshot inside
+   * the critical section, so a failure rolls back against the newest state
+   * instead of resurrecting stale snapshots over concurrent successes.
+   */
+  #enqueueProviderImport(providerId, task) {
+    const previous = this.#providerImportQueues.get(providerId) ?? Promise.resolve();
+    const run = previous.then(task, task);
+    this.#providerImportQueues.set(providerId, run.then(() => {
+    }, () => {
+    }));
+    return run;
   }
   async #storeImportedAccounts(entry, rawAccounts) {
     const accounts = [];
@@ -9041,26 +11304,31 @@ var DockyardRuntime = class {
   async #saveState(changedProviderIds = null) {
     const write = async () => {
       const changed = changedProviderIds === null ? new Set(this.#entries.keys()) : new Set(changedProviderIds);
-      const merge = (latest2) => {
+      const merge = (latest) => {
         const pools = {
-          ...latest2?.pools && typeof latest2.pools === "object" ? latest2.pools : {}
+          ...latest?.pools && typeof latest.pools === "object" ? latest.pools : {}
         };
         for (const [providerId, entry] of this.#entries) {
           if (!changed.has(providerId) && Object.hasOwn(pools, providerId)) continue;
-          pools[providerId] = {
-            policy: entry.pool.policy,
-            defaultAccountId: entry.pool.getDefaultAccountId(),
-            accounts: entry.pool.listForStorage()
-          };
+          const current = providerStorageSnapshot(entry);
+          pools[providerId] = mergeProviderStorage(
+            pools[providerId],
+            current,
+            this.#stateBaselines.get(providerId)
+          );
         }
-        return { ...latest2, pools };
+        return { ...latest, pools };
       };
       if (typeof this.stateStore.update === "function") {
         await this.stateStore.update(merge);
-        return;
+      } else {
+        const latest = await this.stateStore.load();
+        await this.stateStore.save(merge(latest));
       }
-      const latest = await this.stateStore.load();
-      await this.stateStore.save(merge(latest));
+      for (const providerId of changed) {
+        const entry = this.#entries.get(providerId);
+        if (entry) this.#stateBaselines.set(providerId, structuredClone(providerStorageSnapshot(entry)));
+      }
     };
     const queued = this.#saveQueue.then(write, write);
     this.#saveQueue = queued.catch(() => {
@@ -9306,11 +11574,11 @@ function providerIdFor(runtime, input) {
 function commandTokens(rawInput) {
   return String(rawInput ?? "").trim().split(/\s+/).filter(Boolean);
 }
-function commandSuccess(text2) {
-  return { kind: "success", text: text2 };
+function commandSuccess(text3) {
+  return { kind: "success", text: text3 };
 }
-function commandError(text2) {
-  return { kind: "error", text: text2 };
+function commandError(text3) {
+  return { kind: "error", text: text3 };
 }
 function openDefaultBrowser(url) {
   if (!url) return;
@@ -9454,6 +11722,14 @@ var DockyardDshService = class {
     if (!providerId) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
     if (!accountId) throw new Error("\u79FB\u9664\u8D26\u53F7\u9700\u8981 accountId");
     return this.runtime.removeAccount(providerId, accountId);
+  }
+  async getContextWindowOverride(input) {
+    await this.ready;
+    return this.runtime.getContextWindowOverride(input);
+  }
+  async setContextWindowOverride(input, value) {
+    await this.ready;
+    return this.runtime.setContextWindowOverride(input, value);
   }
   async startAuthorization(providerInput, { openBrowser = true } = {}) {
     await this.ready;
@@ -9782,6 +12058,8 @@ function createDockyardCredentialStore(credentials, fallback = null) {
 }
 
 // packages/dsh-plugin/src/native-key-pool-host.mjs
+import { AsyncLocalStorage } from "node:async_hooks";
+import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
 import { join as join11 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
@@ -10069,12 +12347,67 @@ var POLICIES = /* @__PURE__ */ new Set(["manual", "round_robin", "failover"]);
 var PATCH_MARK = Symbol("dockyard-native-key-pool");
 var VISIBLE_STREAM_CHUNKS = /* @__PURE__ */ new Set(["text-delta", "reasoning-delta", "tool-call-delta"]);
 function retryableStreamError(error) {
+  if (!error || typeof error !== "object") return false;
+  const statuses = [error.status, error.upstreamStatus, error.upstreamCode].map((value) => Number(value)).filter((value) => Number.isFinite(value));
   return Boolean(
-    error?.rateLimited || error?.quotaExhausted || error?.authExpired || error?.authForbidden || [401, 403, 429].includes(Number(error?.status)) || [401, 403, 429].includes(Number(error?.upstreamStatus))
+    error.rateLimited || error.quotaExhausted || error.authExpired || error.authForbidden || statuses.some((status) => [401, 403, 429].includes(status))
   );
 }
-function text(value) {
+var NON_RETRYABLE_FAILURE_STATUSES = /* @__PURE__ */ new Set([400, 404, 405, 413, 422]);
+var NON_RETRYABLE_FAILURE_CODES = /INVALID_ARGUMENT|BAD_REQUEST|UNSUPPORTED|NOT_FOUND|CONTEXT_LENGTH|PAYLOAD/i;
+function nonRetryableStreamFailure(failure) {
+  if (!failure || typeof failure !== "object") return false;
+  const statuses = [failure.status, failure.upstreamStatus].map((value) => Number(value)).filter((value) => Number.isFinite(value));
+  if (statuses.some((status) => NON_RETRYABLE_FAILURE_STATUSES.has(status))) return true;
+  const codes = [failure.code, failure.upstreamCode].filter((value) => typeof value === "string");
+  return codes.some((code) => NON_RETRYABLE_FAILURE_CODES.test(code));
+}
+function text2(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+function applyContextWindowOverride(request, contextWindow) {
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0) return request;
+  const next = {
+    ...request,
+    modelContext: {
+      ...request?.modelContext ?? {},
+      contextWindow
+    }
+  };
+  if (isAgentLoopRequest(request)) markAgentLoopRequest(next);
+  return next;
+}
+function applyModelContextWindow(model, contextWindow) {
+  if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0 || !model || typeof model !== "object") return model;
+  return {
+    ...model,
+    context: {
+      ...model.context ?? {},
+      contextWindow
+    },
+    // dsh-llm-pi-ai keeps its internal resolved model in this flat shape.
+    // Preserve it as well so its stream-side overflow classification uses the
+    // same effective capacity as the durable DSH request/context event.
+    ...Number.isInteger(model.contextWindow) ? { contextWindow } : {}
+  };
+}
+async function* iterateWithContext(storage, state, next) {
+  const output = await storage.run(state, () => next());
+  const iterator = await storage.run(state, () => {
+    if (output?.[Symbol.asyncIterator]) return output[Symbol.asyncIterator]();
+    if (output?.[Symbol.iterator]) return output[Symbol.iterator]();
+    return null;
+  });
+  if (!iterator) return;
+  try {
+    while (true) {
+      const result = await storage.run(state, () => iterator.next());
+      if (result.done) return;
+      yield result.value;
+    }
+  } finally {
+    await storage.run(state, () => iterator.return?.());
+  }
 }
 function pathValue(source, path = []) {
   let current = source;
@@ -10085,10 +12418,10 @@ function pathValue(source, path = []) {
   return current;
 }
 function cleanRecord(raw) {
-  const keys = Array.isArray(raw?.keys) ? raw.keys.filter((entry) => text(entry?.ref)).map((entry) => ({
-    ref: text(entry.ref),
-    label: text(entry.label) ?? text(entry.ref),
-    createdAt: text(entry.createdAt)
+  const keys = Array.isArray(raw?.keys) ? raw.keys.filter((entry) => text2(entry?.ref)).map((entry) => ({
+    ref: text2(entry.ref),
+    label: text2(entry.label) ?? text2(entry.ref),
+    createdAt: text2(entry.createdAt)
   })) : [];
   return {
     policy: POLICIES.has(raw?.policy) ? raw.policy : "manual",
@@ -10113,7 +12446,7 @@ function nativeProfile(ctx, providerId) {
   const entry = llm?.listConfigurableProviders?.().find((candidate2) => candidate2.provider === providerId) ?? null;
   const profile = entry && settings?.get ? pathValue(settings.get(entry.settingsNs), entry.settingsPath) : null;
   if (!entry || !profile || typeof profile !== "object") return { entry, profile: null };
-  const native = entry.settingsNs === "llm-pi-ai" || text(profile.apiKeyEnv) !== null;
+  const native = entry.settingsNs === "llm-pi-ai" || text2(profile.apiKeyEnv) !== null;
   return { entry, profile: native ? profile : null };
 }
 var NativeKeyPoolHost = class {
@@ -10123,21 +12456,25 @@ var NativeKeyPoolHost = class {
   llm;
   logger;
   stateStore;
+  contextWindowOverrides;
   records = /* @__PURE__ */ new Map();
   cursors = /* @__PURE__ */ new Map();
   usageCache = /* @__PURE__ */ new Map();
   #failoverExcluded = /* @__PURE__ */ new Map();
   #lastResolvedKey = /* @__PURE__ */ new Map();
+  #requestContext = new AsyncLocalStorage();
+  #contextOverrideRequests = /* @__PURE__ */ new WeakSet();
   patches = [];
   offAdapters = null;
   offStreams = null;
   readyPromise;
-  constructor(ctx, { logger = null, stateStore = null } = {}) {
+  constructor(ctx, { logger = null, stateStore = null, contextWindowOverrides = null } = {}) {
     this.ctx = ctx;
     this.credentials = null;
     this.settings = null;
     this.llm = null;
     this.logger = logger ?? console;
+    this.contextWindowOverrides = contextWindowOverrides;
     this.stateStore = stateStore ?? new JsonStateStore({
       filePath: join11(defaultDockyardHome(), "native-key-pools.json")
     });
@@ -10179,6 +12516,7 @@ var NativeKeyPoolHost = class {
   }
   async start() {
     await this.readyPromise;
+    await this.contextWindowOverrides?.ready?.();
     this.resolveServices();
     this.patchAdapters();
     if (typeof this.ctx.on === "function") {
@@ -10194,14 +12532,34 @@ var NativeKeyPoolHost = class {
     this.offAdapters = null;
     this.offStreams = null;
     for (const patch of this.patches.splice(0)) {
-      if (patch.config.resolveApiKey?.[PATCH_MARK] === patch.wrapper) {
+      if (patch.config?.resolveApiKey?.[PATCH_MARK] === patch.wrapper) {
         patch.config.resolveApiKey = patch.original;
       }
+      if (patch.target?.[patch.method]?.[PATCH_MARK] === patch.wrapper) {
+        patch.target[patch.method] = patch.original;
+      }
     }
+  }
+  contextWindowForModel(providerId, modelId) {
+    if (!text2(providerId) || !text2(modelId) || !this.contextWindowOverrides?.hasAny?.(providerId, modelId)) return null;
+    const profile = nativeProfile(this.ctx, providerId).profile;
+    const keyRef = text2(profile?.apiKeyEnv);
+    return this.contextWindowOverrides.resolve(providerId, modelId, {
+      ...keyRef ? { keyRef } : {}
+    });
+  }
+  patchAdapterMethod(adapter, method, transform) {
+    const original = adapter?.[method];
+    if (typeof original !== "function" || original?.[PATCH_MARK]) return;
+    const wrapper = transform(original);
+    Object.defineProperty(wrapper, PATCH_MARK, { value: wrapper });
+    adapter[method] = wrapper;
+    this.patches.push({ target: adapter, method, original, wrapper });
   }
   patchAdapters() {
     const adapters = this.llm?.adapters;
     if (!adapters || typeof adapters.values !== "function") return;
+    const thisHost = this;
     for (const registration of adapters.values()) {
       const adapter = registration?.adapter;
       const config = adapter?.config;
@@ -10212,6 +12570,25 @@ var NativeKeyPoolHost = class {
       Object.defineProperty(wrapper, PATCH_MARK, { value: wrapper });
       config.resolveApiKey = wrapper;
       this.patches.push({ config, original, wrapper });
+      this.patchAdapterMethod(adapter, "modelOf", (modelOf) => function(...args) {
+        const model = modelOf.apply(this, args);
+        const contextWindow = thisHost.contextWindowForModel(args[1], args[2]);
+        return applyModelContextWindow(model, contextWindow);
+      });
+      this.patchAdapterMethod(adapter, "resolveModel", (resolveModel) => async function(...args) {
+        const model = await resolveModel.apply(this, args);
+        const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
+        return applyModelContextWindow(model, contextWindow);
+      });
+      this.patchAdapterMethod(adapter, "prepareCall", (prepareCall) => async function(...args) {
+        const prepared = await prepareCall.apply(this, args);
+        const contextWindow = thisHost.contextWindowForModel(args[0], args[1]);
+        if (!Number.isSafeInteger(contextWindow) || contextWindow <= 0 || !prepared || typeof prepared !== "object") return prepared;
+        return {
+          ...prepared,
+          model: applyModelContextWindow(prepared.model, contextWindow)
+        };
+      });
     }
   }
   record(providerId) {
@@ -10225,7 +12602,7 @@ var NativeKeyPoolHost = class {
   async syncProvider(providerId, profileHint = null) {
     await this.readyPromise;
     const profile = profileHint ?? nativeProfile(this.ctx, providerId).profile;
-    const activeRef = text(profile?.apiKeyEnv);
+    const activeRef = text2(profile?.apiKeyEnv);
     if (!activeRef) return { profile, activeRef: null, record: this.record(providerId) };
     const record = this.record(providerId);
     if (!record.keys.some((entry) => entry.ref === activeRef)) {
@@ -10235,14 +12612,14 @@ var NativeKeyPoolHost = class {
     return { profile, activeRef, record };
   }
   async register(providerId, ref, label = "") {
-    const keyRef = text(ref);
-    if (!text(providerId) || !keyRef) throw new Error("provider \u548C Key \u5F15\u7528\u4E0D\u80FD\u4E3A\u7A7A");
+    const keyRef = text2(ref);
+    if (!text2(providerId) || !keyRef) throw new Error("provider \u548C Key \u5F15\u7528\u4E0D\u80FD\u4E3A\u7A7A");
     const { record } = await this.syncProvider(providerId);
     const current = record.keys.find((entry) => entry.ref === keyRef);
     if (current) {
-      current.label = text(label) ?? current.label;
+      current.label = text2(label) ?? current.label;
     } else {
-      record.keys.push({ ref: keyRef, label: text(label) ?? `Key ${record.keys.length + 1}`, createdAt: (/* @__PURE__ */ new Date()).toISOString() });
+      record.keys.push({ ref: keyRef, label: text2(label) ?? `Key ${record.keys.length + 1}`, createdAt: (/* @__PURE__ */ new Date()).toISOString() });
     }
     await this.saveState();
     return this.status(providerId);
@@ -10258,8 +12635,6 @@ var NativeKeyPoolHost = class {
     const record = this.record(providerId);
     record.policy = policy;
     this.cursors.delete(providerId);
-    this.#failoverExcluded.delete(providerId);
-    this.#lastResolvedKey.delete(providerId);
     await this.saveState();
     return this.status(providerId);
   }
@@ -10324,17 +12699,51 @@ var NativeKeyPoolHost = class {
     this.cursors.set(providerId, (cursor + 1) % pool.length);
     return chosen;
   }
+  async prepareContextWindow(options, requestState) {
+    const providerId = text2(options?.provider);
+    const modelId = text2(options?.model);
+    if (!providerId || !modelId || !this.contextWindowOverrides?.hasAny?.(providerId, modelId)) return options;
+    const profile = nativeProfile(this.ctx, providerId).profile;
+    const synced = await this.syncProvider(providerId, profile);
+    let chosen = null;
+    if (synced.profile && synced.activeRef && typeof this.credentials?.resolve === "function") {
+      chosen = await this.pickKey(providerId, synced.record, synced.activeRef, {
+        excluded: [...requestState?.excluded ?? []]
+      });
+      if (chosen) requestState.preselectedKeyRef = chosen.ref;
+    }
+    const contextWindow = this.contextWindowOverrides.resolve(providerId, modelId, {
+      ...chosen?.ref ? { keyRef: chosen.ref } : {}
+    });
+    return applyContextWindowOverride(options, contextWindow);
+  }
+  async *streamWithContextWindow(options, next, requestState) {
+    requestState.preselectedKeyRef = null;
+    const prepared = await this.prepareContextWindow(options, requestState);
+    if (prepared === options || typeof this.llm?.stream !== "function") {
+      yield* next();
+      return;
+    }
+    this.#contextOverrideRequests.add(prepared);
+    try {
+      yield* iterateWithContext(this.#requestContext, requestState, () => this.llm.stream(prepared));
+    } finally {
+      this.#contextOverrideRequests.delete(prepared);
+    }
+  }
   async resolveApiKey(providerId, profile, original) {
     const synced = await this.syncProvider(providerId, profile);
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(providerId, profile);
     }
-    const excluded = [...this.#failoverExcluded.get(providerId) ?? []];
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
+    const requestState = this.#requestContext.getStore();
+    const excluded = [...requestState?.excluded ?? []];
+    const forced = text2(requestState?.preselectedKeyRef);
+    const chosen = forced ? synced.record.keys.find((entry) => entry.ref === forced) ?? await this.pickKey(providerId, synced.record, synced.activeRef, { excluded }) : await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(providerId, profile);
-    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
+    if (synced.record.policy === "failover" && requestState) requestState.lastResolvedKey = chosen.ref;
     const resolved = await this.credentials.resolve(chosen.ref);
-    const value = text(resolved?.value);
+    const value = text2(resolved?.value);
     if (value) return value;
     return original(providerId, profile);
   }
@@ -10344,12 +12753,14 @@ var NativeKeyPoolHost = class {
     if (!synced.profile || !synced.activeRef || synced.record.policy === "manual" || typeof this.credentials?.resolve !== "function") {
       return original(connection);
     }
-    const excluded = [...this.#failoverExcluded.get(providerId) ?? []];
-    const chosen = await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
+    const requestState = this.#requestContext.getStore();
+    const excluded = [...requestState?.excluded ?? []];
+    const forced = text2(requestState?.preselectedKeyRef);
+    const chosen = forced ? synced.record.keys.find((entry) => entry.ref === forced) ?? await this.pickKey(providerId, synced.record, synced.activeRef, { excluded }) : await this.pickKey(providerId, synced.record, synced.activeRef, { excluded });
     if (!chosen) return original(connection);
-    if (synced.record.policy === "failover") this.#lastResolvedKey.set(providerId, chosen.ref);
+    if (synced.record.policy === "failover" && requestState) requestState.lastResolvedKey = chosen.ref;
     const resolved = await this.credentials.resolve(chosen.ref);
-    const value = text(resolved?.value);
+    const value = text2(resolved?.value);
     if (value) return value;
     return original(connection);
   }
@@ -10359,26 +12770,31 @@ var NativeKeyPoolHost = class {
   }
   async *stream(options, next) {
     if (typeof next !== "function") return;
-    if (!this.shouldRetry(options?.provider)) {
+    if (this.#contextOverrideRequests.delete(options)) {
       yield* next();
+      return;
+    }
+    const requestState = { excluded: /* @__PURE__ */ new Set(), lastResolvedKey: null };
+    if (!this.shouldRetry(options?.provider)) {
+      yield* iterateWithContext(this.#requestContext, requestState, async () => {
+        return this.streamWithContextWindow(options, next, requestState);
+      });
       return;
     }
     const configured = await this.configuredKeys(this.records.get(options.provider));
     const attempts = Math.max(1, configured.filter((entry) => entry.configured).length);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      if (attempt > 0) {
-        const used = this.#lastResolvedKey.get(options.provider);
-        if (used) {
-          const excluded = this.#failoverExcluded.get(options.provider) ?? /* @__PURE__ */ new Set();
-          excluded.add(used);
-          this.#failoverExcluded.set(options.provider, excluded);
-        }
+      if (attempt > 0 && requestState.lastResolvedKey) {
+        requestState.excluded.add(requestState.lastResolvedKey);
       }
       const buffered = [];
       let emitted = false;
       let retryable = false;
       try {
-        for await (const chunk of next()) {
+        const output = iterateWithContext(this.#requestContext, requestState, async () => {
+          return this.streamWithContextWindow(options, next, requestState);
+        });
+        for await (const chunk of output) {
           if (VISIBLE_STREAM_CHUNKS.has(chunk?.type)) emitted = true;
           if (!emitted) buffered.push(chunk);
           else if (buffered.length > 0) {
@@ -10386,7 +12802,7 @@ var NativeKeyPoolHost = class {
             yield chunk;
           } else yield chunk;
           if (chunk?.type === "finish" && chunk.reason?.kind === "error") {
-            retryable = !emitted;
+            retryable = !emitted && !nonRetryableStreamFailure(chunk.reason.failure);
             if (retryable && attempt + 1 < attempts) break;
           }
         }
@@ -10396,12 +12812,8 @@ var NativeKeyPoolHost = class {
       }
       if (retryable && !emitted && attempt + 1 < attempts) continue;
       if (buffered.length > 0) yield* buffered;
-      this.#failoverExcluded.delete(options.provider);
-      this.#lastResolvedKey.delete(options.provider);
       return;
     }
-    this.#failoverExcluded.delete(options.provider);
-    this.#lastResolvedKey.delete(options.provider);
   }
   async refreshUsage(providerId, signal) {
     const synced = await this.syncProvider(providerId);
@@ -10415,7 +12827,7 @@ var NativeKeyPoolHost = class {
       } else {
         try {
           const resolved = await this.credentials.resolve(row.ref);
-          const apiKey = text(resolved?.value);
+          const apiKey = text2(resolved?.value);
           usage = apiKey ? await module.fetch({ providerId, profile: synced.profile, apiKey, signal }) : { status: "unconfigured", message: "\u8BE5 Key \u5C1A\u672A\u914D\u7F6E" };
         } catch (error) {
           usage = { status: "error", message: failureMessage(error), updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
@@ -10441,7 +12853,7 @@ var NativeKeyPoolHost = class {
 
 // packages/dsh-plugin/src/index.mjs
 var name = "dockyard-dsh";
-var inject = ["llm", "commands", "credentials", "settings"];
+var inject = ["llm", "commands", "credentials", "settings", "webServer"];
 function contextLogger(ctx, name2) {
   try {
     const factory = typeof ctx?.get === "function" ? ctx.get("logger") : null;
@@ -10457,6 +12869,7 @@ function apply(ctx, config = {}) {
     const antigravityOptions = {
       ...runtimeOptions.antigravity ?? {}
     };
+    antigravityOptions.projectResolver = antigravityOptions.projectResolver ?? createAntigravityProjectResolver(antigravityOptions);
     antigravityOptions.quotaReader = runtimeOptions.antigravity?.quotaReader ?? createAntigravityNativeQuotaReader(antigravityOptions);
     runtimeOptions.antigravity = antigravityOptions;
     const modelRegistryLoader = runtimeOptions.modelRegistryLoader ?? createPiAiModelRegistryLoader();
@@ -10513,11 +12926,22 @@ function apply(ctx, config = {}) {
       }
     }
   });
-  const registerAdapter = () => ctx.llm.registerAdapter(adapter.providers(), adapter);
+  const installAdapter = () => {
+    const result = ctx.llm.registerAdapter(adapter.providers(), adapter);
+    return typeof result?.dispose === "function" ? result.dispose.bind(result) : typeof result === "function" ? result : null;
+  };
   if (typeof ctx.effect === "function") {
-    ctx.effect(registerAdapter, "dockyard-dsh: llm adapter");
+    ctx.effect(() => {
+      const disposeAdapter = installAdapter();
+      return () => {
+        try {
+          disposeAdapter?.();
+        } catch {
+        }
+      };
+    }, "dockyard-dsh: llm adapter");
   } else {
-    registerAdapter();
+    installAdapter();
   }
   if (typeof runtime.init === "function") {
     const service = config.service ?? new DockyardDshService({
@@ -10537,7 +12961,8 @@ function apply(ctx, config = {}) {
         contextLogger(ctx, "dockyard-dsh").warn?.(`DSH Credentials \u63A5\u5165\u5931\u8D25\uFF0C\u5C06\u4FDD\u7559\u539F\u6709\u5B89\u5168\u5B58\u50A8\uFF1A${error.message}`);
       }
       nativeKeyPool ??= new NativeKeyPoolHost(ctx, {
-        logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh")
+        logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
+        contextWindowOverrides: runtime.contextWindowOverrides
       });
       const nativeKeyPoolReady = nativeKeyPool.start();
       void nativeKeyPoolReady.catch((error) => {
@@ -10554,7 +12979,60 @@ function apply(ctx, config = {}) {
           return null;
         });
       }
+      let unregisterArtifactsRoute;
+      try {
+        const webServer = ctx.webServer ?? (typeof ctx.get === "function" ? ctx.get("webServer") : null);
+        if (webServer && typeof webServer.register === "function") {
+          unregisterArtifactsRoute = webServer.register({
+            kind: "prefix",
+            path: "/artifacts",
+            handler: async (req, res) => {
+              try {
+                const url = new URL(req.url, "http://127.0.0.1");
+                const cleanPath = url.pathname.replace(/^\/artifacts\/?/, "");
+                if (!cleanPath || cleanPath.includes("..")) {
+                  res.writeHead(403);
+                  res.end("Forbidden");
+                  return;
+                }
+                const filePath = join12(process.cwd(), "artifacts", cleanPath);
+                if (!existsSync(filePath)) {
+                  res.writeHead(404);
+                  res.end("Not Found");
+                  return;
+                }
+                const ext = cleanPath.split(".").pop()?.toLowerCase();
+                const mimeTypes = {
+                  png: "image/png",
+                  jpg: "image/jpeg",
+                  jpeg: "image/jpeg",
+                  webp: "image/webp",
+                  gif: "image/gif",
+                  svg: "image/svg+xml"
+                };
+                const contentType = mimeTypes[ext] ?? "application/octet-stream";
+                const content = readFileSync2(filePath);
+                res.writeHead(200, {
+                  "Content-Type": contentType,
+                  "Content-Length": content.length,
+                  "Cache-Control": "public, max-age=3600"
+                });
+                res.end(content);
+              } catch (err) {
+                res.writeHead(500);
+                res.end("Internal Server Error");
+              }
+            }
+          });
+        }
+      } catch (error) {
+        contextLogger(ctx, "dockyard-dsh").warn?.(`Failed to register /artifacts/ route: ${error.message}`);
+      }
       return async () => {
+        try {
+          unregisterArtifactsRoute?.();
+        } catch {
+        }
         try {
           await remoteFiberPromise?.catch?.(() => null);
         } catch {

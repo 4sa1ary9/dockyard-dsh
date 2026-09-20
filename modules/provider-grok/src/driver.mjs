@@ -16,6 +16,8 @@ import {
 } from "../../../packages/providers/src/cli-agent-transport.mjs";
 import { validateNativeEndpoint } from "../../../packages/providers/src/native-transport.mjs";
 import {
+  addSecondsIso,
+  assertSecureEndpointUrl,
   decodeJwtPayload,
   finiteNumber,
   isoFromEpoch,
@@ -34,6 +36,10 @@ const DEFAULT_CATALOG_TTL_MS = 60_000;
 const DEFAULT_GROK_USAGE_URL = "https://grok.com/?_s=usage";
 const DEFAULT_GROK_CREDITS_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
 const DEFAULT_GROK_TOKEN_HEADER = "xai-grok-cli";
+// Must follow the official Grok CLI release train (the upstream xai-grok-cli
+// version advertised by api.x.ai / cli-chat-proxy.grok.com). Bump this default
+// deliberately whenever the official CLI ships a new version; the value is
+// overridable at runtime through DOCKYARD_GROK_CLIENT_VERSION.
 const DEFAULT_GROK_CLIENT_VERSION = "0.2.112";
 const CREDENTIAL_SLOT = Symbol("dockyard-grok-credential");
 
@@ -43,6 +49,17 @@ function hash(value) {
 
 function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+
+function grokTokenExpiresAt(value, payload = {}, now = new Date()) {
+  return isoFromEpoch(value?.expires_at ?? value?.expiresAt ?? payload.exp)
+    ?? addSecondsIso(value?.expires_in ?? value?.expiresIn, now);
+}
+
+function grokTokenNeedsRefresh(credential, now = new Date(), leewayMs = 60_000) {
+  if (!credential?.refresh || !credential.expiresAt) return false;
+  const expiresAt = Date.parse(credential.expiresAt);
+  return Number.isFinite(expiresAt) && expiresAt <= now.getTime() + leewayMs;
 }
 
 function grokHomePath({ env = process.env, home = homedir(), grokHome } = {}) {
@@ -69,11 +86,7 @@ export function parseGrokAuth(raw) {
     const access = firstString(value.key, value.access_token, value.accessToken);
     if (!access) return null;
     const accessPayload = decodeJwtPayload(access) ?? {};
-    const expiresAt = firstString(
-      value.expires_at,
-      value.expiresAt,
-      isoFromEpoch(accessPayload.exp),
-    );
+    const expiresAt = grokTokenExpiresAt(value, accessPayload);
     const accountId = firstString(
       value.user_id,
       value.userId,
@@ -521,7 +534,10 @@ export class GrokOAuthDriver {
     this.tokenHeader = String(tokenHeader || DEFAULT_GROK_TOKEN_HEADER);
     this.clientVersion = String(clientVersion || DEFAULT_GROK_CLIENT_VERSION);
     this.timeoutMs = timeoutMs;
-    this.tokenUrl = tokenUrl;
+    // SECURITY.md: OAuth endpoints must be https (or loopback http) even when
+    // they come from the environment.
+    this.authorizationUrl = assertSecureEndpointUrl(authorizationUrl, "DOCKYARD_GROK_AUTHORIZATION_URL");
+    this.tokenUrl = assertSecureEndpointUrl(tokenUrl, "DOCKYARD_GROK_TOKEN_URL");
     this.clientId = clientId;
     this.oauthScope = oauthScope;
     this.catalogLoader = catalogLoader ?? createGrokCatalogLoader({
@@ -730,6 +746,54 @@ export class GrokOAuthDriver {
     return { ...credential, accountId: credential.accountId ?? account.accountId };
   }
 
+  async #refreshOAuthCredential(account, context = {}, { strict = false } = {}) {
+    const credential = await this.#readCredential(account, context);
+    const now = context.now instanceof Date ? context.now : new Date();
+    if (!grokTokenNeedsRefresh(credential, now)) return credential;
+    if (!credential.refresh) {
+      if (!strict) return credential;
+      const error = new Error("Grok OAuth access token expired; authorize again");
+      error.authExpired = true;
+      throw error;
+    }
+
+    let response;
+    try {
+      response = await this.fetchImpl(this.tokenUrl, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: new URLSearchParams({
+          client_id: credential.clientId ?? this.clientId,
+          grant_type: "refresh_token",
+          refresh_token: credential.refresh,
+        }),
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+    } catch (cause) {
+      const error = new Error("Grok OAuth refresh failed; authorize again");
+      error.authExpired = true;
+      error.cause = cause;
+      throw error;
+    }
+    const body = await response.json().catch(() => ({}));
+    const access = firstString(body.access_token, body.accessToken, body.key);
+    if (!response.ok || !access) {
+      const error = new Error("Grok OAuth refresh failed; authorize again");
+      error.status = response.status;
+      error.authExpired = response.status === 401 || response.status === 400;
+      throw error;
+    }
+    const updated = {
+      ...credential,
+      access,
+      refresh: firstString(body.refresh_token, body.refreshToken, credential.refresh),
+      expiresAt: grokTokenExpiresAt(body, decodeJwtPayload(access) ?? {}, now) ?? credential.expiresAt,
+      lastRefreshedAt: now.toISOString(),
+    };
+    await context.secretStore.write(account.auth?.credentialRef ?? account.credentialRef, updated);
+    return updated;
+  }
+
   async #prepareCredentialEnvironment(account, context = {}) {
     const credential = await this.#readCredential(account, context);
     const profileDir = await mkdtemp(join(tmpdir(), "dockyard-grok-run-"));
@@ -774,6 +838,7 @@ export class GrokOAuthDriver {
   }
 
   async refreshAccount(account, context = {}) {
+    await this.#refreshOAuthCredential(account, context);
     const prepared = await this.#prepareCredentialEnvironment(account, context);
     let updated = null;
     let commandError = null;
@@ -813,7 +878,7 @@ export class GrokOAuthDriver {
 
   async getQuota(account, context = {}) {
     const now = context.now instanceof Date ? context.now : new Date();
-    const credential = await this.#readCredential(account, context);
+    const credential = await this.#refreshOAuthCredential(account, context, { strict: true });
     const accountId = credential.accountId ?? account.accountId;
     const response = await this.fetchImpl(this.creditsUrl, {
       method: "GET",
@@ -860,7 +925,9 @@ export class GrokOAuthDriver {
     // creating that profile on every request would reintroduce the startup
     // latency this transport is meant to remove.
     if (executor.nativeTransport === "xai-chat-completions") {
-      const credential = account && context.secretStore ? await this.#readCredential(account, context) : null;
+      const credential = account && context.secretStore
+        ? await this.#refreshOAuthCredential(account, context, { strict: true })
+        : null;
       return executor({ request, invocation, credential, context });
     }
     if (!account || !context.secretStore) return executor({ request, invocation, context });

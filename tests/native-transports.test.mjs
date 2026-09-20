@@ -3,18 +3,21 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 
 import {
+  buildAntigravityRequest,
   createAntigravityNativeExecutor,
   createAntigravityProjectResolver,
 } from "../modules/provider-antigravity/src/index.mjs";
 import { createClaudeNativeExecutor } from "../modules/provider-claude/src/index.mjs";
 import { createGrokNativeExecutor } from "../modules/provider-grok/src/index.mjs";
 import { createCursorNativeExecutor } from "../modules/provider-cursor/src/index.mjs";
-import { bytesField, frameConnectMessage, stringField } from "../modules/provider-cursor/src/native-protocol.mjs";
+import { bytesField, encodeAgentRunRequest, frameConnectMessage, stringField } from "../modules/provider-cursor/src/native-protocol.mjs";
 import {
   fetchNativeResponse,
+  nativeProviderError,
   readSseEvents,
   validateNativeEndpoint,
 } from "../packages/providers/src/native-transport.mjs";
+import { runCliCommand } from "../packages/providers/src/cli-agent-transport.mjs";
 
 function responseFor(events) {
   const payload = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
@@ -90,6 +93,13 @@ test("native SSE timeout remains active while the response body is stalled", asy
   );
 });
 
+test("native auth classification distinguishes token budgets from invalid credentials", () => {
+  const budget = nativeProviderError("test", "Invalid token count in image tile");
+  const invalidKey = nativeProviderError("test", "API key not valid. Please pass a valid API key.");
+  assert.equal(budget.authExpired, false);
+  assert.equal(invalidKey.authExpired, true);
+});
+
 test("Claude native transport posts Anthropic Messages and streams the first text delta", async () => {
   let call;
   const executor = createClaudeNativeExecutor({
@@ -148,6 +158,9 @@ test("native transports frame reasoning blocks with matching start and end event
   const antigravity = createAntigravityNativeExecutor({
     endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
     tokenResolver: () => ({ token: "token" }),
+    // A resolved Code Assist project is required: the transport never
+    // fabricates a default project upstream.
+    project: "fixture-project",
     fetchImpl: async () => responseFor([
       { candidates: [{ content: { parts: [{ text: "think", thought: true }] } }] },
       { candidates: [{ content: { parts: [{ text: "answer" }] }, finishReason: "STOP" }] },
@@ -164,6 +177,7 @@ test("Antigravity native transport uses streamGenerateContent SSE", async () => 
   const executor = createAntigravityNativeExecutor({
     endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
     tokenResolver: () => ({ token: "google-token", kind: "oauth" }),
+    project: "fixture-project",
     fetchImpl: async (url, init) => {
       call = { url, init };
       return responseFor([
@@ -179,7 +193,7 @@ test("Antigravity native transport uses streamGenerateContent SSE", async () => 
   assert.match(call.url, /streamGenerateContent\?alt=sse$/);
   assert.equal(call.init.headers.authorization, "Bearer google-token");
   assert.equal(call.init.headers.accept, undefined);
-  assert.equal(body.project, "default-cli-project");
+  assert.equal(body.project, "fixture-project");
   assert.equal(body.model, "gemini-3.7-flash-medium");
   assert.deepEqual(body.request.contents[0], { role: "user", parts: [{ text: "Hi" }] });
   assert.deepEqual(body.request.generationConfig, { temperature: 0.7, maxOutputTokens: 4096 });
@@ -191,6 +205,280 @@ test("Antigravity native transport uses streamGenerateContent SSE", async () => 
     totalTokens: 17,
     cacheReadTokens: 3,
   });
+});
+
+test("Antigravity Gemini 3 history flattens unsigned tool calls instead of sending functionCall", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-3-flash",
+    messages: [
+      { role: "user", content: "check status" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", id: "call-unsigned-1", name: "read_lints", arguments: { paths: ["app.js"] } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "call-unsigned-1", name: "read_lints", content: "[]" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(native.contents, [
+    { role: "user", parts: [{ text: "check status" }] },
+    { role: "model", parts: [{ text: '[tool call: read_lints] {"paths":["app.js"]}' }] },
+    { role: "user", parts: [{ text: "[tool result: read_lints] []" }] },
+  ]);
+});
+
+test("Antigravity Gemini 3 history flattens camelCase toolCall parts without signatures", async () => {
+  const native = await buildAntigravityRequest({
+    model: "Gemini 3.8 Flash (Medium)",
+    messages: [
+      { role: "user", content: "check status" },
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-unsigned-2", name: "read", arguments: { path: "native-transport.mjs" } },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "toolResult", toolCallId: "call-unsigned-2", name: "read", content: "ok" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(native.contents, [
+    { role: "user", parts: [{ text: "check status" }] },
+    { role: "model", parts: [{ text: '[tool call: read] {"path":"native-transport.mjs"}' }] },
+    { role: "user", parts: [{ text: "[tool result: read] ok" }] },
+  ]);
+});
+
+test("Antigravity Gemini 3 history sanitizes native unsigned functionCall parts", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-3.8-flash",
+    messages: [
+      { role: "user", content: "check status" },
+      {
+        role: "assistant",
+        parts: [
+          { functionCall: { name: "default_api:read", args: { path: "native-transport.mjs" } } },
+        ],
+      },
+      {
+        role: "user",
+        parts: [
+          { functionResponse: { name: "default_api:read", response: { content: "ok" } } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(native.contents, [
+    { role: "user", parts: [{ text: "check status" }] },
+    { role: "model", parts: [{ text: '[tool call: default_api:read] {"path":"native-transport.mjs"}' }] },
+    { role: "user", parts: [{ text: "[tool result: default_api:read] ok" }] },
+  ]);
+});
+
+test("Antigravity Gemini 3 history echoes thought signatures on functionCall parts", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-3-flash",
+    messages: [
+      { role: "user", content: "check status" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            id: "call-signed-1",
+            name: "read_lints",
+            arguments: { paths: ["app.js"] },
+            thoughtSignature: "sig-abc",
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "call-signed-1", name: "read_lints", content: "[]" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(native.contents, [
+    { role: "user", parts: [{ text: "check status" }] },
+    {
+      role: "model",
+      parts: [{
+        functionCall: {
+          name: "read_lints",
+          args: { paths: ["app.js"] },
+          thoughtSignature: "sig-abc",
+          thought_signature: "sig-abc",
+        },
+        thoughtSignature: "sig-abc",
+        thought_signature: "sig-abc",
+      }],
+    },
+    {
+      role: "user",
+      parts: [{ functionResponse: { name: "read_lints", response: { name: "read_lints", content: "[]" } } }],
+    },
+  ]);
+});
+
+test("Antigravity non-Gemini-3 history keeps unsigned functionCall parts", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-2.5-flash",
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", id: "call-legacy-1", name: "read_lints", arguments: { paths: ["app.js"] } },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(native.contents, [
+    { role: "model", parts: [{ functionCall: { name: "read_lints", args: { paths: ["app.js"] } } }] },
+  ]);
+});
+
+test("Antigravity Gemini 3 history supports mixed assistant content and tool_calls preserving signatures", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-3.7-flash",
+    messages: [
+      { role: "user", content: "run command" },
+      {
+        role: "assistant",
+        content: "Checking git status",
+        tool_calls: [
+          {
+            id: "call-bash-1",
+            function: { name: "default_api:bash", arguments: '{"command":"git status"}' },
+            thought_signature: "sig-bash-1",
+          },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(native.contents, [
+    { role: "user", parts: [{ text: "run command" }] },
+    {
+      role: "model",
+      parts: [
+        { text: "Checking git status" },
+        {
+          functionCall: {
+            name: "default_api:bash",
+            args: { command: "git status" },
+            thoughtSignature: "sig-bash-1",
+            thought_signature: "sig-bash-1",
+          },
+          thoughtSignature: "sig-bash-1",
+          thought_signature: "sig-bash-1",
+        },
+      ],
+    },
+  ]);
+});
+
+test("Antigravity sliding window auto-compacts long history beyond safe threshold", async () => {
+  const longMessages = [
+    { role: "user", content: "initial goal: build app" },
+  ];
+  for (let i = 1; i <= 60; i++) {
+    longMessages.push({ role: i % 2 === 1 ? "assistant" : "user", content: `turn message ${i}` });
+  }
+  const native = await buildAntigravityRequest({
+    model: "gemini-3.7-flash",
+    messages: longMessages,
+  });
+  assert.ok(native.contents.length <= 42);
+  assert.equal(native.contents[0].parts[0].text, "initial goal: build app");
+  assert.match(native.contents[1].parts[0].text, /sliding window active/);
+  assert.equal(native.contents.at(-1).parts[0].text, "turn message 60");
+});
+
+test("Antigravity native transport attaches thought signatures to streamed tool calls", async () => {
+  const executor = createAntigravityNativeExecutor({
+    endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
+    tokenResolver: () => ({ token: "google-token", kind: "oauth" }),
+    project: "fixture-project",
+    fetchImpl: async () => responseFor([
+      {
+        candidates: [{
+          content: {
+            parts: [{
+              functionCall: { name: "read_lints", args: { paths: ["app.js"] } },
+              thoughtSignature: "sig-stream",
+            }],
+            finishReason: "STOP",
+          },
+        }],
+      },
+    ]),
+  });
+  const chunks = await collect(await executor({
+    request: { model: "gemini-3-flash", messages: [{ role: "user", content: "lint" }] },
+  }));
+  const toolEnd = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call");
+  assert.equal(toolEnd.block.name, "read_lints");
+  assert.equal(toolEnd.block.thoughtSignature, "sig-stream");
+});
+
+test("Antigravity native transport upgrades text tool calls into executable tool-call blocks", async () => {
+  const executor = createAntigravityNativeExecutor({
+    endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
+    tokenResolver: () => ({ token: "google-token", kind: "oauth" }),
+    project: "fixture-project",
+    fetchImpl: async () => responseFor([
+      {
+        candidates: [{
+          content: {
+            parts: [{
+              text: '[tool call: bash] {"command":"git status --short","description":"check git"}',
+            }],
+            finishReason: "STOP",
+          },
+        }],
+      },
+    ]),
+  });
+  const chunks = await collect(await executor({
+    request: { model: "Gemini 3.8 Flash (Medium)", messages: [{ role: "user", content: "status" }] },
+  }));
+  const toolEnd = chunks.find((chunk) => chunk.type === "block-end" && chunk.block?.type === "tool-call");
+  assert.ok(toolEnd, "Must emit tool-call block");
+  assert.equal(toolEnd.block.name, "bash");
+  const parsedArgs = JSON.parse(toolEnd.block.arguments);
+  assert.equal(parsedArgs.command, "git status --short");
+  const finish = chunks.find((chunk) => chunk.type === "finish");
+  assert.deepEqual(finish.reason, { kind: "tool-calls" });
+});
+
+test("Antigravity native transport decodes and streams inlineData images", async () => {
+  const fakePngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+  const executor = createAntigravityNativeExecutor({
+    endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
+    tokenResolver: () => ({ token: "google-token", kind: "oauth" }),
+    project: "fixture-project",
+    fetchImpl: async () => responseFor([
+      { candidates: [{ content: { parts: [{ text: "Here is your image:" }, { inlineData: { mimeType: "image/png", data: fakePngBase64 } }] } }] },
+      { usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 20, totalTokenCount: 30 } },
+    ]),
+  });
+  const chunks = await collect(await executor({
+    request: { model: "gemini-3.7-flash-medium", messages: [{ role: "user", content: "Draw a cat" }] },
+  }));
+  const textDeltas = chunks.filter((chunk) => chunk.type === "text-delta").map((chunk) => chunk.text);
+  assert.ok(textDeltas.some((t) => t.includes("Here is your image:")));
+  assert.ok(textDeltas.some((t) => t.includes("![Generated Image](") || t.includes("artifacts/")));
 });
 
 test("Antigravity native transport resolves a Code Assist project per selected account", async () => {
@@ -236,6 +524,7 @@ test("native HTTP errors keep the upstream rate-limit signal without leaking raw
   const executor = createAntigravityNativeExecutor({
     endpoint: "https://gemini.test/v1internal:streamGenerateContent?alt=sse",
     tokenResolver: () => ({ token: "google-token", kind: "oauth" }),
+    project: "fixture-project",
     fetchImpl: async () => ({
       ok: false,
       status: 429,
@@ -261,6 +550,20 @@ test("native HTTP errors keep the upstream rate-limit signal without leaking raw
       assert.match(error.message, /额度或上游资源已耗尽/);
       assert.equal(error.upstreamMessage, "Resource has been exhausted (e.g. check quota)");
       assert.doesNotMatch(error.message, /\"error\"/);
+      return true;
+    },
+  );
+});
+
+test("native HTTP error bodies are bounded before being attached to errors", async () => {
+  await assert.rejects(
+    () => fetchNativeResponse("https://provider.test/error", {}, {
+      providerId: "test-provider",
+      fetchImpl: async () => ({ ok: false, status: 500, text: async () => "x".repeat(200_000) }),
+    }),
+    (error) => {
+      assert.ok(typeof error.body === "string");
+      assert.ok(error.body.length <= 65_536);
       return true;
     },
   );
@@ -311,6 +614,16 @@ test("Grok token-validation errors mark the OAuth account unusable", async () =>
   );
 });
 
+test("Cursor protocol preserves inline image data instead of a placeholder", () => {
+  const encoded = encodeAgentRunRequest({
+    model: "cursor-test",
+    messages: [{ role: "user", content: [{ type: "image", mimeType: "image/png", data: "AQID" }] }],
+  });
+  const bytes = Buffer.from(encoded.frame).toString("utf8");
+  assert.match(bytes, /AQID/);
+  assert.doesNotMatch(bytes, /\[image attachment\]/);
+});
+
 test("Cursor native transport opens AgentService over HTTP/2 Connect frames", async () => {
   let written;
   const fakeHttp2 = {
@@ -351,6 +664,37 @@ test("Cursor native transport opens AgentService over HTTP/2 Connect frames", as
   assert.ok(written);
   assert.equal(chunks.find((chunk) => chunk.type === "text-delta")?.text, "cursor");
   assert.equal(chunks.at(-1).type, "finish");
+});
+
+test("Cursor native transport enforces a total timeout while the upstream is silent", async () => {
+  const fakeHttp2 = {
+    constants: { NGHTTP2_CANCEL: 8 },
+    connect() {
+      const session = new EventEmitter();
+      session.closed = false;
+      session.destroyed = false;
+      session.close = () => { session.closed = true; };
+      session.request = () => {
+        const stream = new EventEmitter();
+        stream.destroyed = false;
+        stream.closed = false;
+        stream.write = () => {};
+        stream.close = () => { stream.closed = true; };
+        return stream;
+      };
+      return session;
+    },
+  };
+  const executor = createCursorNativeExecutor({
+    tokenResolver: () => ({ token: "cursor-oauth", kind: "oauth" }),
+    http2Module: fakeHttp2,
+    timeoutMs: 10,
+    idleTimeoutMs: 100,
+  });
+  await assert.rejects(
+    collect(await executor({ request: { model: "composer-2.5", messages: [{ role: "user", content: "Hi" }] } })),
+    (error) => error.code === "ETIMEDOUT",
+  );
 });
 
 test("Cursor native transport preserves text across split Connect frames", async () => {
@@ -476,6 +820,203 @@ test("Cursor native transport rejects a completed turn with no assistant text", 
       assert.match(error.message, /completed without assistant text/);
       assert.deepEqual(error.cursorDiagnostics[0].fieldPaths.map((field) => field.path), ["2", "2.1"]);
       assert.equal(error.cursorDiagnostics[0].flags, 0);
+      return true;
+    },
+  );
+});
+
+function sseChunks(...payloads) {
+  const encoder = new TextEncoder();
+  return payloads.map((payload) => encoder.encode(payload));
+}
+
+function asyncIteratorBody(chunks, { state } = {}) {
+  let index = 0;
+  const body = {
+    // No `return()` on the iterator: only an explicit body.cancel() may stop
+    // the underlying download when the consumer walks away.
+    [Symbol.asyncIterator]() {
+      return {
+        next: async () => (index < chunks.length
+          ? { value: chunks[index++], done: false }
+          : { done: true }),
+      };
+    },
+    cancel: async () => {
+      state.cancelled += 1;
+    },
+  };
+  return body;
+}
+
+function readerBody(chunks, { state }) {
+  const body = {
+    getReader() {
+      let index = 0;
+      return {
+        read: async () => (index < chunks.length
+          ? { value: chunks[index++], done: false }
+          : { done: true }),
+        cancel: async () => {
+          state.cancelled += 1;
+        },
+        releaseLock: () => {
+          state.released += 1;
+        },
+      };
+    },
+  };
+  return body;
+}
+
+test("readSseEvents cancels the underlying body when the consumer stops early", async () => {
+  const state = { cancelled: 0 };
+  const response = {
+    ok: true,
+    status: 200,
+    body: asyncIteratorBody(sseChunks('data: {"i":0}\n\n', 'data: {"i":1}\n\n', 'data: {"i":2}\n\n'), { state }),
+  };
+  const seen = [];
+  for await (const event of readSseEvents(response)) {
+    seen.push(event.data.i);
+    if (seen.length === 1) break;
+  }
+  assert.deepEqual(seen, [0]);
+  assert.equal(state.cancelled, 1);
+});
+
+test("readSseEvents cancels a reader-based body after DONE and on early exit", async () => {
+  const doneState = { cancelled: 0, released: 0 };
+  const doneResponse = {
+    ok: true,
+    status: 200,
+    body: readerBody(sseChunks('data: {"i":0}\n\n', "data: [DONE]\n\n"), { state: doneState }),
+  };
+  const doneSeen = [];
+  for await (const event of readSseEvents(doneResponse)) {
+    doneSeen.push(event.data?.i ?? null);
+  }
+  assert.deepEqual(doneSeen, [0, null]);
+  assert.equal(doneState.cancelled, 1);
+
+  const breakState = { cancelled: 0, released: 0 };
+  const breakResponse = {
+    ok: true,
+    status: 200,
+    body: readerBody(sseChunks('data: {"i":0}\n\n', 'data: {"i":1}\n\n', 'data: {"i":2}\n\n'), { state: breakState }),
+  };
+  const breakSeen = [];
+  for await (const event of readSseEvents(breakResponse)) {
+    breakSeen.push(event.data.i);
+    if (breakSeen.length === 1) break;
+  }
+  assert.deepEqual(breakSeen, [0]);
+  assert.ok(breakState.cancelled >= 1, "reader.cancel must interrupt the body");
+  assert.ok(breakState.released >= 1, "reader lock must still be released");
+});
+
+test("corrupted SSE JSON data raises a protocol error instead of passing through", async () => {
+  const response = {
+    ok: true,
+    status: 200,
+    body: asyncIteratorBody([new TextEncoder().encode('data: {"broken-json\n\ndata: {"i":1}\n\n')]),
+  };
+  await assert.rejects(
+    collect(readSseEvents(response)),
+    (error) => {
+      assert.equal(error.code, "SSE_PROTOCOL_ERROR");
+      assert.match(error.message, /not valid JSON/);
+      assert.match(error.message, /broken-json/);
+      return true;
+    },
+  );
+});
+
+test("a large network chunk holding many small SSE events is not misjudged as oversized", async () => {
+  const lines = [];
+  let total = 0;
+  let index = 0;
+  while (total <= 4 * 1024 * 1024) {
+    const line = `data: {"i":${index}}\n\n`;
+    lines.push(line);
+    total += line.length;
+    index += 1;
+  }
+  assert.ok(total > 4 * 1024 * 1024);
+  const response = {
+    ok: true,
+    status: 200,
+    body: asyncIteratorBody([new TextEncoder().encode(lines.join(""))]),
+  };
+  const seen = [];
+  for await (const event of readSseEvents(response)) {
+    seen.push(event.data.i);
+    if (seen.length === 5) break;
+  }
+  assert.deepEqual(seen, [0, 1, 2, 3, 4]);
+});
+
+test("SSE size budget still rejects one genuinely oversized buffered event", async () => {
+  const blob = "x".repeat(4 * 1024 * 1024 + 16);
+  const response = {
+    ok: true,
+    status: 200,
+    body: asyncIteratorBody([new TextEncoder().encode(`data: {"blob":"${blob}"}\n\n`)]),
+  };
+  await assert.rejects(collect(readSseEvents(response)), /maximum allowed size/);
+});
+
+test("SSE framing accepts CR-only and CRLF terminators split across chunks", async () => {
+  const response = {
+    ok: true,
+    status: 200,
+    body: asyncIteratorBody(sseChunks(
+      // CR-only framing with a CR-only blank line dispatching the first event.
+      'event: add\rdata: {"i":0}\r\r',
+      // Data line terminated by a bare CR exactly at the chunk edge…
+      'data: {"i":1}\r',
+      // …whose LF partner opens the next chunk: one terminator, not two.
+      '\n\rdata: {"i":2}\r\n\r\ndata: {"i":3}\r\n\r\n',
+    )),
+  };
+  const seen = [];
+  for await (const event of readSseEvents(response)) {
+    seen.push({ event: event.event, i: event.data.i });
+  }
+  assert.deepEqual(seen, [
+    { event: "add", i: 0 },
+    { event: "message", i: 1 },
+    { event: "message", i: 2 },
+    { event: "message", i: 3 },
+  ]);
+});
+
+test("CLI timeout reports ETIMEDOUT even when the child traps SIGTERM and exits 0", { skip: process.platform === "win32" }, async () => {
+  await assert.rejects(
+    runCliCommand("/bin/sh", ["-c", "trap 'exit 0' TERM; echo started; sleep 30"], {
+      timeoutMs: 200,
+      providerId: "test-cli",
+    }),
+    (error) => {
+      assert.equal(error.code, "ETIMEDOUT");
+      assert.match(error.message, /timed out/);
+      return true;
+    },
+  );
+});
+
+test("CLI abort reports ABORT_ERR semantics", { skip: process.platform === "win32" }, async () => {
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), 80);
+  await assert.rejects(
+    runCliCommand("/bin/sh", ["-c", "trap 'exit 0' TERM; sleep 30"], {
+      signal: controller.signal,
+      timeoutMs: 30_000,
+      providerId: "test-cli",
+    }),
+    (error) => {
+      assert.equal(error.code, "ABORT_ERR");
+      assert.equal(error.name, "AbortError");
       return true;
     },
   );

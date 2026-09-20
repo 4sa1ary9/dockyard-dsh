@@ -136,7 +136,7 @@ export function accountSummary(account) {
     displayName: account.displayName,
     email: account.email,
     subscription: { ...account.subscription },
-    quota: { ...account.quota },
+    quota: structuredClone(account.quota ?? {}),
     refresh: { ...account.refresh },
     resources: structuredClone(account.resources ?? {}),
     health: { ...account.health },

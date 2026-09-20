@@ -5,17 +5,10 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 
 import { redactError } from "../../providers/src/provider-utils.mjs";
+import { extractSafeAuthorizationUrl } from "./cli-url-sanitizer.mjs";
 
-const URL_PATTERN = /https?:\/\/[^\s"'<>]+/gi;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const CHILD_STOP_GRACE_MS = 2_000;
-
-function cleanUrl(value) {
-  return String(value ?? "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u001f\u007f].*$/, "")
-    .replace(/[),.;]+$/, "");
-}
 
 function publicSession(session) {
   return {
@@ -114,8 +107,7 @@ export function createCliOAuthAuthorizer({
     const text = String(chunk ?? "");
     session.output = `${session.output}${text}`.slice(-32_000);
     if (!session.authorizationUrl) {
-      const match = session.output.match(URL_PATTERN);
-      if (match?.[0]) session.authorizationUrl = cleanUrl(match[0]);
+      session.authorizationUrl = extractSafeAuthorizationUrl(session.output);
     }
   }
 

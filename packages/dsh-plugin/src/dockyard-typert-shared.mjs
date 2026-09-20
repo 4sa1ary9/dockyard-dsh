@@ -69,6 +69,17 @@ const nativeKeyPolicyRequest = z.object({
   policy: z.enum(["manual", "round_robin", "failover"]),
 });
 
+const contextWindowRequest = z.object({
+  providerId: z.string().min(1),
+  modelId: z.string().min(1),
+  accountId: z.string().min(1).optional(),
+  keyRef: z.string().min(1).optional(),
+});
+
+const contextWindowSetRequest = contextWindowRequest.extend({
+  value: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable(),
+});
+
 function requestParameter(schema, name) {
   return {
     name: "request",
@@ -107,6 +118,8 @@ export const TYPERT_DESCRIPTORS = Object.freeze([
   descriptor("nativeKeyRegister", requestParameter(nativeKeyRegisterRequest, "DockyardNativeKeyRegisterRequest"), "DockyardNativeKeyRegister"),
   descriptor("nativeKeyUnregister", requestParameter(nativeKeyRefRequest, "DockyardNativeKeyRefRequest"), "DockyardNativeKeyUnregister"),
   descriptor("nativeKeySetPolicy", requestParameter(nativeKeyPolicyRequest, "DockyardNativeKeyPolicyRequest"), "DockyardNativeKeySetPolicy"),
+  descriptor("getContextWindowOverride", requestParameter(contextWindowRequest, "DockyardContextWindowRequest"), "DockyardContextWindowOverride"),
+  descriptor("setContextWindowOverride", requestParameter(contextWindowSetRequest, "DockyardContextWindowSetRequest"), "DockyardContextWindowOverride"),
 ]);
 
 export const TYPERT_MODEL = Object.freeze({

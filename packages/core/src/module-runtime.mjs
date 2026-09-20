@@ -4,44 +4,59 @@ import { ModuleConflictError, ModuleNotFoundError, ValidationError } from "./err
 export class ModuleRuntime {
   #modules = new Map();
   #services = new Map();
+  // Per-module lifecycle serialization. activate()/deactivate() are awaited,
+  // so without ordering an unregister could remove a module mid-register and
+  // let the still-running register mark it active again afterwards.
+  #lifecycleQueues = new Map();
 
   constructor({ events = new EventBus(), logger = console } = {}) {
     this.events = events;
     this.logger = logger;
   }
 
-  async register(module) {
+  #enqueueLifecycle(moduleId, task) {
+    const previous = this.#lifecycleQueues.get(moduleId) ?? Promise.resolve();
+    const run = previous.then(task, task);
+    this.#lifecycleQueues.set(moduleId, run.then(() => {}, () => {}));
+    return run;
+  }
+
+  register(module) {
     const manifest = module?.manifest;
     if (!manifest?.id || !manifest.kind) {
       throw new ValidationError("A module manifest must contain id and kind");
     }
-    if (this.#modules.has(manifest.id)) throw new ModuleConflictError(manifest.id);
+    return this.#enqueueLifecycle(manifest.id, async () => {
+      if (this.#modules.has(manifest.id)) throw new ModuleConflictError(manifest.id);
 
-    const record = { module, manifest: { ...manifest }, services: new Set(), active: false };
-    this.#modules.set(manifest.id, record);
-    const context = this.#contextFor(record);
+      const record = { module, manifest: { ...manifest }, services: new Set(), active: false };
+      this.#modules.set(manifest.id, record);
+      const context = this.#contextFor(record);
 
-    try {
-      if (typeof module.activate === "function") await module.activate(context);
-      record.active = true;
-      await this.events.emit("module/registered", { moduleId: manifest.id, manifest: { ...manifest } });
-      return module;
-    } catch (error) {
-      this.#removeServices(record);
-      this.#modules.delete(manifest.id);
-      throw error;
-    }
+      try {
+        if (typeof module.activate === "function") await module.activate(context);
+        record.active = true;
+        await this.events.emit("module/registered", { moduleId: manifest.id, manifest: { ...manifest } });
+        return module;
+      } catch (error) {
+        this.#removeServices(record);
+        this.#modules.delete(manifest.id);
+        throw error;
+      }
+    });
   }
 
-  async unregister(moduleId) {
-    const record = this.#modules.get(moduleId);
-    if (!record) throw new ModuleNotFoundError(moduleId);
-    if (typeof record.module.deactivate === "function") {
-      await record.module.deactivate(this.#contextFor(record));
-    }
-    this.#removeServices(record);
-    this.#modules.delete(moduleId);
-    await this.events.emit("module/unregistered", { moduleId });
+  unregister(moduleId) {
+    return this.#enqueueLifecycle(moduleId, async () => {
+      const record = this.#modules.get(moduleId);
+      if (!record) throw new ModuleNotFoundError(moduleId);
+      if (typeof record.module.deactivate === "function") {
+        await record.module.deactivate(this.#contextFor(record));
+      }
+      this.#removeServices(record);
+      this.#modules.delete(moduleId);
+      await this.events.emit("module/unregistered", { moduleId });
+    });
   }
 
   has(moduleId) {

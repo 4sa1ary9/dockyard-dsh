@@ -30,6 +30,40 @@ function publicSession(session) {
   };
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function isLoopbackHostname(hostname) {
+  const value = String(hostname ?? "").trim().toLowerCase();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return LOOPBACK_HOSTNAMES.has(bare);
+}
+
+/**
+ * OAuth 回调服务只能绑定本机回环地址。任何非 loopback 的 callbackHost
+ * （例如 0.0.0.0 或局域网地址）都会让携带授权码的回调暴露到网络，直接拒绝。
+ */
+function assertSafeCallbackHost(host) {
+  const value = String(host ?? "").trim();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value.toLowerCase();
+  if (!isLoopbackHostname(bare)) {
+    throw new Error(`OAuth callback host must be loopback (localhost / 127.0.0.1 / ::1), got: ${value || "<empty>"}`);
+  }
+}
+
+function resolveLoopbackListenHost(host) {
+  const bare = String(host ?? "").trim().toLowerCase();
+  return bare === "::1" || bare === "[::1]" ? "::1" : "127.0.0.1";
+}
+
 function missingSession(sessionId, providerId, instructions) {
   return {
     sessionId,
@@ -89,6 +123,20 @@ export function createBrowserOAuthAuthorizer({
   if (!redirectUri && callbackPort === null && typeof pollSession !== "function") {
     throw new Error(`Browser OAuth authorizer requires redirectUri or callbackPort for ${providerId}`);
   }
+  assertSafeCallbackHost(callbackHost ?? "localhost");
+  if (redirectUri) {
+    let parsedRedirectUri = null;
+    try {
+      parsedRedirectUri = new URL(redirectUri);
+    } catch {
+      throw new Error(`Browser OAuth authorizer has an invalid redirectUri for ${providerId}`);
+    }
+    if (parsedRedirectUri.protocol === "http:" && !isLoopbackHostname(parsedRedirectUri.hostname)) {
+      throw new Error(
+        `Browser OAuth redirectUri over plain http must use a loopback host for ${providerId}, got: ${parsedRedirectUri.hostname}`,
+      );
+    }
+  }
 
   const sessions = new Map();
 
@@ -107,10 +155,10 @@ export function createBrowserOAuthAuthorizer({
     await closeServer(session);
   }
 
-  function responseHtml(res, title, message) {
-    res.statusCode = 200;
+  function responseHtml(res, title, message, statusCode = 200) {
+    res.statusCode = statusCode;
     res.setHeader("content-type", "text/html; charset=utf-8");
-    res.end(`<!doctype html><meta charset="utf-8"><title>${title}</title><p>${message}</p><p>可以关闭此页面并返回 Dockyard DSH。</p>`);
+    res.end(`<!doctype html><meta charset="utf-8"><title>${escapeHtml(title)}</title><p>${escapeHtml(message)}</p><p>可以关闭此页面并返回 Dockyard DSH。</p>`);
   }
 
   async function handleCallback(session, req, res) {
@@ -124,8 +172,10 @@ export function createBrowserOAuthAuthorizer({
     const code = requestUrl.searchParams.get("code") ?? "";
     const state = requestUrl.searchParams.get("state") ?? "";
     if (state !== session.state) {
-      session.callback = { error: "OAuth state 校验失败" };
-      responseHtml(res, "授权未完成", "安全校验失败，可以关闭此页面并重新开始授权。");
+      session.status = "failed";
+      session.diagnostic = "OAuth state 校验失败";
+      responseHtml(res, "授权未完成", "安全校验失败，可以关闭此页面并重新开始授权。", 400);
+      await cleanup(session);
       return;
     }
     if (error) {
@@ -163,7 +213,7 @@ export function createBrowserOAuthAuthorizer({
       };
       server.once("error", onError);
       server.once("listening", onListening);
-      server.listen({ host: callbackHost, port: session.callbackPort });
+      server.listen({ host: resolveLoopbackListenHost(callbackHost), port: session.callbackPort });
     });
     server.unref?.();
     const address = server.address();
@@ -172,10 +222,12 @@ export function createBrowserOAuthAuthorizer({
 
   async function finalize(session, context = {}) {
     if (session.result) return session.result;
+    if (session.cancelled || session.status === "cancelled") return publicSession(session);
     if (session.finalizing) return session.finalizing;
     session.finalizing = (async () => {
       try {
         const callback = session.callback;
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         if (!callback && !session.credentials) return publicSession(session);
         if (callback?.error) throw new Error(callback.error);
         const exchanged = session.credentials ?? await exchangeCode({
@@ -185,7 +237,9 @@ export function createBrowserOAuthAuthorizer({
           redirectUri: session.redirectUri,
           context,
         });
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         const accounts = await importCredentials(exchanged, context);
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         if (!Array.isArray(accounts) || accounts.length === 0) {
           throw new Error("官方授权完成，但 provider 没有返回可接入的订阅账号");
         }
@@ -197,6 +251,7 @@ export function createBrowserOAuthAuthorizer({
         };
         return session.result;
       } catch (error) {
+        if (session.cancelled || session.status === "cancelled") return publicSession(session);
         session.status = "failed";
         session.diagnostic = redactError(error);
         return publicSession(session);
@@ -247,7 +302,8 @@ export function createBrowserOAuthAuthorizer({
         if (session.status !== "pending") return;
         session.status = "failed";
         session.diagnostic = "官方 OAuth 登录超时，请重新点击登录添加账号。";
-        void cleanup(session);
+        session.cancelled = true;
+        void cleanup(session).finally(() => sessions.delete(session.sessionId));
       }, timeoutMs);
       session.timer.unref?.();
     } catch (error) {
@@ -284,8 +340,15 @@ export function createBrowserOAuthAuthorizer({
     const session = sessions.get(sessionId);
     if (!session) return missingSession(sessionId, providerId, instructions);
     const parsed = extractCodeInput(input);
+    if (String(input ?? "").length > 8192) {
+      session.diagnostic = "授权回调输入过长，请粘贴官方返回的完整回调地址。";
+      return publicSession(session);
+    }
     if (parsed.state !== session.state) {
-      session.callback = { error: "OAuth state 校验失败" };
+      session.status = "failed";
+      session.diagnostic = "OAuth state 校验失败，请重新提交当前会话返回的回调地址。";
+      await cleanup(session);
+      return publicSession(session);
     } else if (parsed.error) {
       session.callback = { error: parsed.error, state: parsed.state };
     } else if (!parsed.code) {
@@ -300,6 +363,8 @@ export function createBrowserOAuthAuthorizer({
   async function cancel(sessionId) {
     const session = sessions.get(sessionId);
     if (!session) return { sessionId, providerId, status: "missing" };
+    session.cancelled = true;
+    session.status = "cancelled";
     await cleanup(session);
     sessions.delete(sessionId);
     return { sessionId, providerId, status: "cancelled" };

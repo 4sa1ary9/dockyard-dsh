@@ -93,15 +93,32 @@ function errorDetails(value) {
   };
 }
 
-function isAuthenticationFailure(message, body) {
+function boundedErrorBody(value, limit = 4096) {
+  if (typeof value === "string") return value.slice(0, limit);
+  try {
+    const serialized = JSON.stringify(value);
+    return serialized.length <= limit ? value : `${serialized.slice(0, limit)}…`;
+  } catch {
+    return String(value ?? "").slice(0, limit);
+  }
+}
+
+function isAuthenticationFailure(message, body, { status = null, code = null } = {}) {
   const text = `${diagnosticText(message)} ${diagnosticText(body)}`
     .toLowerCase()
     .replace(/[_-]+/g, " ");
+  // Provider APIs also use the word "token" for input-token budgets. Those
+  // validation failures must never eject an otherwise valid account.
+  if (/\b(?:token|tokens)\s+(?:count|limit|length|budget)\b|\b(?:max|input|output)_?tokens?\b/.test(text)) return false;
+  const normalizedCode = String(code ?? body?.error?.code ?? body?.code ?? "").toLowerCase();
+  if (/invalid[_ -]?grant|invalid[_ -]?token|token[_ -]?expired|unauthorized|authentication[_ -]?failed/.test(normalizedCode)) return true;
+  if (Number(status) === 401) return true;
+  if (Number(status) === 403 && /(?:access token|oauth|credential|api key|authentication|unauthorized)/.test(text)) return true;
   return [
     /access token.{0,80}(?:could not be validated|invalid|expired|revok|not valid|unauthor)/,
-    /(?:invalid|expired|revok|unauthor|not valid).{0,80}(?:access token|token|credential)/,
+    /(?:invalid|expired|revok|unauthor|not valid).{0,80}(?:access token|oauth token|refresh token|credential|api key)/,
     /\b(?:unauthorized|authentication failed|login required)\b/,
-    /\bcredentials?\b.{0,50}\b(?:invalid|expired|missing|unavailable)\b/,
+    /\b(?:credentials?|api keys?)\b.{0,50}\b(?:invalid|expired|missing|unavailable|not valid)\b/,
   ].some((pattern) => pattern.test(text));
 }
 
@@ -143,15 +160,61 @@ export function nativeProviderError(providerId, message, { status, body, code } 
   // 401, while others return HTTP 403 or a JSON code such as "unauthorized"
   // with a human message. An explicit token validation failure is an unusable
   // OAuth credential, so the account pool must stop selecting it.
-  error.authExpired = statusCode === 401 || isAuthenticationFailure(resolvedMessage, body);
+  error.authExpired = isAuthenticationFailure(resolvedMessage, body, {
+    status: statusCode,
+    code: resolvedCode ?? upstreamStatus,
+  });
   error.authForbidden = !error.authExpired && statusCode === 403;
   error.quotaExhausted = quotaExhausted;
   error.rateLimited = rateLimited;
-  if (body !== undefined) error.body = body;
+  if (body !== undefined) error.body = boundedErrorBody(body);
   return error;
 }
 
 const nativeResponseControls = new WeakMap();
+const MAX_SSE_EVENT_BYTES = 4 * 1024 * 1024;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+async function readBoundedResponseText(response, limit = MAX_ERROR_BODY_BYTES) {
+  const reader = response?.body?.getReader?.();
+  if (reader) {
+    const decoder = new TextDecoder();
+    let text = "";
+    let total = 0;
+    try {
+      while (total < limit) {
+        const next = await reader.read();
+        if (next.done) break;
+        const bytes = next.value instanceof Uint8Array ? next.value : Uint8Array.from(next.value ?? []);
+        const accepted = bytes.slice(0, limit - total);
+        total += accepted.byteLength;
+        text += decoder.decode(accepted, { stream: total < limit });
+        if (accepted.byteLength < bytes.byteLength) {
+          await reader.cancel?.();
+          break;
+        }
+      }
+      return `${text}${decoder.decode()}`;
+    } finally {
+      reader.releaseLock?.();
+    }
+  }
+  if (response?.body && typeof response.body[Symbol.asyncIterator] === "function") {
+    const decoder = new TextDecoder();
+    let text = "";
+    let total = 0;
+    for await (const chunk of response.body) {
+      const bytes = chunk instanceof Uint8Array ? chunk : Uint8Array.from(chunk ?? []);
+      const accepted = bytes.slice(0, limit - total);
+      total += accepted.byteLength;
+      text += decoder.decode(accepted, { stream: total < limit });
+      if (accepted.byteLength < bytes.byteLength) break;
+    }
+    return `${text}${decoder.decode()}`;
+  }
+  const raw = typeof response?.text === "function" ? await response.text() : "";
+  return String(raw ?? "").slice(0, limit);
+}
 
 export async function fetchNativeResponse(url, init = {}, {
   providerId,
@@ -175,7 +238,7 @@ export async function fetchNativeResponse(url, init = {}, {
     clearTimeout(timer);
     upstreamSignal?.removeEventListener?.("abort", abort);
   };
-  const control = { cleanup, get timedOut() { return timedOut; }, timeoutError };
+  const control = { providerId, cleanup, get timedOut() { return timedOut; }, timeoutError };
   let handedOff = false;
   if (upstreamSignal) {
     if (upstreamSignal.aborted) abort();
@@ -186,7 +249,7 @@ export async function fetchNativeResponse(url, init = {}, {
     if (response.ok === false || (response.status !== undefined && response.status >= 400)) {
       let body = null;
       try {
-        body = await response.text();
+        body = await readBoundedResponseText(response);
       } catch {
         // Preserve the HTTP status when a mock or a broken upstream has no
         // readable error body.
@@ -211,13 +274,31 @@ export async function fetchNativeResponse(url, init = {}, {
   }
 }
 
+export function cleanupNativeResponse(response) {
+  const control = nativeResponseControls.get(response);
+  control?.cleanup();
+  nativeResponseControls.delete(response);
+}
+
 async function* responseChunks(response) {
-  if (!response?.body) return;
-  if (typeof response.body[Symbol.asyncIterator] === "function") {
-    for await (const chunk of response.body) yield chunk;
+  const body = response?.body;
+  if (!body) return;
+  if (typeof body[Symbol.asyncIterator] === "function") {
+    try {
+      for await (const chunk of body) yield chunk;
+    } finally {
+      // When the consumer breaks or throws, the generator is resumed with a
+      // return at this suspension point and the finally runs. Actively cancel
+      // so the underlying connection stops downloading instead of draining.
+      try {
+        await body.cancel?.();
+      } catch {
+        // The stream may already be torn down; nothing left to release.
+      }
+    }
     return;
   }
-  const reader = response.body.getReader?.();
+  const reader = body.getReader?.();
   if (!reader) return;
   try {
     while (true) {
@@ -226,6 +307,14 @@ async function* responseChunks(response) {
       yield next.value;
     }
   } finally {
+    // Cancel on every exit path: after a normal DONE it merely confirms the
+    // stream is closed; after an early break/throw it interrupts the
+    // underlying connection instead of leaving it downloading in background.
+    try {
+      await reader.cancel?.();
+    } catch {
+      // The stream may already be closed; mocks without cancel() are skipped.
+    }
     reader.releaseLock?.();
   }
 }
@@ -244,41 +333,120 @@ function parseSseEvent(lines) {
   if (data.length === 0) return null;
   const raw = data.join("\n");
   if (raw.trim() === "[DONE]") return { event, data: null, done: true };
+  let parsed;
   try {
-    return { event, data: JSON.parse(raw), raw };
-  } catch {
-    return { event, data: raw, raw };
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    // Corrupted payloads must surface as protocol errors; degrading them to
+    // plain strings silently drops provider events.
+    return { event, data: raw, raw, parseError: error };
   }
+  return { event, data: parsed, raw };
 }
 
-/** Yield parsed Server-Sent Events from a fetch Response. */
+/** Build a stable protocol error for an SSE payload that is not valid JSON. */
+function sseProtocolError(providerId, event, raw, cause) {
+  const snippet = String(raw ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+  const error = new Error(
+    `${providerId ?? "provider"} SSE data payload is not valid JSON`
+      + `${event ? ` (event: ${event})` : ""}${snippet ? `: ${snippet}` : ""}`
+      + `${cause?.message ? ` [${cause.message}]` : ""}`,
+  );
+  error.code = "SSE_PROTOCOL_ERROR";
+  error.providerId = providerId ?? null;
+  if (event) error.sseEvent = event;
+  if (cause !== undefined) error.cause = cause;
+  return error;
+}
+
+/**
+ * Yield parsed Server-Sent Events from a fetch Response.
+ *
+ * Framing scans incrementally for CR, LF, and CRLF line terminators, so a
+ * single large network chunk containing many small events is never mistaken
+ * for one oversized event: the byte budget only accumulates for the event
+ * that is still buffered and resets at every event boundary.
+ */
 export async function* readSseEvents(response) {
   const control = nativeResponseControls.get(response);
   const decoder = new TextDecoder();
-  let buffer = "";
+  let pendingLine = "";
   let lines = [];
+  // Bytes buffered for the not-yet-dispatched SSE event (complete lines,
+  // their separators, and the partial trailing line).
+  let eventBytes = 0;
+  // Set when the previous chunk ended with CR; a leading LF in the next
+  // chunk belongs to that CRLF pair instead of an empty line.
+  let trailingCarriageReturn = false;
+  const oversizeError = () => nativeProviderError(
+    control?.providerId,
+    "SSE event exceeded the maximum allowed size",
+  );
+  const scanChunk = (rawText) => {
+    let text = rawText;
+    if (trailingCarriageReturn) {
+      trailingCarriageReturn = false;
+      if (text.startsWith("\n")) text = text.slice(1);
+    }
+    const completeLines = [];
+    eventBytes -= pendingLine.length;
+    let start = 0;
+    for (let index = 0; index < text.length; index += 1) {
+      const character = text[index];
+      if (character !== "\n" && character !== "\r") continue;
+      let end = index;
+      if (character === "\r") {
+        if (text[index + 1] === "\n") index += 1; // CRLF is one terminator.
+        else trailingCarriageReturn = true; // A lone CR may pair with an LF in the next chunk.
+      }
+      completeLines.push(pendingLine + text.slice(start, end));
+      pendingLine = "";
+      start = index + 1;
+    }
+    pendingLine += text.slice(start);
+    eventBytes += pendingLine.length;
+    return completeLines;
+  };
+  const drainLines = (completeLines, { final = false } = {}) => {
+    const events = [];
+    const ingest = (line) => {
+      if (line !== "") {
+        eventBytes += line.length + (lines.length > 0 ? 1 : 0);
+        lines.push(line);
+        if (eventBytes > MAX_SSE_EVENT_BYTES) throw oversizeError();
+        return;
+      }
+      const parsed = parseSseEvent(lines);
+      lines = [];
+      eventBytes = pendingLine.length;
+      if (!parsed) return;
+      if (parsed.parseError) {
+        throw sseProtocolError(control?.providerId, parsed.event, parsed.raw, parsed.parseError);
+      }
+      events.push(parsed);
+    };
+    for (const line of completeLines) ingest(line);
+    if (final && pendingLine) {
+      const line = pendingLine;
+      pendingLine = "";
+      eventBytes = 0;
+      ingest(line);
+    }
+    return events;
+  };
   try {
     for await (const chunk of responseChunks(response)) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const parts = buffer.split(/\r?\n/);
-      buffer = parts.pop() ?? "";
-      for (const line of parts) {
-        if (line !== "") {
-          lines.push(line);
-          continue;
-        }
-        const parsed = parseSseEvent(lines);
-        lines = [];
-        if (parsed) {
-          yield parsed;
-          if (parsed.done) return;
-        }
+      const batch = drainLines(scanChunk(decoder.decode(chunk, { stream: true })));
+      for (const parsed of batch) {
+        yield parsed;
+        if (parsed.done) return;
       }
     }
-    buffer += decoder.decode();
-    if (buffer) lines.push(buffer);
-    const parsed = parseSseEvent(lines);
-    if (parsed) yield parsed;
+    const finalBatch = drainLines(scanChunk(decoder.decode()), { final: true });
+    for (const parsed of finalBatch) {
+      yield parsed;
+      if (parsed.done) return;
+    }
   } catch (error) {
     if (control?.timedOut && !error?.providerId) throw control.timeoutError;
     throw error;
