@@ -1,0 +1,527 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dockyard DSH · client preview</title>
+<link rel="stylesheet" href="/theme.css">
+<style>
+/* A minimal imitation of the DSH conversation shell, built from the host's
+   own tokens, so the control sits where DSH puts it. Fixture data only. */
+html,body{height:100%;margin:0}
+body{background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:14px/22px var(--dsw-font-family,"Segoe UI","Microsoft YaHei",sans-serif)}
+.preview-bar{position:fixed;top:0;left:0;right:0;z-index:5;display:flex;flex-wrap:wrap;gap:4px 14px;padding:6px 12px;background:var(--dsw-alias-bg-layer-1,#fff);border-bottom:1px solid var(--dsw-alias-border-l2,#0000001a);font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#81858c)}
+.preview-bar b{color:var(--dsw-alias-label-secondary,#61666b);font-weight:600}
+.preview-bar a{color:inherit}
+.preview-bar a[aria-current=true]{color:var(--dsw-alias-label-primary,#0f1115);font-weight:600;text-decoration:none}
+.chat{box-sizing:border-box;max-width:760px;margin:0 auto;padding:72px 16px 200px}
+.bubble{margin:0 0 18px;color:var(--dsw-alias-label-secondary,#61666b)}
+.bubble.user{margin-left:auto;width:fit-content;max-width:80%;padding:8px 14px;border-radius:18px;background:var(--dsw-specific-bubble,#edf3fe);color:var(--dsw-alias-label-primary,#0f1115)}
+.composer{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:center;padding:0 16px 16px}
+.card{box-sizing:border-box;width:100%;max-width:760px;padding-top:8px;border-radius:var(--dsw-radius-panel,28px);background:var(--dsw-specific-input-major,#fff);--dsw-elevation-stroke-color:var(--dsw-alias-border-l2,#0000001a);box-shadow:var(--dsw-elevation-soft,0 0 0 .5px #00000029,0 4px 16px #00000008)}
+.input{min-height:36px;padding:4px 8px 0 14px;color:var(--dsw-alias-label-caption,#adb2b8)}
+.row{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;min-width:0;padding:2px 8px 6px;container-type:inline-size}
+.tools,.trailing{display:flex;align-items:center;gap:12px;min-width:0}
+.trailing{flex:none;margin-left:auto}
+.add{display:grid;place-items:center;width:28px;height:28px;border:0;border-radius:999px;background:var(--dsw-specific-selector,#f5f6f7);color:inherit;font-size:16px}
+.model{display:flex;align-items:center;gap:4px;height:28px;padding:0 4px 0 8px;border:0;border-radius:var(--dsw-radius-sm,24px);background:none;color:var(--dsw-alias-label-secondary,#61666b);cursor:pointer;font:400 13px/20px inherit}
+.model:hover{background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.send{display:grid;place-items:center;width:34px;height:34px;border:0;border-radius:999px;background:var(--dsw-alias-button-info-fill,#4176e6);color:#fff}
+.menu{position:fixed;right:max(16px,calc(50% - 380px));bottom:70px;z-index:1100;display:flex;flex-direction:column;box-sizing:border-box;min-width:240px;max-height:360px;padding:4px;overflow-y:auto;border-radius:var(--dsw-radius-lg,16px);background:var(--dsw-menu-surface-fill,var(--dsw-specific-menu,#fff));backdrop-filter:var(--dsw-menu-backdrop-filter,none);box-shadow:var(--dsw-elevation-prominent,0 12px 36px #0000002e)}
+.menu[hidden]{display:none}
+.menu section+section{margin-top:3px}
+.menu .heading{padding:4px 7px 2px;color:var(--dsw-alias-label-tertiary,#81858c);font-size:11px;font-weight:500;line-height:16px}
+.menu [role=menuitemradio]{display:flex;align-items:center;gap:6px;box-sizing:border-box;min-width:100%;min-height:34px;padding:5px 7px;border:0;border-radius:var(--dsw-radius-md,8px);background:none;color:inherit;font:400 13px/18px inherit;text-align:left;cursor:pointer}
+.menu [role=menuitemradio]:hover{background:var(--dsw-alias-interactive-bg-hover,#2631480f)}
+.menu [aria-checked=true]::after{content:"✓";margin-left:auto}
+.settings{box-sizing:border-box;max-width:720px;margin:0 auto;padding:72px 24px 48px}
+.settings h1{margin:0 0 16px;font-size:16px;line-height:24px}
+body[data-view=settings] .chat,body[data-view=settings] .composer,body:not([data-view=settings]) .settings{display:none}
+</style>
+</head>
+<body>
+<nav class="preview-bar" id="preview-bar"></nav>
+
+<main class="chat">
+  <p class="bubble user">把账号池的额度展示再整理一下。</p>
+  <p class="bubble">这是一个独立预览页：账号、额度、Key 和授权流程全部来自内存里的夹具数据，不会读取或写入任何真实凭据，也不会连接正在运行的 DSH。</p>
+  <p class="bubble">点击输入框右侧的供应商按钮打开管理面板。顶部的链接可以切换主题、语言和数据场景。</p>
+  <p class="bubble user">Preview only — fixture accounts, fixture quota, fixture OAuth.</p>
+  <p class="bubble">The popup renders above the composer, exactly where the DSH host mounts the <code>conversation.input.right</code> slot.</p>
+</main>
+
+<div class="composer">
+  <div class="card">
+    <div class="input">给 DSH 发送消息</div>
+    <div class="row">
+      <div class="tools"><button type="button" class="add" aria-label="add">+</button></div>
+      <div class="trailing">
+        <div id="slot"></div>
+        <button type="button" class="model" id="model-button"></button>
+        <button type="button" class="send" aria-label="send">↑</button>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="menu" id="model-menu" role="menu" hidden></div>
+
+<section class="settings">
+  <h1 id="settings-title"></h1>
+  <div id="settings-slot"></div>
+</section>
+
+<script src="/react.js"></script>
+<script src="https://unpkg.com/react-dom@__REACT_VERSION__/umd/react-dom.development.js"></script>
+<script>
+  // The DSH web shell hands client bundles a `require` for its shared modules.
+  window.__previewModules = {};
+  window.__ModuleLoader__ = {
+    load({ id, factory }) {
+      window.__previewModules[id] = factory((name) => {
+        if (name === "react") return window.React;
+        throw new Error(`The preview host does not provide "${name}"`);
+      });
+    },
+  };
+</script>
+<script src="/client.js"></script>
+<script>
+(async () => {
+  const params = new URLSearchParams(location.search);
+  const lang = params.get("lang") === "en" ? "en" : "zh";
+  const theme = params.get("theme") === "dark" ? "dark" : "light";
+  const scenario = params.get("scenario") ?? "default";
+  const view = params.get("view") === "settings" ? "settings" : "composer";
+  const latency = Number(params.get("latency") ?? 350);
+
+  document.documentElement.lang = lang === "zh" ? "zh-CN" : "en";
+  document.documentElement.style.colorScheme = theme;
+  document.body.toggleAttribute("data-ds-dark-theme", theme === "dark");
+  document.body.dataset.view = view;
+
+  // ---- preview toolbar -------------------------------------------------
+  const link = (key, value, label) => {
+    const next = new URLSearchParams(params);
+    next.set(key, value);
+    const current = (params.get(key) ?? { theme: "light", lang: "zh", scenario: "default", view: "composer" }[key]) === value;
+    return `<a href="?${next}" aria-current="${current}">${label}</a>`;
+  };
+  document.getElementById("preview-bar").innerHTML = [
+    "<b>Dockyard preview</b>",
+    `theme: ${link("theme", "light", "light")} ${link("theme", "dark", "dark")}`,
+    `lang: ${link("lang", "zh", "中文")} ${link("lang", "en", "English")}`,
+    `scenario: ${["default", "apikey", "empty", "error", "authfail"].map((name) => link("scenario", name, name)).join(" ")}`,
+    `view: ${link("view", "composer", "composer")} ${link("view", "settings", "settings")}`,
+  ].join("<span>·</span>");
+
+  // ---- fixtures --------------------------------------------------------
+  const delay = (ms = latency) => new Promise((resolve) => setTimeout(resolve, ms));
+  const clone = (value) => JSON.parse(JSON.stringify(value));
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  const at = (offset) => new Date(Date.now() + offset).toISOString();
+  const manifest = (id, displayName) => ({
+    id, displayName, kind: "provider", dataSource: "live_oauth",
+    capabilities: ["oauth_discovery", "oauth_import", "oauth_authorization", "oauth_refresh", "quota", "catalog", "invoke", "stream"],
+  });
+  const efforts = [["low", "Low"], ["medium", "Medium"], ["high", "High"], ["xhigh", "Extra high"]]
+    .map(([id, name]) => ({ id, name, description: `${name} reasoning effort` }));
+  // Same defaults as createAccountRecord() in packages/core/src/contracts.mjs,
+  // so a fixture account carries exactly the fields a real snapshot does.
+  const account = ({ quota = {}, health = {}, subscription = {}, refresh = {}, resources = {}, ...identity }) => {
+    const updatedAt = quota.updatedAt ?? at(0);
+    return {
+      displayName: null, email: null, ...identity,
+      subscription: { plan: null, status: null, expiresAt: null, ...subscription },
+      quota: {
+        remaining: null, limit: null, unit: null, resetAt: null, source: "unknown", ...quota, updatedAt,
+        windows: (quota.windows ?? []).map((window) => ({ unit: null, resetAt: null, updatedAt, source: quota.source ?? "unknown", ...window })),
+      },
+      refresh: { accessTokenExpiresAt: null, nextRefreshAt: null, lastRefreshedAt: null, refreshable: null, ...refresh },
+      resources,
+      health: { status: "unknown", lastCheckedAt: updatedAt, cooldownUntil: null, lastError: null, ...health },
+      lastUsedAt: null,
+    };
+  };
+  const provider = (providerId, displayName, policy = "round_robin", defaultAccountId = null, accounts = []) => ({
+    providerId, manifest: manifest(providerId, displayName), policy, defaultAccountId, accounts: accounts.map(account),
+  });
+
+  const providers = scenario === "empty" ? [
+    provider("openai-codex", "Codex"), provider("claude", "Claude"), provider("antigravity", "Antigravity"),
+    provider("grok", "Grok"), provider("cursor", "Cursor"),
+  ] : [
+    provider("openai-codex", "Codex", "manual", "codex:mira", [{
+      accountId: "codex:mira", email: "mira.chen@example.com",
+      health: { status: "healthy" }, subscription: { plan: "plus", status: "active" },
+      refresh: { nextRefreshAt: at(40 * MIN), refreshable: true },
+      resources: { authSource: "official_codex_browser_oauth" },
+      // recursiveQuotaWindows() names Codex windows after the usage payload's keys.
+      quota: {
+        remaining: 62, limit: 100, unit: "percent", resetAt: at(2 * HOUR + 14 * MIN), updatedAt: at(-3 * MIN), source: "codex_usage",
+        windows: [
+          { id: "rate_limit.primary_window", name: "primary_window", remaining: 62, limit: 100, unit: "percent", resetAt: at(2 * HOUR + 14 * MIN) },
+          { id: "rate_limit.secondary_window", name: "secondary_window", remaining: 18, limit: 100, unit: "percent", resetAt: at(3 * DAY) },
+        ],
+      },
+    }, {
+      accountId: "codex:ops", email: "ops@example.com",
+      health: { status: "expired", lastError: "401 Unauthorized: the refresh token was revoked; reauthorize this account" },
+      subscription: { plan: "pro" }, quota: { updatedAt: at(-26 * HOUR), source: "codex_usage" },
+    }]),
+    provider("claude", "Claude", "round_robin", null, [{
+      accountId: "claude:8f2c", email: "mira.chen@example.com",
+      health: { status: "healthy" }, subscription: { plan: "max", status: "active" }, refresh: { nextRefreshAt: at(6 * HOUR), refreshable: true },
+      resources: { quotaDiagnostic: "Claude 官方会话状态未返回实时订阅额度；Dockyard 不显示估算百分比" },
+      quota: { updatedAt: at(-8 * MIN), source: "claude_cli_status" },
+    }]),
+    provider("antigravity", "Antigravity", "failover", null, [{
+      accountId: "antigravity:3b91e0c2", health: { status: "healthy" },
+      resources: { sessionFingerprint: "3b91e0c2", identityNote: "官方 CLI 账号身份暂未返回；已使用本地会话标识" },
+      // parseQuotaData() joins the quota group and bucket names and reports a fraction.
+      quota: {
+        remaining: 0.07, limit: 1, unit: "fraction", resetAt: at(9 * HOUR), updatedAt: at(-12 * MIN), source: "antigravity_native",
+        windows: [
+          { id: "gemini-3-pro", name: "Gemini 3 Pro / Daily", remaining: 0.07, limit: 1, unit: "fraction", resetAt: at(9 * HOUR) },
+          { id: "gemini-3-flash", name: "Gemini 3 Flash / Daily", remaining: 0.21, limit: 1, unit: "fraction", resetAt: at(9 * HOUR) },
+        ],
+      },
+    }]),
+    provider("grok", "Grok", "round_robin", null, [{
+      accountId: "grok:71aa", email: "mira@example.org",
+      health: { status: "degraded", lastError: "403 Forbidden: this plan cannot call xAI inference" },
+      subscription: { plan: "SuperGrok" },
+      resources: { quotaDiagnostic: "Grok 未提供结构化订阅额度", quotaUrl: "https://grok.com/usage" },
+    }]),
+    provider("cursor", "Cursor"),
+  ];
+
+  const model = (id, name, contextWindow, reasoning = false) => ({
+    id, name, context: { contextWindow },
+    ...(reasoning ? { reasoning: { defaultEffort: "medium", efforts } } : {}),
+  });
+  const allGroups = [
+    { id: "openai-codex", name: "Codex", models: [model("gpt-5.5-codex", "GPT-5.5 Codex", 400_000, true), model("gpt-5.5", "GPT-5.5", 400_000, true), model("gpt-5.5-mini", "GPT-5.5 mini", 200_000)] },
+    { id: "claude", name: "Claude", models: [model("claude-opus-5-5", "Claude Opus 5.5", 1_000_000, true), model("claude-sonnet-5-5", "Claude Sonnet 5.5", 1_000_000, true)] },
+    { id: "antigravity", name: "Antigravity", models: [model("gemini-3-pro", "gemini-3-pro", 1_048_576), model("gemini-3-flash", "gemini-3-flash", 1_048_576)] },
+    { id: "grok", name: "Grok", models: [model("grok-5", "Grok 5", 256_000)] },
+    { id: "moonshotai-cn", name: "Moonshot", models: [model("kimi-k3", "Kimi K3", 262_144), model("kimi-k3-turbo", "Kimi K3 Turbo", 262_144)] },
+    { id: "openrouter", name: "OpenRouter", models: [model("meta/llama-5-70b", "Llama 5 70B", 131_072)] },
+    { id: "deepseek", name: "DeepSeek", models: [model("deepseek-chat", "DeepSeek Chat", 128_000), model("deepseek-reasoner", "DeepSeek Reasoner", 128_000, true)] },
+  ];
+  const connected = new Set(providers.filter((provider) => provider.accounts.length).map((provider) => provider.providerId));
+  const subscriptionIds = new Set(providers.map((provider) => provider.providerId));
+  const groupsNow = () => allGroups.filter((group) => !subscriptionIds.has(group.id) || state.providers.find((provider) => provider.providerId === group.id)?.accounts.length);
+
+  const state = { providers, connected };
+  const snapshot = () => ({ providers: clone(state.providers) });
+  const envelope = (result) => ({ result, snapshot: snapshot() });
+  const providerOf = (providerId) => {
+    const provider = state.providers.find((entry) => entry.providerId === providerId);
+    if (!provider) throw new Error(`未知 provider：${providerId}`);
+    return provider;
+  };
+
+  // ---- model directory (ctx.modelDirectories) ---------------------------
+  const listeners = new Set();
+  let directoryState = {
+    status: "ready", error: null, failures: [],
+    groups: scenario === "empty" ? allGroups.filter((group) => !subscriptionIds.has(group.id)) : allGroups.filter((group) => !subscriptionIds.has(group.id) || connected.has(group.id)),
+    current: scenario === "empty" ? null
+      : scenario === "apikey" ? { provider: "moonshotai-cn", model: "kimi-k3" }
+        : { provider: "openai-codex", model: "gpt-5.5-codex", reasoningEffort: "medium" },
+  };
+  const setDirectory = (next) => {
+    directoryState = { ...directoryState, ...next };
+    for (const listener of [...listeners]) listener();
+    renderModelButton();
+  };
+  const directory = {
+    store: {
+      getSnapshot: () => directoryState,
+      subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+    },
+    async load() { await delay(120); return directoryState; },
+    async select(selection) {
+      setDirectory({ status: "selecting" });
+      await delay();
+      setDirectory({ status: "ready", current: { ...selection } });
+      return { ok: true, value: selection };
+    },
+  };
+  const syncGroups = () => setDirectory({ groups: groupsNow() });
+
+  // ---- remote.dockyard --------------------------------------------------
+  let sequence = 0;
+  const authSessions = new Map();
+  const overrides = new Map();
+  const candidates = { "openai-codex": [{ candidateId: "codex-cli:local", email: "local.cli@example.com", imported: false }] };
+  const newAccount = (providerId, email) => account({
+    accountId: `${providerId}:new${++sequence}`, email,
+    health: { status: "healthy" }, subscription: { plan: "plus", status: "active" }, refresh: { nextRefreshAt: at(55 * MIN), refreshable: true },
+    quota: {
+      remaining: 100, limit: 100, unit: "percent", resetAt: at(5 * HOUR), source: "codex_usage",
+      windows: [{ id: "rate_limit.primary_window", name: "primary_window", remaining: 100, limit: 100, unit: "percent", resetAt: at(5 * HOUR) }],
+    },
+  });
+  const dockyard = {
+    async snapshot() {
+      await delay();
+      if (scenario === "error") throw new Error("无法连接 Dockyard Host（预览夹具）");
+      return snapshot();
+    },
+    async refresh({ providerId } = {}) {
+      await delay(latency * 3);
+      const result = [];
+      for (const provider of state.providers) {
+        if (providerId && provider.providerId !== providerId) continue;
+        for (const account of provider.accounts) {
+          if (account.health.status !== "expired") {
+            account.quota.updatedAt = account.health.lastCheckedAt = at(0);
+            for (const window of account.quota.windows) window.updatedAt = at(0);
+          }
+          result.push({ accountId: account.accountId, diagnostics: account.health?.status === "expired" ? ["reauthorization required"] : [] });
+        }
+      }
+      return envelope(result);
+    },
+    async catalog({ providerId } = {}) {
+      await delay(latency * 2);
+      const group = allGroups.find((entry) => entry.id === providerId);
+      return { providers: providerId ? [{ providerId, count: group?.models.length ?? 0, source: "fixture", diagnostic: null }] : [], count: group?.models.length ?? 0 };
+    },
+    async scan({ providerId } = {}) {
+      await delay(latency * 2);
+      return envelope({ providers: [{ providerId, manifest: providerOf(providerId).manifest, candidates: clone(candidates[providerId] ?? []), diagnostics: [] }] });
+    },
+    async add({ providerId, candidateId } = {}) {
+      await delay(latency * 2);
+      const candidate = (candidates[providerId] ?? []).find((entry) => entry.candidateId === candidateId && !entry.imported);
+      if (!candidate) throw new Error(`没有找到未添加的 OAuth 候选：${candidateId}`);
+      candidate.imported = true;
+      const account = newAccount(providerId, candidate.email);
+      providerOf(providerId).accounts.push(account);
+      syncGroups();
+      return envelope({ accounts: [account], diagnostics: [], scan: { providers: [{ providerId, candidates: clone(candidates[providerId]), diagnostics: [] }] } });
+    },
+    async login({ providerId, openBrowser } = {}) {
+      await delay();
+      providerOf(providerId);
+      const sessionId = `fixture-${++sequence}`;
+      const codeRequired = providerId === "claude";
+      authSessions.set(sessionId, { providerId, polls: 0, codeRequired, code: null });
+      return envelope({
+        providerId, sessionId, status: "pending",
+        authorizationUrl: `${location.origin}/oauth?provider=${providerId}&session=${sessionId}`,
+        ...(codeRequired ? { authorizationCodeRequired: true, inputRequired: true } : {}),
+        ...(openBrowser && params.get("hostBrowser") === "1" ? { browserOpened: true } : {}),
+      });
+    },
+    async poll({ providerId, sessionId } = {}) {
+      await delay(120);
+      const session = authSessions.get(sessionId);
+      if (!session) return envelope({ providerId, sessionId, status: "missing", diagnostic: "授权会话不存在或已结束（预览夹具）" });
+      session.polls += 1;
+      if (scenario === "authfail" && session.polls >= 4) {
+        authSessions.delete(sessionId);
+        return envelope({ providerId, sessionId, status: "failed", diagnostic: "access_denied：授权页拒绝了本次请求（预览夹具）" });
+      }
+      const ready = session.codeRequired ? session.code !== null : session.polls >= 8;
+      if (!ready) return envelope({ providerId, sessionId, status: "pending", ...(session.codeRequired ? { authorizationCodeRequired: true, inputRequired: true } : {}) });
+      authSessions.delete(sessionId);
+      const account = newAccount(providerId, `added${sequence}@example.com`);
+      providerOf(providerId).accounts.push(account);
+      syncGroups();
+      return envelope({ providerId, sessionId, status: "completed", accounts: [{ accountId: account.accountId, email: account.email }] });
+    },
+    async submitAuthorizationCode({ providerId, sessionId, code } = {}) {
+      await delay();
+      const session = authSessions.get(sessionId);
+      if (!session) throw new Error("授权会话不存在或已结束（预览夹具）");
+      if (!String(code).includes("#")) throw new Error("授权码缺少 state，请粘贴完整回调地址或 code#state");
+      session.code = code;
+      return envelope({ providerId, sessionId, status: "processing" });
+    },
+    async cancel({ providerId, sessionId } = {}) {
+      await delay();
+      authSessions.delete(sessionId);
+      return envelope({ providerId, sessionId, status: "cancelled" });
+    },
+    async setPolicy({ providerId, policy, defaultAccountId } = {}) {
+      await delay();
+      const provider = providerOf(providerId);
+      provider.policy = policy;
+      provider.defaultAccountId = policy === "manual" ? defaultAccountId ?? provider.defaultAccountId ?? provider.accounts[0]?.accountId ?? null : null;
+      return envelope({ providerId, policy });
+    },
+    async removeAccount({ providerId, accountId } = {}) {
+      await delay(latency * 2);
+      const provider = providerOf(providerId);
+      provider.accounts = provider.accounts.filter((account) => account.accountId !== accountId);
+      if (provider.defaultAccountId === accountId) provider.defaultAccountId = null;
+      syncGroups();
+      return envelope({ providerId, accountId, diagnostics: [] });
+    },
+    async getContextWindowOverride(scope = {}) {
+      await delay(150);
+      const override = overrides.get(JSON.stringify([scope.providerId, scope.modelId, scope.accountId ?? null, scope.keyRef ?? null])) ?? null;
+      return { override, effectiveOverride: override, source: override === null ? "auto" : "custom" };
+    },
+    async setContextWindowOverride(scope = {}) {
+      await delay();
+      const key = JSON.stringify([scope.providerId, scope.modelId, scope.accountId ?? null, scope.keyRef ?? null]);
+      if (scope.value === null) overrides.delete(key);
+      else overrides.set(key, scope.value);
+      return { override: scope.value, effectiveOverride: scope.value, source: scope.value === null ? "auto" : "custom" };
+    },
+    // Native key pool: balances mirror native-usage.mjs's official balance modules.
+    async nativeKeyStatus({ providerId } = {}) { await delay(); return nativeStatus(providerId); },
+    async nativeKeyRefresh({ providerId } = {}) { await delay(latency * 3); return nativeStatus(providerId, true); },
+    async nativeKeyRegister({ providerId, ref, label } = {}) { await delay(120); keyLabels.set(ref, label ?? ref); return { providerId, ref }; },
+    async nativeKeyUnregister({ providerId, ref } = {}) { await delay(120); keyLabels.delete(ref); return { providerId, ref }; },
+    async nativeKeySetPolicy({ providerId, policy } = {}) { await delay(); nativePolicies.set(providerId, policy); return { providerId, policy }; },
+  };
+
+  // ---- DSH native settings / credentials / llm remotes -------------------
+  const settingsValue = {
+    providers: {
+      "moonshotai-cn": { baseURL: "https://api.moonshot.cn/v1", apiKeyEnv: "MOONSHOTAI_CN_API_KEY" },
+      openrouter: { baseURL: "https://openrouter.ai/api/v1" },
+    },
+  };
+  const credentials = new Map([
+    ["MOONSHOTAI_CN_API_KEY", { configured: true, writable: true, source: "dsh-credentials" }],
+    ["MOONSHOTAI_CN_DOCKYARD_BACKUP", { configured: true, writable: true, source: "dsh-credentials" }],
+  ]);
+  const keyLabels = new Map([["MOONSHOTAI_CN_API_KEY", "工作 Key"], ["MOONSHOTAI_CN_DOCKYARD_BACKUP", "备用 Key"]]);
+  const nativePolicies = new Map();
+  let settingsRevision = 1;
+  const balanceWindows = (refreshed) => [["balance", "账户余额", 4.25], ["voucher", "代金券余额", 3], ["cash", "现金余额", 1.25]]
+    .map(([id, name, remaining]) => ({ id, name, remaining, limit: null, unit: "CNY", resetAt: null, updatedAt: at(refreshed ? 0 : -6 * MIN) }));
+  function nativeStatus(providerId, refreshed = false) {
+    const activeRef = settingsValue.providers[providerId]?.apiKeyEnv ?? null;
+    const prefix = `${providerId.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_`;
+    const keys = [...credentials].filter(([ref]) => ref.startsWith(prefix)).map(([ref, credential]) => {
+      const usage = providerId === "moonshotai-cn" && ref === activeRef
+        ? { status: "ok", source: "Moonshot /v1/users/me/balance", updatedAt: at(refreshed ? 0 : -6 * MIN) } : null;
+      return {
+        ref, label: keyLabels.get(ref) ?? ref, active: ref === activeRef, configured: credential.configured, credential,
+        ...(usage ? { usage, quota: { windows: balanceWindows(refreshed) } } : {}),
+      };
+    });
+    const active = keys.find((entry) => entry.active);
+    const quotaSupported = providerId === "moonshotai-cn";
+    return {
+      providerId, quotaSupported, policy: nativePolicies.get(providerId) ?? "manual", activeRef,
+      runtimeMode: "request-key-pool", keys,
+      quota: active?.quota ?? null,
+      usage: active?.usage ?? (quotaSupported ? null : { status: "unsupported" }),
+    };
+  }
+  const hostRemote = {
+    session: { async modelCatalog() { await delay(150); return { ok: true, value: { groups: groupsNow(), failures: [], default: { provider: "deepseek", model: "deepseek-chat" } } }; } },
+    llm: {
+      async listConfigurableProviders() {
+        await delay(150);
+        return [
+          { provider: "moonshotai-cn", displayName: "Moonshot", settingsNs: "llm-pi-ai", settingsPath: ["providers", "moonshotai-cn"] },
+          { provider: "openrouter", displayName: "OpenRouter", settingsNs: "llm-pi-ai", settingsPath: ["providers", "openrouter"] },
+          { provider: "deepseek", displayName: "DeepSeek", settingsNs: "llm-deepseek", settingsPath: [] },
+        ];
+      },
+    },
+    settings: {
+      async describe() {
+        await delay(150);
+        return { namespaces: [{ ns: "llm-pi-ai", revision: settingsRevision, value: clone(settingsValue) }, { ns: "llm-deepseek", revision: 1, value: { models: {} } }] };
+      },
+      async mutate(ns, ops) {
+        await delay(150);
+        for (const { op, path, value } of ops) {
+          let target = settingsValue;
+          for (const segment of path.slice(0, -1)) target = target[segment] ??= {};
+          if (op === "unset") delete target[path.at(-1)];
+          else target[path.at(-1)] = value;
+        }
+        settingsRevision += 1;
+        return { ok: true, value: null };
+      },
+    },
+    credentials: {
+      async describe(refs) { await delay(100); return Object.fromEntries(refs.filter((ref) => credentials.has(ref)).map((ref) => [ref, credentials.get(ref)])); },
+      async set(ref) { await delay(150); credentials.set(ref, { configured: true, writable: true, source: "dsh-credentials" }); return { ok: true, value: null }; },
+      async unset(ref) { await delay(150); credentials.delete(ref); return { ok: true, value: null }; },
+    },
+  };
+
+  // ---- the host model menu the plugin decorates with group folding -------
+  const modelButton = document.getElementById("model-button");
+  const modelMenu = document.getElementById("model-menu");
+  modelMenu.setAttribute("aria-label", lang === "zh" ? "模型与推理等级" : "Model and reasoning effort");
+  function renderModelButton() {
+    const current = directoryState.current;
+    const name = directoryState.groups.find((group) => group.id === current?.provider)?.models.find((entry) => entry.id === current.model)?.name;
+    modelButton.textContent = `${name ?? current?.model ?? (lang === "zh" ? "选择模型" : "Select model")} ▾`;
+  }
+  modelButton.addEventListener("click", () => {
+    modelMenu.hidden = !modelMenu.hidden;
+    if (modelMenu.hidden) return;
+    modelMenu.replaceChildren(...directoryState.groups.map((group, index) => {
+      const section = document.createElement("section");
+      section.setAttribute("role", "group");
+      section.setAttribute("aria-labelledby", `preview-group-${index}`);
+      section.innerHTML = `<span aria-hidden="true"></span><div class="heading" id="preview-group-${index}"></div>`;
+      section.querySelector(".heading").textContent = group.name;
+      for (const entry of group.models) {
+        const option = document.createElement("button");
+        option.type = "button";
+        option.setAttribute("role", "menuitemradio");
+        option.setAttribute("aria-checked", String(directoryState.current?.provider === group.id && directoryState.current?.model === entry.id));
+        option.textContent = entry.name;
+        option.addEventListener("click", () => { modelMenu.hidden = true; void directory.select({ provider: group.id, model: entry.id }); });
+        section.append(option);
+      }
+      return section;
+    }));
+  });
+  renderModelButton();
+
+  // ---- cordis-like context and slot mounting ----------------------------
+  const plugin = window.__previewModules["@dockyard-dsh/plugin"];
+  const dictionaries = {};
+  const translate = (ns) => (key, values) => {
+    const template = dictionaries[ns]?.[lang]?.[key] ?? key;
+    return values ? template.replace(/\{(\w+)\}/g, (match, name) => (name in values ? String(values[name]) : match)) : template;
+  };
+  const slots = {};
+  const scope = {
+    remote: hostRemote,
+    modelDirectories: { directoryFor: () => directory },
+    slots: {
+      inject(name, callback) { callback(); },
+      register(spec, component) { slots[spec.name] = { spec, component }; return () => {}; },
+    },
+  };
+  await plugin.apply({
+    locale: { register(ns, value) { dictionaries[ns] = value; return () => {}; }, bind: translate },
+    remote: { ...hostRemote, $mount: async () => async () => {} },
+    get: (name) => (name === "remote.dockyard" ? dockyard : undefined),
+    inject(dependencies, callback) { callback(scope); },
+  });
+
+  const mount = (name, element, extra) => {
+    const { spec, component } = slots[name];
+    window.ReactDOM.createRoot(element).render(window.React.createElement(component, { ...spec.inject("preview-session"), ...extra, t: translate(spec.locale) }));
+    return spec;
+  };
+  mount("conversation.input.right", document.getElementById("slot"));
+  const settings = mount("settings.section", document.getElementById("settings-slot"), { close() {} });
+  document.getElementById("settings-title").textContent = settings.label();
+  window.__preview = { state, dockyard, directory, hostRemote };
+})().catch((error) => {
+  document.body.insertAdjacentHTML("beforeend", `<pre style="position:fixed;inset:auto 12px 12px;z-index:9;padding:12px;background:#fee2e2;color:#570c0c;white-space:pre-wrap">${String(error?.stack ?? error)}</pre>`);
+});
+</script>
+</body>
+</html>
