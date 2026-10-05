@@ -1513,8 +1513,7 @@ function OperationStatus({ state, providerId, t, children }) {
     return h("div", { className: "dockyard-dsh-problem dockyard-dsh-banner", role: "alert" }, h("span", null, state.error), children);
   }
   // A refresh shows its progress on the button that started it.
-  const progress = state.action && state.action !== "refresh" ? text(t, `ui.action.${state.action}`)
-    : !state.action && state.status === "loading" ? text(t, "status.reading") : null;
+  const progress = state.action && state.action !== "refresh" ? text(t, `ui.action.${state.action}`) : null;
   const message = progress ?? (state.action ? null : state.message);
   if (!message) return null;
   return h("div", {
@@ -1643,7 +1642,9 @@ function SubscriptionOverviewPopup({ providers, directoryState, modelSelectionSt
       controlState.snapshot ? null : button(null, { onClick: () => controller.ensureSnapshot().catch(() => {}) }, text(t, "ui.retry"))),
     // Until the snapshot arrives nothing is known: a failed load is the banner's
     // to explain, and model groups cannot yet be told apart from API providers.
-    controlState.snapshot ? h("div", { className: "dockyard-dsh-popup-scroll" },
+    h("div", { className: "dockyard-dsh-popup-scroll" }, !controlState.snapshot
+      ? (controlState.status === "loading" ? h("div", { className: "dockyard-dsh-note", role: "status" }, text(t, "status.reading")) : null)
+      : h(React.Fragment, null,
       h(ModelSelectionStatus, { state: modelSelectionState, t }),
       h("div", { className: "dockyard-dsh-section" },
         h("div", { className: "dockyard-dsh-section-head" },
@@ -1668,7 +1669,7 @@ function SubscriptionOverviewPopup({ providers, directoryState, modelSelectionSt
           h("span", { className: "dockyard-dsh-section-title" }, text(t, "ui.apiProviders"))),
         h("div", { className: "dockyard-dsh-provider-list" }, custom.map((group) => row(
           group.id, group.name ?? group.id, text(t, "subscription.modelCount", { count: group.models?.length ?? 0 }), null,
-        )))) : null) : null);
+        )))) : null)));
 }
 
 function SubscriptionSettingsSection({ controller, remote, t }) {
