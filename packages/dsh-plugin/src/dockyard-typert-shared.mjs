@@ -1,4 +1,14 @@
-import { z } from "zod";
+// Named imports, not the `z` namespace: the namespace keeps every zod locale
+// and JSON-schema helper alive, which was half of the browser bundle.
+import { boolean, config, enum as zodEnum, number, object, string, unknown } from "zod";
+import { en } from "zod/locales";
+
+// A bundler drops zod's own locale setup along with the namespace, and every
+// validation failure would then read "Invalid input". On the Host zod has
+// already set one up; its configuration is process-wide and is left alone.
+if (!config().localeError) config(en());
+
+const z = { boolean, enum: zodEnum, number, object, string, unknown };
 
 const PACKAGE = "@dockyard-dsh/plugin";
 
