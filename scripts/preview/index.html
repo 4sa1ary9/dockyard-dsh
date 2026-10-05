@@ -398,7 +398,7 @@ body[data-view=settings] .chat,body[data-view=settings] .composer,body:not([data
   const nativePolicies = new Map();
   let settingsRevision = 1;
   const balanceWindows = (refreshed) => [["balance", "账户余额", 4.25], ["voucher", "代金券余额", 3], ["cash", "现金余额", 1.25]]
-    .map(([id, name, remaining]) => ({ id, name, remaining, limit: null, unit: "CNY", resetAt: null, updatedAt: at(refreshed ? 0 : -6 * MIN) }));
+    .map(([id, name, remaining]) => ({ id, name, kind: "balance", remaining, limit: null, unit: "CNY", resetAt: null, updatedAt: at(refreshed ? 0 : -6 * MIN) }));
   function nativeStatus(providerId, refreshed = false) {
     const activeRef = settingsValue.providers[providerId]?.apiKeyEnv ?? null;
     const prefix = `${providerId.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_`;

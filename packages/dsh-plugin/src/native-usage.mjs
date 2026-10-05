@@ -123,21 +123,21 @@ function balanceAmount(value) {
   return finiteNumber(value) !== null ? value : null;
 }
 
+// Pay-as-you-go money is not a subscription quota. The client keys on
+// `kind: "balance"` to show it as currency instead of a percentage.
+function balanceWindow(id, name, remaining, unit, refreshedAt, limit = null) {
+  return { id, name, kind: "balance", remaining, limit, unit, resetAt: null, updatedAt: refreshedAt };
+}
+
 function deepseekBalanceWindows(balance, refreshedAt) {
   const currency = balance.currency ?? null;
   const suffix = currency ?? "unknown";
-  const rows = [
-    { id: `balance-${suffix}`, name: "账户余额", remaining: balanceAmount(balance.total_balance) },
-    { id: `granted-${suffix}`, name: "赠送余额", remaining: balanceAmount(balance.granted_balance) },
-    { id: `topped-up-${suffix}`, name: "充值余额", remaining: balanceAmount(balance.topped_up_balance) },
-  ];
-  return rows.filter((row) => row.remaining !== null).map((row) => ({
-    ...row,
-    limit: null,
-    unit: currency,
-    resetAt: null,
-    updatedAt: refreshedAt,
-  }));
+  return [
+    [`balance-${suffix}`, "账户余额", balance.total_balance],
+    [`granted-${suffix}`, "赠送余额", balance.granted_balance],
+    [`topped-up-${suffix}`, "充值余额", balance.topped_up_balance],
+  ].filter(([, , value]) => balanceAmount(value) !== null)
+    .map(([id, name, remaining]) => balanceWindow(id, name, remaining, currency, refreshedAt));
 }
 
 function deepseekBalanceModule() {
@@ -258,17 +258,7 @@ function openRouterCreditsModule() {
         status: "ok",
         source: "OpenRouter /api/v1/credits",
         updatedAt: refreshedAt,
-        quota: {
-          windows: [{
-            id: "credits",
-            name: "剩余 credits",
-            remaining: total !== null && used !== null ? total - used : null,
-            limit: total,
-            unit: "USD",
-            resetAt: null,
-            updatedAt: refreshedAt,
-          }],
-        },
+        quota: { windows: [balanceWindow("credits", "剩余 credits", total - used, "USD", refreshedAt, total)] },
         details: { totalCredits: total, totalUsage: used },
       };
     },
@@ -298,9 +288,8 @@ function moonshotBalanceModule() {
         ["balance", "账户余额", data.available_balance],
         ["voucher", "代金券余额", data.voucher_balance],
         ["cash", "现金余额", data.cash_balance],
-      ].filter(([, , value]) => finiteNumber(value) !== null).map(([id, name, remaining]) => ({
-        id, name, remaining, limit: null, unit, resetAt: null, updatedAt: refreshedAt,
-      }));
+      ].filter(([, , value]) => finiteNumber(value) !== null)
+        .map(([id, name, remaining]) => balanceWindow(id, name, remaining, unit, refreshedAt));
       return { status: "ok", source: "Moonshot /v1/users/me/balance", updatedAt: refreshedAt,
         available: finiteNumber(data.available_balance) > 0, quota: { windows } };
     },
@@ -322,8 +311,7 @@ function officialBalanceModule({ id, supports, origin, path, field, unit, scale 
       const refreshedAt = updatedAt();
       return {
         status: "ok", source: `${url.hostname} ${path}`, updatedAt: refreshedAt,
-        quota: { windows: [{ id: "balance", name: "账户余额", remaining: amount * scale,
-          limit: null, unit, resetAt: null, updatedAt: refreshedAt }] },
+        quota: { windows: [balanceWindow("balance", "账户余额", amount * scale, unit, refreshedAt)] },
       };
     },
   };

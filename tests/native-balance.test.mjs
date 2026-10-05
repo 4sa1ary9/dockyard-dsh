@@ -3,6 +3,7 @@ import test from "node:test";
 import { usageModuleFor } from "../packages/dsh-plugin/src/native-usage.mjs";
 import { NativeKeyPoolHost } from "../packages/dsh-plugin/src/native-key-pool-host.mjs";
 import { NativeKeyPoolController } from "../packages/dsh-plugin/src/native-key-pool.mjs";
+import { selectQuotaIndicator } from "../packages/dsh-plugin/src/quota-display.mjs";
 
 const fixtures = [
   { baseURL: "https://api.deepseek.com/v1", id: "deepseek-balance", url: "https://api.deepseek.com/user/balance", body: { is_available: true, balance_infos: [{ currency: "CNY", total_balance: "12.34" }] }, remaining: "12.34", unit: "CNY" },
@@ -30,6 +31,8 @@ for (const fixture of fixtures) {
     assert.equal(result.quota.windows[0].remaining, fixture.remaining);
     assert.equal(result.quota.windows[0].unit, fixture.unit);
     if (fixture.id !== "openrouter-credits") assert.equal(result.quota.windows[0].limit, null);
+    // The compact composer control shows money only for windows tagged as a balance.
+    assert.equal(selectQuotaIndicator(result.quota.windows).type, "balance");
   });
 }
 
