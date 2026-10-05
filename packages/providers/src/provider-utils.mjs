@@ -152,6 +152,8 @@ export function recursiveQuotaWindows(value, { source, now = new Date(), prefix 
         limit,
         unit,
         resetAt,
+        // Codex reports each window's real length (18000 = 5 h, 604800 = 7 d).
+        windowSeconds: finiteNumber(node.limit_window_seconds),
         source,
       });
     }

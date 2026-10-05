@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
+import { createQuotaSnapshot } from "../packages/core/src/contracts.mjs";
 import { MemorySecretStore } from "../packages/vault/src/index.mjs";
 import { createBrowserOAuthAuthorizer } from "../packages/oauth/src/browser-oauth-authorizer.mjs";
 import { createCliOAuthAuthorizer } from "../packages/oauth/src/cli-oauth-authorizer.mjs";
@@ -97,7 +98,7 @@ test("Codex driver imports local OAuth and parses live multi-window quota", asyn
           email: "live@example.test",
           plan_type: "pro",
           rate_limit: {
-            primary_window: { used_percent: 20, reset_at: 1_900_000_000_000 },
+            primary_window: { used_percent: 20, limit_window_seconds: 18_000, reset_at: 1_900_000_000_000 },
             secondary_window: { used_percent: 5, reset_after_seconds: 300 },
           },
         }),
@@ -112,6 +113,8 @@ test("Codex driver imports local OAuth and parses live multi-window quota", asyn
     assert.equal(quota.quota.remaining, 80);
     assert.equal(quota.quota.unit, "percent");
     assert.equal(quota.quota.windows.length, 2);
+    // The window's real length survives the account contract; a window without one stays null.
+    assert.deepEqual(createQuotaSnapshot(quota.quota).windows.map((window) => window.windowSeconds), [18_000, null]);
     assert.equal((await driver.getCatalog()).models.length, 0);
   } finally {
     await rm(home, { recursive: true, force: true });

@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { selectPrimaryQuotaWindow, selectQuotaIndicator } from "../packages/dsh-plugin/src/quota-display.mjs";
+import {
+  quotaLevel,
+  quotaWindowLabel,
+  selectPrimaryQuotaWindow,
+  selectQuotaIndicator,
+} from "../packages/dsh-plugin/src/quota-display.mjs";
 
 const now = Date.parse("2026-08-26T13:50:00.000Z");
 
@@ -74,4 +79,21 @@ test("compact quota indicator hides a window without a readable amount", () => {
     remaining: null,
     limit: 100,
   }]), null);
+});
+
+test("a provider-reported window length names machine-keyed windows and orders them", () => {
+  const t = (key, params) => `${key}${params ? `:${params.count}` : ""}`;
+  const fiveHour = { id: "rate_limit.primary_window", name: "primary_window", windowSeconds: 18_000, remaining: 62, limit: 100 };
+  const weekly = { id: "rate_limit.secondary_window", name: "secondary_window", windowSeconds: 604_800, remaining: 18, limit: 100 };
+  assert.equal(quotaWindowLabel(fiveHour, t), "quota.window.hours:5");
+  assert.equal(quotaWindowLabel(weekly, t), "quota.window.weekly");
+  assert.equal(selectPrimaryQuotaWindow([weekly, fiveHour], now), fiveHour);
+  // A name written for people is never replaced; an unknown machine key is only tidied.
+  assert.equal(quotaWindowLabel({ name: "Gemini 3 Pro / Daily", windowSeconds: 86_400 }, t), "Gemini 3 Pro / Daily");
+  assert.equal(quotaWindowLabel({ id: "rate_limit.primary_window", name: "primary_window" }, t), "primary window");
+  assert.equal(quotaWindowLabel({}, t), "value.quota");
+});
+
+test("quota level thresholds match the composer meter", () => {
+  assert.deepEqual([0, 10, 11, 25, 26, 100].map(quotaLevel), ["critical", "critical", "warning", "warning", "healthy", "healthy"]);
 });

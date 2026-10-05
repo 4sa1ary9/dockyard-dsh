@@ -1,3 +1,8 @@
+import { translate } from "./dockyard-locale.mjs";
+
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+
 const PERIOD_HINTS = [
   [/five[\s-]*hour|5[\s-]*hour|\b5h\b/i, 5 * 60 * 60 * 1000],
   [/one[\s-]*hour|hourly|\b1h\b|\bhour\b/i, 60 * 60 * 1000],
@@ -42,8 +47,42 @@ function numericValue(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+/** Window length in ms: the provider's own figure, else a period named in the label. */
+export function quotaWindowPeriod(window) {
+  const seconds = numericValue(window?.windowSeconds);
+  return seconds !== null && seconds > 0 ? seconds * 1000 : periodHint(window);
+}
+
 function comparisonValue(window, now) {
-  return periodHint(window) ?? resetRemaining(window, now) ?? Number.POSITIVE_INFINITY;
+  return quotaWindowPeriod(window) ?? resetRemaining(window, now) ?? Number.POSITIVE_INFINITY;
+}
+
+// Usage payloads name their windows after JSON keys ("primary_window").
+const MACHINE_NAME = /^[a-z0-9]+(?:[_.][a-z0-9]+)+$/i;
+
+/**
+ * Display name for a quota window. A name the provider wrote for people is
+ * kept; a machine key becomes the window's period when one is known.
+ */
+export function quotaWindowLabel(window, t) {
+  const name = window?.name ?? window?.id ?? null;
+  if (name && !MACHINE_NAME.test(name)) return name;
+  const period = quotaWindowPeriod(window);
+  if (period >= HOUR) {
+    const days = period / DAY;
+    if (days === 1) return translate(t, "quota.window.daily");
+    if (days === 7) return translate(t, "quota.window.weekly");
+    if (days === 30) return translate(t, "quota.window.monthly");
+    return Number.isInteger(days)
+      ? translate(t, "quota.window.days", { count: days })
+      : translate(t, "quota.window.hours", { count: Math.round((period / HOUR) * 10) / 10 });
+  }
+  return name ? name.replace(/[_.]+/g, " ") : translate(t, "value.quota");
+}
+
+/** One set of thresholds for the composer meter and the popup's quota bars. */
+export function quotaLevel(percent) {
+  return percent <= 10 ? "critical" : percent <= 25 ? "warning" : "healthy";
 }
 
 /**

@@ -60,6 +60,7 @@ function createQuotaWindow(input = {}, now = new Date()) {
     limit: numberOrNull(input.limit, "quota.windows.limit"),
     unit: stringOrNull(input.unit),
     resetAt: isoOrNull(input.resetAt, "quota.windows.resetAt"),
+    windowSeconds: numberOrNull(input.windowSeconds, "quota.windows.windowSeconds"),
     updatedAt: isoOrNull(input.updatedAt, "quota.windows.updatedAt") ?? now.toISOString(),
     source: stringOrNull(input.source) ?? "unknown",
   };
