@@ -42,6 +42,16 @@ npx @deepseek-ai/dsh plugin --profile web add github:4sa1ary9/dockyard-dsh
 npx @deepseek-ai/dsh web
 ```
 
+## UI preview
+
+The provider popup follows the DSH `--dsw-*` design tokens in light and dark. To look at it without starting DSH:
+
+```powershell
+pnpm run build:plugin
+node scripts/preview-client.mjs
+```
+
+Open `http://127.0.0.1:4173/?theme=dark&lang=en&scenario=default`. The page uses in-memory fixture accounts and never reads or writes real credentials. Tokens come from the globally installed DSH theme, with the plugin's fallbacks when it is missing; ReactDOM is loaded from unpkg, so it needs network access.
 
 ## License
 
