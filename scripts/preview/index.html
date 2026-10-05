@@ -136,7 +136,7 @@ body[data-view=settings] .chat,body[data-view=settings] .composer,body:not([data
       subscription: { plan: null, status: null, expiresAt: null, ...subscription },
       quota: {
         remaining: null, limit: null, unit: null, resetAt: null, source: "unknown", ...quota, updatedAt,
-        windows: (quota.windows ?? []).map((window) => ({ unit: null, resetAt: null, updatedAt, source: quota.source ?? "unknown", ...window })),
+        windows: (quota.windows ?? []).map((window) => ({ unit: null, resetAt: null, windowSeconds: null, updatedAt, source: quota.source ?? "unknown", ...window })),
       },
       refresh: { accessTokenExpiresAt: null, nextRefreshAt: null, lastRefreshedAt: null, refreshable: null, ...refresh },
       resources,
@@ -161,8 +161,8 @@ body[data-view=settings] .chat,body[data-view=settings] .composer,body:not([data
       quota: {
         remaining: 62, limit: 100, unit: "percent", resetAt: at(2 * HOUR + 14 * MIN), updatedAt: at(-3 * MIN), source: "codex_usage",
         windows: [
-          { id: "rate_limit.primary_window", name: "primary_window", remaining: 62, limit: 100, unit: "percent", resetAt: at(2 * HOUR + 14 * MIN) },
-          { id: "rate_limit.secondary_window", name: "secondary_window", remaining: 18, limit: 100, unit: "percent", resetAt: at(3 * DAY) },
+          { id: "rate_limit.primary_window", name: "primary_window", remaining: 62, limit: 100, unit: "percent", windowSeconds: 18_000, resetAt: at(2 * HOUR + 14 * MIN) },
+          { id: "rate_limit.secondary_window", name: "secondary_window", remaining: 18, limit: 100, unit: "percent", windowSeconds: 604_800, resetAt: at(3 * DAY) },
         ],
       },
     }, {
@@ -262,7 +262,7 @@ body[data-view=settings] .chat,body[data-view=settings] .composer,body:not([data
     health: { status: "healthy" }, subscription: { plan: "plus", status: "active" }, refresh: { nextRefreshAt: at(55 * MIN), refreshable: true },
     quota: {
       remaining: 100, limit: 100, unit: "percent", resetAt: at(5 * HOUR), source: "codex_usage",
-      windows: [{ id: "rate_limit.primary_window", name: "primary_window", remaining: 100, limit: 100, unit: "percent", resetAt: at(5 * HOUR) }],
+      windows: [{ id: "rate_limit.primary_window", name: "primary_window", remaining: 100, limit: 100, unit: "percent", windowSeconds: 18_000, resetAt: at(5 * HOUR) }],
     },
   });
   const dockyard = {

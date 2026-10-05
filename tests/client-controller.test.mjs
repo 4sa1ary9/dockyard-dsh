@@ -270,3 +270,33 @@ test("late OAuth completion preserves a newer account snapshot and does not lose
   assert.equal(controller.store.getSnapshot().auth, null);
   assert.equal(controller.authTimers.size, 0);
 });
+
+test("a waiting poll keeps a rejected authorization code visible and clears only its own failure", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let failNext = false;
+  const controller = new DockyardClientController({
+    poll: async () => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("Temporary poll failure");
+      }
+      return { snapshot, result: { status: "pending", sessionId: "login" } };
+    },
+    submitAuthorizationCode: async () => { throw new Error("state is missing"); },
+  });
+  t.after(() => controller.dispose());
+  controller.setState({ snapshot, auth: { providerId: "test", sessionId: "login", status: "pending" } });
+  controller.scheduleAuth("test", "login");
+  assert.equal(await controller.submitAuthorizationCode("test", "login", "code-without-state"), null);
+  t.mock.timers.tick(1000);
+  await setImmediate();
+  assert.equal(controller.store.getSnapshot().error, "state is missing");
+  failNext = true;
+  t.mock.timers.tick(1000);
+  await setImmediate();
+  assert.equal(controller.store.getSnapshot().error, "Temporary poll failure");
+  t.mock.timers.tick(1000);
+  await setImmediate();
+  assert.equal(controller.store.getSnapshot().error, null);
+  assert.equal(controller.store.getSnapshot().auth.status, "pending");
+});

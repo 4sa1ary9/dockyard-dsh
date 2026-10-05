@@ -29,12 +29,13 @@ export class ProviderModelSelectionController {
   store = createSnapshotStore({ providerId: null, pending: false, error: null });
   active = null;
 
-  constructor(directory, { loadCatalog, timeoutMs = 15_000, noModels, timedOut } = {}) {
+  constructor(directory, { loadCatalog, timeoutMs = 15_000, noModels, timedOut, effortUnavailable } = {}) {
     this.directory = directory;
     this.loadCatalog = loadCatalog;
     this.timeoutMs = timeoutMs;
     this.noModels = noModels ?? "No available models. Connect an account or refresh the model catalog.";
     this.timedOut = timedOut ?? "Model selection timed out. Retry after the connection recovers.";
+    this.effortUnavailable = effortUnavailable ?? "The selected reasoning effort is no longer available.";
     if (!sessionSelections.has(directory)) {
       sessionSelections.set(directory, { lastModels: new Map(), submitted: Promise.resolve() });
     }
@@ -104,7 +105,7 @@ export class ProviderModelSelectionController {
         const selection = { provider: providerId, model: model.id };
         if (explicitSelection.reasoningEffort !== undefined) {
           if (!model.reasoning?.efforts?.some((effort) => effort.id === explicitSelection.reasoningEffort)) {
-            throw new Error("The selected reasoning effort is no longer available.");
+            throw new Error(this.effortUnavailable);
           }
           selection.reasoningEffort = explicitSelection.reasoningEffort;
         }
