@@ -136,6 +136,8 @@ function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date()
         limit,
         unit,
         resetAt,
+        // Codex reports each window's real length (18000 = 5 h, 604800 = 7 d).
+        windowSeconds: finiteNumber(node.limit_window_seconds),
         source
       });
     }
@@ -460,6 +462,7 @@ function createQuotaWindow(input = {}, now = /* @__PURE__ */ new Date()) {
     limit: numberOrNull(input.limit, "quota.windows.limit"),
     unit: stringOrNull(input.unit),
     resetAt: isoOrNull(input.resetAt, "quota.windows.resetAt"),
+    windowSeconds: numberOrNull(input.windowSeconds, "quota.windows.windowSeconds"),
     updatedAt: isoOrNull(input.updatedAt, "quota.windows.updatedAt") ?? now.toISOString(),
     source: stringOrNull(input.source) ?? "unknown"
   };
@@ -12648,21 +12651,17 @@ function updatedAt() {
 function balanceAmount(value) {
   return finiteNumber2(value) !== null ? value : null;
 }
+function balanceWindow(id, name2, remaining, unit, refreshedAt, limit = null) {
+  return { id, name: name2, kind: "balance", remaining, limit, unit, resetAt: null, updatedAt: refreshedAt };
+}
 function deepseekBalanceWindows(balance, refreshedAt) {
   const currency = balance.currency ?? null;
   const suffix = currency ?? "unknown";
-  const rows = [
-    { id: `balance-${suffix}`, name: "\u8D26\u6237\u4F59\u989D", remaining: balanceAmount(balance.total_balance) },
-    { id: `granted-${suffix}`, name: "\u8D60\u9001\u4F59\u989D", remaining: balanceAmount(balance.granted_balance) },
-    { id: `topped-up-${suffix}`, name: "\u5145\u503C\u4F59\u989D", remaining: balanceAmount(balance.topped_up_balance) }
-  ];
-  return rows.filter((row) => row.remaining !== null).map((row) => ({
-    ...row,
-    limit: null,
-    unit: currency,
-    resetAt: null,
-    updatedAt: refreshedAt
-  }));
+  return [
+    [`balance-${suffix}`, "\u8D26\u6237\u4F59\u989D", balance.total_balance],
+    [`granted-${suffix}`, "\u8D60\u9001\u4F59\u989D", balance.granted_balance],
+    [`topped-up-${suffix}`, "\u5145\u503C\u4F59\u989D", balance.topped_up_balance]
+  ].filter(([, , value]) => balanceAmount(value) !== null).map(([id, name2, remaining]) => balanceWindow(id, name2, remaining, currency, refreshedAt));
 }
 function deepseekBalanceModule() {
   return {
@@ -12777,17 +12776,7 @@ function openRouterCreditsModule() {
         status: "ok",
         source: "OpenRouter /api/v1/credits",
         updatedAt: refreshedAt,
-        quota: {
-          windows: [{
-            id: "credits",
-            name: "\u5269\u4F59 credits",
-            remaining: total !== null && used !== null ? total - used : null,
-            limit: total,
-            unit: "USD",
-            resetAt: null,
-            updatedAt: refreshedAt
-          }]
-        },
+        quota: { windows: [balanceWindow("credits", "\u5269\u4F59 credits", total - used, "USD", refreshedAt, total)] },
         details: { totalCredits: total, totalUsage: used }
       };
     }
@@ -12814,15 +12803,7 @@ function moonshotBalanceModule() {
         ["balance", "\u8D26\u6237\u4F59\u989D", data.available_balance],
         ["voucher", "\u4EE3\u91D1\u5238\u4F59\u989D", data.voucher_balance],
         ["cash", "\u73B0\u91D1\u4F59\u989D", data.cash_balance]
-      ].filter(([, , value]) => finiteNumber2(value) !== null).map(([id, name2, remaining]) => ({
-        id,
-        name: name2,
-        remaining,
-        limit: null,
-        unit,
-        resetAt: null,
-        updatedAt: refreshedAt
-      }));
+      ].filter(([, , value]) => finiteNumber2(value) !== null).map(([id, name2, remaining]) => balanceWindow(id, name2, remaining, unit, refreshedAt));
       return {
         status: "ok",
         source: "Moonshot /v1/users/me/balance",
@@ -12851,15 +12832,7 @@ function officialBalanceModule({ id, supports, origin, path, field, unit, scale 
         status: "ok",
         source: `${url.hostname} ${path}`,
         updatedAt: refreshedAt,
-        quota: { windows: [{
-          id: "balance",
-          name: "\u8D26\u6237\u4F59\u989D",
-          remaining: amount * scale,
-          limit: null,
-          unit,
-          resetAt: null,
-          updatedAt: refreshedAt
-        }] }
+        quota: { windows: [balanceWindow("balance", "\u8D26\u6237\u4F59\u989D", amount * scale, unit, refreshedAt)] }
       };
     }
   };
