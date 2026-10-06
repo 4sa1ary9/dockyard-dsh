@@ -15,3 +15,7 @@ node_modules/
 
 dist/macos/
 artifacts/
+
+# Tool output: agent worktrees and browser-automation captures.
+.claude/worktrees/
+.playwright-mcp/
