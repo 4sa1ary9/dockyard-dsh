@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -194,19 +194,27 @@ export class WindowsDpapiSecretStore {
   }
 
   async read(ref) {
+    let packed;
     try {
-      const packed = await readFile(this.#fileFor(ref));
-      return JSON.parse((await this.#transform("unprotect", packed)).toString("utf8"));
+      packed = await readFile(this.#fileFor(ref));
     } catch (error) {
       if (error?.code === "ENOENT") return null;
       throw error;
     }
+    return JSON.parse((await this.#transform("unprotect", packed)).toString("utf8"));
   }
 
   async write(ref, value) {
     await mkdir(this.directory, { recursive: true });
     const packed = await this.#transform("protect", Buffer.from(JSON.stringify(value), "utf8"));
-    await writeFile(this.#fileFor(ref), packed);
+    const file = this.#fileFor(ref);
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, packed, { flag: "wx", mode: 0o600 });
+      await rename(temporary, file);
+    } finally {
+      await rm(temporary, { force: true });
+    }
     return ref;
   }
 

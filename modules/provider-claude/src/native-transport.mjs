@@ -30,12 +30,6 @@ async function readJson(path) {
   }
 }
 
-function oauthTokenFromJson(value) {
-  const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
-  const token = firstString(oauth?.accessToken, oauth?.access_token, value?.accessToken, value?.access_token);
-  return token ? { token, kind: "oauth" } : null;
-}
-
 function claudeOAuthCredentialFromJson(value) {
   const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
   const access = firstString(oauth?.accessToken, oauth?.access_token, value?.accessToken, value?.access_token);
@@ -93,14 +87,8 @@ export async function resolveClaudeAccessToken({
   if (apiKey) return { token: apiKey, kind: "apiKey" };
   const envToken = firstString(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
   if (envToken) return { token: envToken, kind: "oauth" };
-  for (const path of [
-    join(home, ".claude", ".credentials.json"),
-    join(home, ".opencodex", "claude_desktop_auth.json"),
-  ]) {
-    const found = oauthTokenFromJson(await readJson(path));
-    if (found) return found;
-  }
-  return null;
+  const persisted = await readClaudeOAuthCredential({ home });
+  return persisted ? { token: persisted.access, kind: "oauth" } : null;
 }
 
 function toolCallPart(part) {

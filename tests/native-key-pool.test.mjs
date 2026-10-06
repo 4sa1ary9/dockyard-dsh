@@ -3,18 +3,7 @@ import assert from "node:assert/strict";
 
 import { NativeKeyPoolHost } from "../packages/dsh-plugin/src/native-key-pool-host.mjs";
 
-function mergePlain(under, over) {
-  const merged = { ...under };
-  for (const [key, value] of Object.entries(over)) {
-    merged[key] = key in merged && merged[key] && typeof merged[key] === "object" && !Array.isArray(merged[key])
-      && value && typeof value === "object" && !Array.isArray(value)
-      ? mergePlain(merged[key], value)
-      : value;
-  }
-  return merged;
-}
-
-function createMemoryHost({ providerId, profile, adapterConfig, adapterMethods = {}, values, extraProviders = null }) {
+function createMemoryHost({ providerId, profile, adapterConfig, adapterMethods = {}, values }) {
   const listeners = new Map();
   const llm = {
     adapters: new Map([[providerId, { adapter: { config: adapterConfig, ...adapterMethods } }]]),
@@ -24,22 +13,8 @@ function createMemoryHost({ providerId, profile, adapterConfig, adapterMethods =
       settingsPath: ["providers", providerId],
     }],
   };
-  const namespace = {
-    providers: {
-      ...(extraProviders ?? {}),
-      ...(profile ? { [providerId]: profile } : {}),
-    },
-  };
   const settings = {
-    get: () => namespace,
-    // `llm-pi-ai` is a `settings.update` (merge) namespace: plain objects merge
-    // recursively, so one preset write must never drop a sibling route.
-    async update(ns, patch) {
-      if (ns !== "llm-pi-ai") throw new Error(`unexpected namespace ${ns}`);
-      const merged = mergePlain(namespace, patch);
-      for (const key of Object.keys(namespace)) delete namespace[key];
-      Object.assign(namespace, merged);
-    },
+    get: () => ({ providers: { [providerId]: profile } }),
   };
   const credentials = {
     async describe(ref) {
@@ -51,9 +26,6 @@ function createMemoryHost({ providerId, profile, adapterConfig, adapterMethods =
     },
     async resolve(ref) {
       return values.has(ref) ? { value: values.get(ref) } : undefined;
-    },
-    async set(ref, value) {
-      values.set(ref, value);
     },
   };
   const stateStore = {
@@ -79,63 +51,26 @@ function createMemoryHost({ providerId, profile, adapterConfig, adapterMethods =
     },
     logger: () => ({ warn() {}, error() {} }),
   };
-  return { ctx, llm, credentials, settings, namespace, stateStore, listeners };
+  return { ctx, llm, credentials, stateStore, listeners };
 }
 
-test("native key pool imports a domestic coding-plan preset without touching sibling routes", async () => {
-  const values = new Map([["DEEPSEEK_KEY_A", "secret-a"]]);
-  const { ctx, stateStore } = createMemoryHost({
-    providerId: "glm-coding-plan",
-    profile: null,
-    extraProviders: { deepseek: { apiKeyEnv: "DEEPSEEK_KEY_A" } },
-    adapterConfig: { async resolveApiKey(_provider, profile) { return values.get(profile.apiKeyEnv); } },
-    values,
+test("custom provider status exposes configured keys and unsupported quota before any refresh", async () => {
+  const { ctx, credentials, stateStore } = createMemoryHost({
+    providerId: "vol",
+    profile: { displayName: "volces", apiKeyEnv: "VOL_KEY" },
+    adapterConfig: {},
+    values: new Map([["VOL_KEY", "fake-key"]]),
   });
+  credentials.resolve = async () => { assert.fail("unsupported quota must not resolve any secret"); };
   const host = new NativeKeyPoolHost(ctx, { stateStore });
   await host.start();
-
-  const before = (await host.listKeyPresets()).presets.find((preset) => preset.id === "glm-coding-plan");
-  assert.equal(before.declared, false);
-  assert.equal(before.credentialConfigured, false);
-  assert.equal(before.baseURL, "https://open.bigmodel.cn/api/coding/paas/v4");
-  assert.ok(before.modelCount > 0);
-
-  const imported = await host.importKeyPreset("glm-coding-plan", { apiKey: "bigmodel-secret" });
-  assert.equal(imported.credentialWritten, true);
-  assert.equal(imported.credentialConfigured, true);
-  assert.equal(imported.declared, true);
-  assert.equal(imported.declaration, "written");
-  assert.equal(values.get("GLM_CODING_PLAN_API_KEY"), "bigmodel-secret");
-
-  const declared = ctx.settings.get("llm-pi-ai").providers["glm-coding-plan"];
-  assert.equal(declared.apiKeyEnv, "GLM_CODING_PLAN_API_KEY");
-  assert.equal(declared.baseURL, "https://open.bigmodel.cn/api/coding/paas/v4");
-  assert.equal(declared.api, "openai-completions");
-  assert.ok(declared.models.length > 0);
-  assert.equal(ctx.settings.get("llm-pi-ai").providers.deepseek.apiKeyEnv, "DEEPSEEK_KEY_A");
-
-  const again = await host.importKeyPreset("glm-coding-plan");
-  assert.equal(again.credentialWritten, false);
-  assert.equal(again.credentialConfigured, true);
-  assert.equal(again.declaration, "already-declared");
-
-  const status = await host.status("glm-coding-plan");
-  assert.ok(status.keys.some((entry) => entry.ref === "GLM_CODING_PLAN_API_KEY"));
-  assert.equal(stateStore.state.nativeKeyPools["glm-coding-plan"].keys.length, 1);
-  host.dispose();
-});
-
-test("native key pool rejects an unknown preset id", async () => {
-  const values = new Map();
-  const { ctx, stateStore } = createMemoryHost({
-    providerId: "glm-coding-plan",
-    profile: null,
-    adapterConfig: { async resolveApiKey() { return undefined; } },
-    values,
-  });
-  const host = new NativeKeyPoolHost(ctx, { stateStore });
-  await host.start();
-  await assert.rejects(() => host.importKeyPreset("not-a-preset", { apiKey: "x" }), /未知的国产套餐预设/);
+  const status = await host.status("vol");
+  assert.equal(status.quotaSupported, false);
+  assert.equal(status.usage.status, "unsupported");
+  assert.equal(status.keys[0].configured, true);
+  const refreshed = await host.refreshUsage("vol");
+  assert.equal(refreshed.usage.status, "unsupported");
+  assert.equal(refreshed.quotaSupported, false);
   host.dispose();
 });
 

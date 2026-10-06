@@ -529,11 +529,11 @@ export class CodexOAuthDriver {
     throw wrapped;
   }
 
-  async getCatalog() {
+  async getCatalog(context = {}) {
     if (this.catalogLoader) {
       try {
-        const catalog = await this.catalogLoader();
-        if (Array.isArray(catalog?.models) && catalog.models.length > 0) return catalog;
+        const catalog = await this.catalogLoader({ ...context, readCredential: (account) => this.#liveCredential(account, context) });
+        if (Array.isArray(catalog?.models)) return catalog;
       } catch {
         // A catalog is advisory; native invocation can still accept an exact
         // model supplied by DSH even when discovery is temporarily unavailable.
@@ -549,7 +549,12 @@ export class CodexOAuthDriver {
   async invoke(request, invocation, context = {}) {
     const credential = await this.#liveCredential(invocation.account, context);
     const executor = context.requestExecutor ?? this.requestExecutor ?? nativeCodexExecutor;
-    return executor({ request, invocation, credential, context });
+    const catalog = this.catalogLoader ? await this.catalogLoader({
+      ...context, accounts: [invocation.account], accountId: invocation.account.accountId, policy: "manual", defaultAccountId: invocation.account.accountId,
+      readCredential: async () => credential,
+    }) : null;
+    const catalogModel = catalog?.models?.find((model) => model.id === request.model);
+    return executor({ request, invocation, credential, context, catalogModel });
   }
 
   async stream(request, invocation, context = {}) {
@@ -566,16 +571,24 @@ export function createCodexPiAiExecutor({
   if (!PiAiAdapter || !createProvider || !openAICodexResponsesApi) {
     throw new Error("Codex DSH transport dependencies are incomplete");
   }
-  return async function executeCodex({ request, credential, context = {} }) {
+  return async function executeCodex({ request, credential, context = {}, catalogModel: liveModel = null }) {
     const modelId = String(request.model);
     const requestedEffort = typeof request.reasoningEffort === "string" ? request.reasoningEffort : undefined;
-    const catalogModel = typeof modelResolver === "function" ? modelResolver(modelId) : null;
+    const catalogModel = liveModel ?? (typeof modelResolver === "function" ? modelResolver(modelId) : null);
     const contextWindow = catalogModel?.contextWindow;
     const maxTokens = catalogModel?.maxTokens;
-    if (!Number.isInteger(contextWindow) || contextWindow <= 0 || !Number.isInteger(maxTokens) || maxTokens <= 0) {
-      throw new Error(`Codex live model catalog did not return context/output capacities for "${modelId}"`);
+    if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+      throw new Error(`Codex live model catalog did not return context capacity for "${modelId}"`);
     }
-    const thinkingLevelMap = catalogModel?.thinkingLevelMap;
+    const thinkingLevelMap = catalogModel?.thinkingLevelMap ?? (catalogModel?.reasoning?.efforts
+      ? Object.fromEntries(catalogModel.reasoning.efforts.map((effort) => [effort.id, effort.id])) : undefined);
+    const wireEffort = requestedEffort !== undefined && requestedEffort !== "off"
+      ? thinkingLevelMap?.[requestedEffort] : undefined;
+    if (requestedEffort !== undefined && requestedEffort !== "off" && (typeof wireEffort !== "string" || !wireEffort)) {
+      const error = new Error(`Codex live model catalog does not support reasoning effort "${requestedEffort}" for "${modelId}"`);
+      error.code = "UNSUPPORTED_REASONING_EFFORT";
+      throw error;
+    }
     const model = {
       id: modelId,
       name: typeof catalogModel?.name === "string" && catalogModel.name.length > 0
@@ -586,14 +599,18 @@ export function createCodexPiAiExecutor({
       baseUrl: DEFAULT_CODEX_BASE_URL,
       reasoning: typeof catalogModel?.reasoning === "boolean"
         ? catalogModel.reasoning
-        : requestedEffort !== undefined,
-      ...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
-      input: Array.isArray(catalogModel?.input) && catalogModel.input.length > 0
-        ? [...catalogModel.input]
+        : Boolean(thinkingLevelMap) || requestedEffort !== undefined,
+      // DSH/pi-ai enumerate only their installed effort names. A temporary
+      // supported slot preserves new official wire values such as "ultra".
+      ...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap, ...(wireEffort ? { high: wireEffort } : {}) } } : {}),
+      input: Array.isArray(catalogModel?.inputModalities ?? catalogModel?.input) && (catalogModel.inputModalities ?? catalogModel.input).length > 0
+        ? [...(catalogModel.inputModalities ?? catalogModel.input)]
         : ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow,
-      maxTokens,
+      // Codex's served directory omits an output cap; its Responses transport
+      // leaves that limit to the server instead of sending max_output_tokens.
+      ...(Number.isInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}),
     };
 
   const provider = createProvider({
@@ -618,6 +635,7 @@ export function createCodexPiAiExecutor({
     displayName: "OpenAI Codex",
     piProvider: provider,
     configuredMaxTokens: new Map(),
+    modelErrors: new Map(),
     streamIdleTimeoutMs: 300_000,
   };
   const adapter = new PiAiAdapter({
@@ -628,7 +646,7 @@ export function createCodexPiAiExecutor({
     // Codex driver callers and tests that do not mount attachments.
     resolveAttachments: () => context.attachments,
   });
-  return adapter.stream(request);
+  return adapter.stream(wireEffort ? { ...request, reasoningEffort: "high" } : request);
   };
 }
 

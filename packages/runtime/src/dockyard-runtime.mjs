@@ -522,11 +522,8 @@ export class DockyardRuntime {
     const context = providerContext(this, {
       accounts: entry.pool.list(),
     });
-    // Login/Add is always a new account operation. Existing desktop/CLI
-    // sessions are discovered by scan(), while this path must open the
-    // provider-owned browser OAuth flow so the user can choose another account.
-    // Providers may still fall back to their official CLI when browser OAuth
-    // is unavailable or explicitly disabled.
+    // Providers own sign-in: browser OAuth where supported, or the official
+    // CLI's local session on platforms that require interactive CLI login.
     const result = await entry.module.startAuthorization(context);
     return this.#persistAuthorizationResult(entry, providerId, result);
   }
@@ -548,12 +545,14 @@ export class DockyardRuntime {
   async submitAuthorizationCode(providerId, sessionId, code) {
     await this.init();
     const entry = this.#entry(providerId);
-    return entry.module.submitAuthorizationCode(sessionId, code, providerContext(this, {
+    const result = await entry.module.submitAuthorizationCode(sessionId, code, providerContext(this, {
       accounts: entry.pool.list(),
     }));
+    return this.#persistAuthorizationResult(entry, providerId, result);
   }
 
   async refreshAccount(providerId, accountId, { force = false, tolerateFailure = false } = {}) {
+    await this.init();
     // Deduplicate only calls with identical semantics: a lenient background
     // refresh must never answer a strict foreground call (and vice versa),
     // and forced refreshes must not be satisfied by cached in-flight ones.
@@ -743,7 +742,9 @@ export class DockyardRuntime {
     await this.init();
     const entry = this.#entry(providerId);
     const accounts = entry.pool.list().map((account) => providerAccount(entry.pool, account.accountId));
-    return entry.module.getCatalog(providerContext(this, { ...context, accounts }));
+    return entry.module.getCatalog(providerContext(this, {
+      ...context, accounts, policy: entry.pool.policy, defaultAccountId: entry.pool.getDefaultAccountId(),
+    }));
   }
 
   async invoke(providerId, request, context = {}) {

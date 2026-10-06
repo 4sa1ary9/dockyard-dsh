@@ -73,13 +73,13 @@ export function apply(ctx, config = {}) {
     };
     runtimeOptions.catalogLoaders = {
       ...(runtimeOptions.catalogLoaders ?? {}),
-      "openai-codex": createCodexDshCatalogLoader(),
+      "openai-codex": runtimeOptions.catalogLoaders?.["openai-codex"] ?? createCodexDshCatalogLoader(runtimeOptions.codex ?? {}),
       antigravity: antigravityCatalogLoader,
       grok: runtimeOptions.catalogLoaders?.grok ?? createGrokCatalogLoader({
         ...(runtimeOptions.grok ?? {}),
         commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand,
       }),
-      claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
+      claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ ...(runtimeOptions.claude ?? {}), registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {}),
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
@@ -100,10 +100,9 @@ export function apply(ctx, config = {}) {
           .filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0)
           .map((provider) => provider.providerId),
       );
-      const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
       await Promise.all(catalogWarmers
-        .filter(([providerId]) => providerId === "openai-codex" || connected.has(providerId))
-        .map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+        .filter(([providerId]) => connected.has(providerId))
+        .map(([providerId]) => runtime.getCatalog(providerId).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -170,9 +169,6 @@ export function apply(ctx, config = {}) {
         logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
         contextWindowOverrides: runtime.contextWindowOverrides,
       });
-      // The `/dockyard import` verb reads and writes through the same pool the
-      // composer control uses, so one in-process controller owns the state.
-      service.setNativeKeyPool?.(nativeKeyPool);
       const nativeKeyPoolReady = nativeKeyPool.start();
       void nativeKeyPoolReady.catch((error) => {
         contextLogger(ctx, "dockyard-dsh").warn?.(error);

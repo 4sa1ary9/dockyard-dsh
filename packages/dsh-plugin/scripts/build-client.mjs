@@ -17,14 +17,13 @@ const result = await build({
   external: [
     "react",
     "react/jsx-runtime",
-    "@deepseek-ai/dsh-client-store",
   ],
   write: false,
   sourcemap: false,
   legalComments: "none",
 });
 
-const bundledCode = result.outputFiles[0].text;
+const bundledCode = result.outputFiles[0].text.replace(/[\t ]+$/gm, "");
 const wrapper = `window.__ModuleLoader__.load({
   id: ${JSON.stringify(packageJson.name)},
   factory: (require) => {

@@ -45,6 +45,29 @@ export function stringValue(value) {
   return value === undefined || value === null || value === "" ? null : String(value);
 }
 
+/** Automatic account rotation must stay within every account's model capabilities. */
+export function commonAccountModels(catalogs) {
+  if (catalogs.length < 2) return catalogs[0] ?? [];
+  const indexes = catalogs.map((models) => new Map(models.map((model) => [model.id, model])));
+  return (catalogs[0] ?? []).filter((model) => indexes.every((index) => index.has(model.id))).map((model) => {
+    const entries = indexes.map((index) => index.get(model.id));
+    const result = { ...model };
+    for (const field of ["contextWindow", "maxTokens"]) {
+      const values = entries.map((entry) => entry[field]);
+      if (values.every((value) => Number.isInteger(value) && value > 0)) result[field] = Math.min(...values);
+      else delete result[field];
+    }
+    if (entries.every((entry) => Array.isArray(entry.inputModalities))) {
+      result.inputModalities = model.inputModalities.filter((value) => entries.every((entry) => entry.inputModalities.includes(value)));
+    } else delete result.inputModalities;
+    const efforts = (model.reasoning?.efforts ?? []).filter((effort) => entries.every((entry) => entry.reasoning?.efforts?.some((value) => value.id === effort.id)));
+    if (efforts.length) {
+      result.reasoning = { efforts, ...(efforts.some((effort) => effort.id === model.reasoning.defaultEffort) ? { defaultEffort: model.reasoning.defaultEffort } : {}) };
+    } else delete result.reasoning;
+    return result;
+  });
+}
+
 export async function fetchJson(url, init = {}, { timeoutMs = 20_000, fetchImpl = fetch } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

@@ -53,6 +53,7 @@ import {
 import { frameConnectMessage, decodeCursorConnectTrailer } from "../modules/provider-cursor/src/native-protocol.mjs";
 import { codexModelToDshCatalog } from "../packages/dsh-plugin/src/codex-transport.mjs";
 import { cliEventText } from "../packages/providers/src/cli-agent-transport.mjs";
+import { resolveClaudeAccessToken } from "../modules/provider-claude/src/native-transport.mjs";
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
@@ -437,7 +438,7 @@ test("Antigravity OAuth authorizer captures agy's browser URL and imports its is
   assert.equal(result.accounts[0].resources.sessionSource, "browser");
   assert.equal(result.accounts[0].resources.credentialRefreshMode, "agy_session");
   assert.equal(result.accounts[0].source, "official_antigravity_browser_oauth");
-  assert.equal(started.browserOpened, true);
+  assert.equal(started.browserOpened, false);
 });
 
 test("Antigravity OAuth authorizer reports submitted codes as processing", async () => {
@@ -1419,7 +1420,7 @@ test("Grok catalog loader caches a local provider response", async () => {
   assert.equal(reads, 1);
 });
 
-test("Claude subscription status rejects API keys and maps live registry metadata", async () => {
+test("Claude subscription status rejects API keys and enriches account models with registry metadata", async () => {
   const apiKey = parseClaudeAuthStatus(JSON.stringify({
     loggedIn: true,
     authMethod: "api_key",
@@ -1440,6 +1441,7 @@ test("Claude subscription status rejects API keys and maps live registry metadat
   assert.equal(subscription.email, "claude@example.test");
 
   const loader = createClaudeCatalogLoader({
+    fetchImpl: async () => response(200, { model_selector_config: [{ id: "cc", models: [{ id: "claude-live", name: "Claude Live" }] }] }),
     registryLoader: async () => [
       {
         id: "claude-live",
@@ -1454,7 +1456,7 @@ test("Claude subscription status rejects API keys and maps live registry metadat
       { id: "unrelated", provider: "other" },
     ],
   });
-  assert.deepEqual((await loader()).models, [{
+  assert.deepEqual((await loader({ accounts: [{ accountId: "a" }], readCredential: async () => ({ access: "test", accountId: "a" }) })).models, [{
     id: "claude-live",
     name: "Claude Live",
     inputModalities: ["text", "image"],
@@ -1614,9 +1616,25 @@ test("Claude CLI OAuth credentials are captured and refreshed from the persisted
   }
 });
 
-test("official desktop session readers can replace CLI detection and login", async () => {
+test("Claude native credentials preserve account isolation and fallback priority", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-claude-token-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  await mkdir(join(home, ".claude"));
+  await writeFile(join(home, ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }));
+  const env = { ANTHROPIC_API_KEY: "env-key", CLAUDE_CODE_OAUTH_TOKEN: "env-token" };
+  assert.deepEqual(await resolveClaudeAccessToken({ home, env, credential: { access: "selected" }, accountBound: true }), { token: "selected", kind: "oauth" });
+  assert.equal(await resolveClaudeAccessToken({ home, env, accountBound: true }), null);
+  assert.deepEqual(await resolveClaudeAccessToken({ home, env }), { token: "env-key", kind: "apiKey" });
+  assert.deepEqual(await resolveClaudeAccessToken({ home, env: { CLAUDE_CODE_OAUTH_TOKEN: "env-token" } }), { token: "env-token", kind: "oauth" });
+  assert.deepEqual(await resolveClaudeAccessToken({ home, env: {} }), { token: "file-token", kind: "oauth" });
+});
+
+test("official desktop session readers can replace CLI detection and login", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "dockyard-desktop-session-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
   const claudeStore = new MemorySecretStore();
   const claude = createClaudeDriver({
+    home,
     cliPath: "missing-claude",
     commandRunner: async () => { throw new Error("CLI should not be called"); },
     sessionReader: async () => ({
@@ -1822,14 +1840,32 @@ test("browser OAuth adapters exchange and import provider credentials", async ()
   assert.equal(cursorResult.accounts[0].resources.sessionSource, "browser");
 });
 
-test("Claude catalog collapses duplicate registry aliases", async () => {
+test("Claude catalog excludes compatible vendors and gateway model aliases", async () => {
   const loader = createClaudeCatalogLoader({
+    fetchImpl: async () => response(200, { model_selector_config: [{ id: "cc", models: [{ id: "claude-official", name: "Claude Official" }] }] }),
     registryLoader: async () => [
-      { id: "claude-live", name: "Claude Live", provider: "anthropic", contextWindow: 200_000 },
-      { id: "claude-live", name: "Claude Live", api: "anthropic-messages", maxTokens: 32_000 },
+      { id: "claude-official", name: "Claude Official", provider: "anthropic", api: "anthropic-messages", contextWindow: 200_000 },
+      { id: "kimi-model", provider: "kimi-coding", api: "anthropic-messages" },
+      { id: "minimax-model", provider: "minimax", api: "anthropic-messages" },
+      { id: "anthropic/claude-official", provider: "vercel-ai-gateway", api: "anthropic-messages" },
+      { id: "claude-official", provider: "github-copilot", api: "anthropic-messages", maxTokens: 99_999 },
+      { id: "unknown-provider", api: "anthropic-messages" },
     ],
   });
-  assert.deepEqual((await loader()).models, [{
+  assert.deepEqual((await loader({ accounts: [{ accountId: "a" }], readCredential: async () => ({ access: "test", accountId: "a" }) })).models, [{
+    id: "claude-official", name: "Claude Official", contextWindow: 200_000,
+  }]);
+});
+
+test("Claude catalog collapses duplicate official registry entries", async () => {
+  const loader = createClaudeCatalogLoader({
+    fetchImpl: async () => response(200, { model_selector_config: [{ id: "cc", models: [{ id: "claude-live", name: "Claude Live" }] }] }),
+    registryLoader: async () => [
+      { id: "claude-live", name: "Claude Live", provider: "anthropic", contextWindow: 200_000 },
+      { id: "claude-live", name: "Claude Live", provider: "anthropic", api: "anthropic-messages", maxTokens: 32_000 },
+    ],
+  });
+  assert.deepEqual((await loader({ accounts: [{ accountId: "a" }], readCredential: async () => ({ access: "test", accountId: "a" }) })).models, [{
     id: "claude-live",
     name: "Claude Live",
     contextWindow: 200_000,

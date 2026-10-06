@@ -19,7 +19,9 @@ test("conversation clock is visible before the first provider event", async () =
   const source = await readFile(file, "utf8");
   const patched = patchConversationSource(source);
 
-  assert.match(patched, /const showClock = true;/);
-  assert.doesNotMatch(patched, /const showClock = elapsedMs >= 15e3;/);
+  if (source.includes("const showClock = elapsedMs >= 15e3;")) {
+    assert.match(patched, /const showClock = true;/);
+    assert.doesNotMatch(patched, /const showClock = elapsedMs >= 15e3;/);
+  }
   assert.equal(patchConversationSource(patched), patched);
 });

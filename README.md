@@ -6,7 +6,7 @@ Windows 上把 **Codex / Grok / Claude / Cursor / Antigravity** 官方订阅接�
 
 这不是官方插件。它从 [AITabby/dockyard-dsh](https://github.com/AITabby/dockyard-dsh) **fork 后二次开发**。上游 v0.1.1 已有 macOS DMG，Windows EXE 仍在他们自己的发布流程里。这个仓库补的是：在现有 `dsh web` 里用同一套输入框供应商选择，凭据和浏览器按 Windows 走。
 
-已合入上游 `v0.1.2`。
+已同步上游 `main` 的 [`373d945`](https://github.com/AITabby/dockyard-dsh/commit/373d945fa52f7ebee6f2c5de6c8dc4315126d334)（2026-09-30）。上游最新发布标签仍为 `v0.1.1`。
 
 本仓库与 DeepSeek AI、OpenAI、xAI、Anthropic、Cursor、Google、Amazon 都没有从属关系。套餐、额度、模型能不能用，由各家账号决定。
 
@@ -29,7 +29,7 @@ Linux 默认仍 fail closed，与上游一致。
 |---|---|
 | 系统 | Windows 10 / 11 |
 | Node.js | `^22.19.0` 或 `>=24` |
-| DeepSeek Harness | `npx @deepseek-ai/dsh`；依赖按 `0.1.6-alpha.2` 对齐，已在 `0.1.6-alpha.2` 实测加载（网页端与插件客户端入口都能加载） |
+| DeepSeek Harness | `npx @deepseek-ai/dsh`；依赖按上游 `0.1.7-alpha.2` 对齐，历史加载验证版本为 `0.1.6-alpha.2`；本次同步未重启正在使用的 DSH，尚未验证新版运行时加载 |
 | pnpm | `dsh plugin add` 会转给 pnpm：`npm install -g pnpm` |
 
 ## 认证条件
@@ -50,7 +50,13 @@ Linux 默认仍 fail closed，与上游一致。
 
 ### Cursor / Antigravity
 
-Cursor：官方浏览器登录轮询，CLI 是 fallback。Antigravity：Google 官方浏览器 OAuth，需要环境变量 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` 和 `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET`，仓库不内置。
+Cursor：官方浏览器登录轮询，CLI 是 fallback。
+
+Antigravity：默认直接打开 Google 网页授权，不需要先安装或登录 `agy`。公开客户端配置参考 [LiZhenNet/dsh-antigravity](https://github.com/LiZhenNet/dsh-antigravity)，许可见 [第三方声明](modules/provider-antigravity/THIRD_PARTY_NOTICES.md)。仍可通过 `DOCKYARD_ANTIGRAVITY_CLIENT_ID` / `DOCKYARD_ANTIGRAVITY_CLIENT_SECRET` 成对覆盖；`DOCKYARD_ANTIGRAVITY_BROWSER_OAUTH=0` 可显式切回 CLI 登录。授权需要账号具备相应服务资格，插件不绕过 Google 权限限制。
+
+桌面端（`dsh-app://app/`）拦截空白弹窗时由本机 Host 打开系统浏览器；普通远程 Web 页面保留手动授权链接，不在远程服务器开浏览器。回调只监听本机回环地址，默认端口 `51121`；端口占用会明确报错，不再静默切换到终端或导入别的本机账号。
+
+授权结束后不会继续展示失效链接；点击「重新开始授权」创建新会话。后台与界面轮询共享登录结果，避免完成后误报「会话不存在」。更新插件的 Host 构建后，请完整退出并重开 DSH；仅关闭账号面板或禁用再启用插件不能保证清除模块缓存。
 
 ### 凭据放哪
 
@@ -76,7 +82,7 @@ npx @deepseek-ai/dsh web
 
 打开 `http://127.0.0.1:3080`。输入框左侧会出现 Dockyard 供应商条。改完前端后要重启 `dsh web`。
 
-上游另提供了预构建的一条命令安装器 `npx -y @dockyard-dsh/install@latest`，但它安装的是上游 bundle，不是本 fork；Windows fork 请按上面的方式从本仓库安装。当前 bundle 已按 `@deepseek-ai/dsh@0.1.6-alpha.2` 验证。
+上游另提供了预构建的一条命令安装器 `npx -y @dockyard-dsh/install@latest`，但它安装的是上游 bundle，不是本 fork；Windows fork 请按上面的方式从本仓库安装。历史加载验证版本为 `@deepseek-ai/dsh@0.1.6-alpha.2`，本次同步尚未验证新版运行时加载。
 
 命令：
 
@@ -86,38 +92,29 @@ npx @deepseek-ai/dsh web
 /dockyard add [provider] [candidateId]
 /dockyard login <provider>
 /dockyard models <provider>
-/dockyard import [预设] [API Key]
 ```
 
 `provider` 常见为 `openai-codex`、`grok`、`claude`、`cursor`、`antigravity`。
 
-## 国产订阅套餐导入
 
-`/dockyard import` 把国内 coding plan 的 API Key 提供商直接接进 DSH：Key 写进 DSH 凭据库，`llm-pi-ai` 路由按需声明，之后在「设置 → 模型」的模型选择器里就能选到对应的模型。内置预设与 `dsh-AuthInOne` 的同名套餐保持一致（同一端点、同一凭据引用），任一边配过都能复用。
+## 本地优化（2026-10-01）
 
-| 预设 id | 套餐 | 端点 | 凭据引用 |
-|---|---|---|---|
-| `glm-coding-plan` | GLM Coding Plan（智谱 BigModel） | `https://open.bigmodel.cn/api/coding/paas/v4` | `GLM_CODING_PLAN_API_KEY` |
-| `kimi-code-plan` | Kimi Code（月之暗面） | `https://api.kimi.com/coding/v1` | `KIMI_CODE_PLAN_API_KEY` |
-| `qwen-coding-plan` | ModelStudio Coding Plan（阿里云百炼） | `https://coding.dashscope.aliyuncs.com/v1` | `QWEN_CODING_PLAN_API_KEY` |
+- Windows 凭据使用原子替换写入；写入失败保留旧值。缺少 PowerShell 或浏览器启动失败时明确报错。
+- 输入框常驻账号管理入口，未选模型或额度未知时也可打开。支持 Esc 关闭并返回入口、Enter 添加 Key，以及窄窗口布局。
+- 后台刷新保留登录和账号操作状态；切换供应商后丢弃旧额度响应，添加 Key 失败时确认配置引用再清理凭据。
+- 合并重复刷新和推理档位 UI，删除无入口的授权分支，复用已有凭据解析；没有新增生产依赖。
 
-```text
-/dockyard import                          列出预设与当前状态（不读取任何 Key）
-/dockyard import glm-coding-plan <API Key> 写入 Key 并声明路由
-/dockyard import glm-coding-plan           复用 DSH 凭据库里已有的同名 Key
-```
-
-导入是 merge 语义：只补缺失的那一半，已经存在的路由 profile 和 Key 都不会被覆盖，其它 provider 路由也不受影响。GLM 与 ModelStudio 的套餐被厂商限定在受支持的编程工具与产品环境，请先确认用途合规。
+本轮验证使用独立浏览器和模拟账户，不启动或重启现有 DSH。真实供应商登录与已安装 DSH 的端到端加载仍需在空闲时验证。
 
 ## 开发
 
 ```powershell
-npm install
-npm test
-npm run build
+pnpm install --frozen-lockfile
+pnpm test
+pnpm run build
 ```
 
-发布入口仍是 `packages/dsh-plugin/dist/index.mjs` 和 `packages/dsh-plugin/lib/client.js`。改 provider 或 vault 后要重新 `npm run build` 再提交产物。
+发布入口仍是 `packages/dsh-plugin/dist/index.mjs` 和 `packages/dsh-plugin/lib/client.js`。改 provider 或 vault 后要重新 `pnpm run build` 再提交产物。
 
 ## 许可证
 

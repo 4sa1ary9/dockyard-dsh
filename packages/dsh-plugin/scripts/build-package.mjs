@@ -33,4 +33,8 @@ await build({
 
 await import("./build-client.mjs");
 await copyFile(keychainHelperSource, keychainHelperOutput);
+await copyFile(
+  resolve(repositoryRoot, "modules/provider-antigravity/THIRD_PARTY_NOTICES.md"),
+  resolve(packageRoot, "dist/THIRD_PARTY_NOTICES.md"),
+);
 console.log(`Dockyard DSH plugin bundle written: ${outputPath}`);

@@ -196,8 +196,11 @@ test("Antigravity native transport uses streamGenerateContent SSE", async () => 
   assert.equal(body.project, "fixture-project");
   assert.equal(body.model, "gemini-3.7-flash-medium");
   assert.deepEqual(body.request.contents[0], { role: "user", parts: [{ text: "Hi" }] });
-  assert.deepEqual(body.request.generationConfig, { temperature: 0.7, maxOutputTokens: 4096 });
-  assert.equal(body.request.generationConfig.thinkingConfig, undefined);
+  assert.deepEqual(body.request.generationConfig, {
+    temperature: 0.7,
+    maxOutputTokens: 65536,
+    thinkingConfig: { includeThoughts: true, thinkingBudget: 8192 },
+  });
   assert.equal(chunks.find((chunk) => chunk.type === "text-delta")?.text, "fast");
   assert.deepEqual(chunks.find((chunk) => chunk.type === "usage")?.usage, {
     inputTokens: 12,
@@ -205,6 +208,26 @@ test("Antigravity native transport uses streamGenerateContent SSE", async () => 
     totalTokens: 17,
     cacheReadTokens: 3,
   });
+});
+
+test("Antigravity buildAntigravityRequest sets thinkingConfig based on reasoningEffort and model", async () => {
+  const reqDefault = await buildAntigravityRequest({ model: "gemini-3.8-flash", messages: [{ role: "user", content: "Hi" }] });
+  assert.deepEqual(reqDefault.generationConfig.thinkingConfig, { includeThoughts: true });
+
+  const reqLow = await buildAntigravityRequest({ model: "gemini-3.8-flash", reasoningEffort: "low", messages: [{ role: "user", content: "Hi" }] });
+  assert.deepEqual(reqLow.generationConfig.thinkingConfig, { includeThoughts: true, thinkingBudget: 1024 });
+
+  const reqMedium = await buildAntigravityRequest({ model: "gemini-3.8-flash", reasoningEffort: "medium", messages: [{ role: "user", content: "Hi" }] });
+  assert.deepEqual(reqMedium.generationConfig.thinkingConfig, { includeThoughts: true, thinkingBudget: 8192 });
+
+  const reqHigh = await buildAntigravityRequest({ model: "gemini-3.8-flash", reasoningEffort: "high", messages: [{ role: "user", content: "Hi" }] });
+  assert.deepEqual(reqHigh.generationConfig.thinkingConfig, { includeThoughts: true, thinkingBudget: -1 });
+
+  const reqNone = await buildAntigravityRequest({ model: "gemini-3.8-flash", reasoningEffort: "none", messages: [{ role: "user", content: "Hi" }] });
+  assert.deepEqual(reqNone.generationConfig.thinkingConfig, { includeThoughts: false, thinkingBudget: 0 });
+
+  const reqModelSuffix = await buildAntigravityRequest({ model: "gemini-3.8-flash-high", messages: [{ role: "user", content: "Hi" }] });
+  assert.deepEqual(reqModelSuffix.generationConfig.thinkingConfig, { includeThoughts: true, thinkingBudget: -1 });
 });
 
 test("Antigravity Gemini 3 history flattens unsigned tool calls instead of sending functionCall", async () => {
@@ -318,11 +341,59 @@ test("Antigravity Gemini 3 history echoes thought signatures on functionCall par
         functionCall: {
           name: "read_lints",
           args: { paths: ["app.js"] },
-          thoughtSignature: "sig-abc",
-          thought_signature: "sig-abc",
         },
         thoughtSignature: "sig-abc",
         thought_signature: "sig-abc",
+      }],
+    },
+    {
+      role: "user",
+      parts: [{ functionResponse: { name: "read_lints", response: { name: "read_lints", content: "[]" } } }],
+    },
+  ]);
+});
+
+test("Antigravity Gemini 3 history strips thought signatures from inside functionCall", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-3.8-flash",
+    messages: [
+      { role: "user", content: "check status" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            id: "call-nested-1",
+            name: "read_lints",
+            arguments: { paths: ["app.js"] },
+            functionCall: {
+              name: "read_lints",
+              args: { paths: ["app.js"] },
+              thoughtSignature: "sig-nested",
+              thought_signature: "sig-nested",
+            },
+          },
+        ],
+      },
+      {
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: "call-nested-1", name: "read_lints", content: "[]" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(native.contents, [
+    { role: "user", parts: [{ text: "check status" }] },
+    {
+      role: "model",
+      parts: [{
+        functionCall: {
+          name: "read_lints",
+          args: { paths: ["app.js"] },
+        },
+        thoughtSignature: "sig-nested",
+        thought_signature: "sig-nested",
       }],
     },
     {
@@ -377,8 +448,6 @@ test("Antigravity Gemini 3 history supports mixed assistant content and tool_cal
           functionCall: {
             name: "default_api:bash",
             args: { command: "git status" },
-            thoughtSignature: "sig-bash-1",
-            thought_signature: "sig-bash-1",
           },
           thoughtSignature: "sig-bash-1",
           thought_signature: "sig-bash-1",
@@ -403,6 +472,64 @@ test("Antigravity sliding window auto-compacts long history beyond safe threshol
   assert.equal(native.contents[0].parts[0].text, "initial goal: build app");
   assert.match(native.contents[1].parts[0].text, /sliding window active/);
   assert.equal(native.contents.at(-1).parts[0].text, "turn message 60");
+});
+
+test("Antigravity sliding window preserves static prefix and milestone across turns for prompt caching", async () => {
+  const baseMessages = [{ role: "user", content: "initial goal: build app" }];
+  for (let i = 1; i <= 50; i++) {
+    baseMessages.push({ role: i % 2 === 1 ? "assistant" : "user", content: `turn message ${i}` });
+  }
+  const turn50 = await buildAntigravityRequest({
+    model: "gemini-3.8-flash",
+    messages: baseMessages,
+  });
+  const turn51 = await buildAntigravityRequest({
+    model: "gemini-3.8-flash",
+    messages: [...baseMessages, { role: "assistant", content: "turn message 51" }],
+  });
+  // Milestone text MUST be identical across consecutive turns to preserve prefix caching
+  assert.equal(turn50.contents[1].parts[0].text, turn51.contents[1].parts[0].text);
+  // Cut start index must be frozen across quantum turns
+  assert.equal(turn50.contents[2].parts[0].text, turn51.contents[2].parts[0].text);
+});
+
+test("Antigravity Gemini 3 surgical sanitization preserves signed call prefix when an unsigned call appears", async () => {
+  const native = await buildAntigravityRequest({
+    model: "gemini-3.8-flash",
+    messages: [
+      { role: "user", content: "first step" },
+      {
+        role: "assistant",
+        content: [
+          { type: "tool-call", id: "call-signed", name: "read_file", arguments: { path: "a.js" }, thought_signature: "sig-valid" },
+        ],
+      },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call-signed", name: "read_file", content: "ok" }],
+      },
+      { role: "user", content: "second step" },
+      {
+        role: "assistant",
+        parts: [
+          { functionCall: { name: "unsigned_tool", args: {} } },
+        ],
+      },
+      {
+        role: "user",
+        parts: [
+          { functionResponse: { name: "unsigned_tool", response: { content: "res" } } },
+        ],
+      },
+    ],
+  });
+  // The first signed tool call MUST remain a native functionCall with thoughtSignature intact
+  assert.equal(native.contents[1].parts[0].thoughtSignature, "sig-valid");
+  assert.equal(native.contents[1].parts[0].functionCall.name, "read_file");
+  assert.equal(native.contents[2].parts[0].functionResponse.name, "read_file");
+  // Only the second unsigned tool call is converted to text
+  assert.match(native.contents[4].parts[0].text, /\[tool call: unsigned_tool\]/);
+  assert.match(native.contents[5].parts[0].text, /\[tool result: unsigned_tool\]/);
 });
 
 test("Antigravity native transport attaches thought signatures to streamed tool calls", async () => {

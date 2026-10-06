@@ -201,7 +201,18 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
   if (owned.length === 0) throw new ValidationError("At least one Dockyard provider is required");
   const catalogPromises = new Map();
   const catalogCache = new Map();
+  const catalogScopes = new Map();
   const STREAM_CATALOG_REFRESH_MS = 60_000;
+
+  function syncCatalogScope(provider) {
+    const state = runtime.snapshot?.()?.providers?.find((entry) => entry.providerId === provider);
+    const scope = JSON.stringify([state?.policy, state?.defaultAccountId, state?.accounts?.map((account) => account.accountId).sort()]);
+    if (catalogScopes.get(provider) !== scope) {
+      catalogScopes.set(provider, scope);
+      catalogCache.delete(provider);
+      catalogPromises.delete(provider);
+    }
+  }
 
   async function ensureRuntimeReady() {
     if (typeof runtime.init === "function") await runtime.init();
@@ -238,6 +249,7 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
   }
 
   async function providerCatalog(provider, signal) {
+    syncCatalogScope(provider);
     // The catalog is provider-scoped shared state. Binding the single
     // in-flight fetch to the FIRST caller's AbortSignal meant one cancelled
     // request killed the catalog for everyone else while later callers'
@@ -248,7 +260,7 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
       promise = Promise.resolve()
         .then(() => runtime.getCatalog(provider, {}))
         .then((catalog) => {
-          catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+          if (catalogPromises.get(provider) === promise) catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
           return catalog;
         })
         .finally(() => {
@@ -260,6 +272,7 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
   }
 
   function cachedProviderCatalog(provider) {
+    syncCatalogScope(provider);
     const entry = catalogCache.get(provider);
     if (!entry) return null;
     if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(provider)) {
@@ -271,6 +284,7 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
   }
 
   function warmProviderCatalog(provider) {
+    syncCatalogScope(provider);
     if (!catalogCache.has(provider) && !catalogPromises.has(provider)) {
       // A cold catalog is advisory for generation. The selected model is
       // already known by DSH, so discovery can finish after the request starts.
@@ -279,13 +293,19 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
   }
 
   function fastResolveModel(provider, model) {
+    const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
+    const fallback = {
+      provider,
+      id: model,
+      name: model,
+      ...(isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}),
+    };
     const catalog = cachedProviderCatalog(provider);
     if (!catalog) {
       warmProviderCatalog(provider);
-      return { provider, id: model, name: model };
+      return fallback;
     }
-    return providerCatalogModels(provider, catalog).find((entry) => entry.id === model)
-      ?? { provider, id: model, name: model };
+    return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? fallback;
   }
 
   return {
@@ -307,10 +327,16 @@ export function createDockyardLlmAdapter({ runtime, providerIds, attachmentsReso
 
     async resolveModel(provider, model, signal) {
       await ensureRuntimeReady();
-      if (!providerHasConnectedAccount(runtime, provider)) return { provider, id: model, name: model };
+      const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
+      const fallback = {
+        provider,
+        id: model,
+        name: model,
+        ...(isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}),
+      };
+      if (!providerHasConnectedAccount(runtime, provider)) return fallback;
       const catalog = await providerCatalog(provider, signal);
-      return providerCatalogModels(provider, catalog).find((entry) => entry.id === model)
-        ?? { provider, id: model, name: model };
+      return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? fallback;
     },
 
     async prepareCall(provider, model, signal) {

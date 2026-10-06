@@ -11,7 +11,7 @@ DMG="$DIST_ROOT/Dockyard-DSH-macos-universal.dmg"
 # failure, or interruption (no fixed .stage path left behind).
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/dockyard-dsh-stage.XXXXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
-DSH_VERSION="${DSH_VERSION:-0.1.1-rc.2}"
+DSH_VERSION="${DSH_VERSION:-0.1.7-alpha.2}"
 PNPM_VERSION="${PNPM_VERSION:-10.12.4}"
 NODE_VERSION="${NODE_VERSION:-22.19.0}"
 read -r -a TARGET_ARCHES <<< "${TARGET_ARCHES:-arm64 x64}"
@@ -88,6 +88,9 @@ npm_config_cache="$NPM_CACHE" npm install \
 "$NODE_FOR_BUILD" "$REPO_ROOT/scripts/patch-dsh-latency.mjs" \
   "$STAGE/runtime/dsh/node_modules/@deepseek-ai/dsh-llm-pi-ai/lib/index.js" \
   "$STAGE/runtime/dsh/node_modules/@deepseek-ai/dsh-client-ui-conversation/lib/client.js"
+"$NODE_FOR_BUILD" "$REPO_ROOT/scripts/patch-dsh-session-format.mjs" \
+  "$STAGE/runtime/dsh/node_modules/@deepseek-ai/dsh-session-format-v0-to-v1/lib/index.js" \
+  "$STAGE/runtime/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/worker.cjs"
 
 log "install pnpm for build-time profile assembly"
 npm_config_cache="$NPM_CACHE" npm install \

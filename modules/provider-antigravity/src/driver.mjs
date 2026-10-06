@@ -29,6 +29,7 @@ import {
 } from "../../../packages/providers/src/session-source.mjs";
 import {
   createAntigravityNativeQuotaReader,
+  readAntigravityKeychainToken,
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
 } from "./native-transport.mjs";
@@ -63,19 +64,37 @@ const ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE
     // The same OAuth token is used both for userinfo and Google's Code Assist
     // endpoints. Keep the upstream API scope instead of authorizing a token
     // that can identify the user but cannot call streamGenerateContent.
+    "https://www.googleapis.com/auth/aicode",
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/cclog",
+    "https://www.googleapis.com/auth/experimentsandconfigs",
   ].join(" ");
 
 // agy models currently returns only id/name rows. These pinned capacities
 // mirror Google's published model card and act purely as a capacity overlay:
 // mergedAntigravityRegistry attaches them only when the live directory itself
 // references the id, so the fallback can never invent a callable model.
-// Source: https://deepmind.google/models/model-cards/gemini-3-7-flash/
+// Source: https://deepmind.google/models/model-cards/
 const OFFICIAL_ANTIGRAVITY_MODEL_METADATA = Object.freeze([
   Object.freeze({
+    id: "gemini-3.8-flash",
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
+  }),
+  Object.freeze({
+    id: "gemini-3.8-pro",
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
+  }),
+  Object.freeze({
     id: "gemini-3.7-flash",
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
+  }),
+  Object.freeze({
+    id: "gemini-3.7-pro",
     contextWindow: 1_048_576,
     maxTokens: 65_536,
   }),
@@ -1286,10 +1305,96 @@ function publicAntigravityAuthSession(session) {
     authorizationUrl: session.authorizationUrl,
     instructions: session.instructions,
     startedAt: session.startedAt,
-    ...(session.browserOpened ? { browserOpened: true } : {}),
+    browserOpened: session.browserOpened === true,
+    ...(session.terminalOpened ? { terminalOpened: true } : {}),
     ...(session.inputRequired ? { inputRequired: true } : {}),
     diagnostic: session.diagnostic ?? null,
   };
+}
+
+export async function launchAntigravityInteractiveTerminal({
+  cliPath = DEFAULT_CLI, environment = process.env, commandRunner = runCommand,
+} = {}) {
+  // Start-Process gives the official console application its own visible
+  // terminal. No prompt or slash command is submitted to the model.
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$agyCommand = Get-Command -Name $env:DOCKYARD_ANTIGRAVITY_LOGIN_CLI -CommandType Application -ErrorAction Stop",
+    "Start-Process -FilePath $agyCommand.Source -WorkingDirectory $env:DOCKYARD_ANTIGRAVITY_LOGIN_HOME -WindowStyle Normal -ErrorAction Stop | Out-Null",
+  ].join("; ");
+  await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    env: { ...environment, DOCKYARD_ANTIGRAVITY_LOGIN_CLI: cliPath, DOCKYARD_ANTIGRAVITY_LOGIN_HOME: homedir() },
+    includeAccountInfo: true,
+    timeoutMs: 15_000,
+  });
+}
+
+/** Windows imports the account owned by the official CLI's local login. */
+export function createAntigravityInteractiveAuthorizer({
+  cliPath = DEFAULT_CLI,
+  environment = process.env,
+  timeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
+  launchTerminal = launchAntigravityInteractiveTerminal,
+  tokenReader = ({ force = true } = {}) => environment.DOCKYARD_ANTIGRAVITY_TOKEN_FILE
+    ? readAntigravityTokenFile({ env: environment })
+    : readAntigravityKeychainToken({ force }) ?? readAntigravityTokenFile({ env: environment }),
+} = {}) {
+  const sessions = new Map();
+  const instructions = "请在官方 agy 终端完成登录；Dockyard 会读取并接入本机当前账号。切换账号请在官方终端使用 /logout 后重新登录。";
+  const usable = (auth) => Boolean(auth?.token
+    && (!auth.expiresAt || Date.parse(auth.expiresAt) > Date.now() + 30_000));
+  function complete(session, auth, context) {
+    session.status = "completed";
+    session.instructions = "已读取官方 agy 的本机登录态，当前账号已接入 Dockyard。";
+    sessions.delete(session.sessionId);
+    return {
+      ...publicAntigravityAuthSession(session),
+      accounts: [candidate(context.now instanceof Date ? context.now : new Date(), {
+        email: auth.email,
+        session: auth,
+        existingAccounts: context.accounts ?? [],
+        source: "official_antigravity_cli_session",
+        sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI,
+      })],
+    };
+  }
+  async function begin(context = {}) {
+    const session = {
+      sessionId: `${PROVIDER_ID}:interactive:${randomUUID()}`,
+      providerId: PROVIDER_ID, status: "pending", instructions,
+      startedAt: new Date().toISOString(), browserOpened: false, terminalOpened: false,
+      authorizationUrl: null, diagnostic: null,
+    };
+    const auth = await tokenReader({ force: true });
+    if (usable(auth)) return complete(session, auth, context);
+    try {
+      await launchTerminal({ cliPath, environment });
+      session.terminalOpened = true;
+      sessions.set(session.sessionId, session);
+    } catch {
+      session.status = "failed";
+      session.diagnostic = "无法打开官方 agy 终端。请在终端运行 agy 完成登录，然后回到 Dockyard 扫描并添加账号。";
+    }
+    return publicAntigravityAuthSession(session);
+  }
+  async function poll(sessionId, context = {}) {
+    const session = sessions.get(sessionId);
+    if (!session) return { sessionId, providerId: PROVIDER_ID, status: "missing", instructions };
+    if (Date.now() - Date.parse(session.startedAt) >= timeoutMs) {
+      sessions.delete(sessionId);
+      return { ...publicAntigravityAuthSession(session), status: "failed", diagnostic: "等待官方终端登录超时。完成登录后，请重新扫描并添加账号。" };
+    }
+    const auth = await tokenReader();
+    return usable(auth) ? complete(session, auth, context) : publicAntigravityAuthSession(session);
+  }
+  async function cancel(sessionId) {
+    sessions.delete(sessionId);
+    return { sessionId, providerId: PROVIDER_ID, status: "cancelled" };
+  }
+  async function submitAuthorizationCode() {
+    throw new Error("请在官方 agy 终端输入验证码，完成后 Dockyard 会自动接入当前账号。");
+  }
+  return Object.freeze({ begin, poll, cancel, submitAuthorizationCode });
 }
 
 /**
@@ -1310,7 +1415,7 @@ export function createAntigravityOAuthAuthorizer({
   tokenReader = readAntigravityTokenFile,
   usePty = process.platform === "darwin",
   ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
-  instructions = "已打开 Google 官方验证页；选择账号并完成验证后，DSH 会自动接入。",
+  instructions = "正在准备 Google 官方验证；授权链接出现后，请打开链接并完成登录。",
 } = {}) {
   if (!cliPath) throw new Error("Antigravity OAuth authorizer requires an agy CLI path");
   if (typeof spawnImpl !== "function") throw new Error("Antigravity OAuth authorizer requires a process spawner");
@@ -1354,7 +1459,9 @@ export function createAntigravityOAuthAuthorizer({
             ? "Google 验证超时，请重新点击登录添加账号。"
             : session.launchError
               ? `无法启动 agy 官方验证：${session.launchError}`
-              : `agy 官方验证未完成（退出码 ${session.exitCode ?? "unknown"}）。`;
+              : /authentication required|not logged into Antigravity|interactive (?:terminal|session)|not a terminal/i.test(session.output)
+                ? "当前 agy 需要在交互终端完成首次登录。请在终端运行 agy，完成登录后回到 Dockyard 扫描并添加账号。"
+                : `agy 官方验证未完成（退出码 ${session.exitCode ?? "unknown"}）。请在交互终端运行 agy 检查登录状态。`;
           return publicAntigravityAuthSession(session);
         }
 
@@ -1403,6 +1510,7 @@ export function createAntigravityOAuthAuthorizer({
     const childEnv = {
       ...environment,
       HOME: profileDir,
+      USERPROFILE: profileDir,
       XDG_CONFIG_HOME: join(profileDir, ".config"),
       DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath,
     };
@@ -1420,9 +1528,9 @@ export function createAntigravityOAuthAuthorizer({
       authorizationUrl: null,
       instructions,
       startedAt: new Date().toISOString(),
-      // agy owns the official browser OAuth flow and opens this URL itself.
-      // The DSH host must not open the captured URL a second time.
-      browserOpened: true,
+      // Starting agy does not prove that a browser opened. The host can open
+      // a captured authorization URL and report its own launch result.
+      browserOpened: false,
       exitCode: null,
       launchError: null,
       output: "",
@@ -1468,6 +1576,7 @@ export function createAntigravityOAuthAuthorizer({
     } catch (error) {
       session.launchError = redactError(error);
       session.exitCode = -1;
+      return finalize(session, {});
     }
     return publicAntigravityAuthSession(session);
   }
@@ -1572,7 +1681,9 @@ export class AntigravityOfficialSessionDriver {
     this.quotaReader = quotaReader;
     this.tokenResolver = tokenResolver;
     this.identityFromOfficialSession = identityFromOfficialSession;
-    this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
+    const cliAuthorizer = process.platform === "win32"
+      ? createAntigravityInteractiveAuthorizer : createAntigravityOAuthAuthorizer;
+    this.cliOAuthAuthorizer = cliAuthorizer({
       cliPath,
       environment: env,
       timeoutMs: authorizationTimeoutMs,
@@ -2126,12 +2237,10 @@ export class AntigravityOfficialSessionDriver {
   }
 
   async startAuthorization(context = {}) {
-    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
-      return this.oauthAuthorizer.begin(context);
-    }
-    const started = await this.browserAuthorizer.begin(context);
-    if (started.status === "failed") return this.cliOAuthAuthorizer.begin(context);
-    return started;
+    // A callback-port or browser setup failure must remain visible. Silently
+    // switching to agy hides the cause and may import a different local account.
+    // Explicit browserOAuth:false / a custom authorizer still supports CLI use.
+    return this.oauthAuthorizer.begin(context);
   }
 
   #authorizationAuthorizer(sessionId) {

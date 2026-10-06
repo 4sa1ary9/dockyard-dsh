@@ -1,3 +1,5 @@
+import { isLoopbackHostname } from "./provider-utils.mjs";
+
 /**
  * Small provider-neutral helpers for native streaming transports.
  *
@@ -11,11 +13,6 @@
 function numericStatus(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isLoopbackHostname(hostname) {
-  const normalized = String(hostname ?? "").toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 /**

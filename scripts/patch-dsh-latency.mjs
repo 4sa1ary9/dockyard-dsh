@@ -28,16 +28,52 @@ export function patchPiAiSource(source) {
     "const apiKeyPromise = Promise.resolve().then(() => this.config.resolveApiKey(options.provider, profile));",
     "parallel API-key resolution",
   );
-  source = replaceOnce(
-    source,
-    `const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext({
+
+  const context011 = `const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext({
 					...options,
 					signal: watchdog.signal
 				}, attachments, onReplayDegrade, profile.maxRequestImageBytes, {
 					maxPixels: profile.requestImagePixelBudget,
 					maxBytes: profile.requestImageMaxBytes
-				});`,
-    `const contextPromise = Promise.resolve().then(() => attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : toPiContext({
+				});`;
+
+  const context012 = `const context = attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : await toPiContext({
+					...options,
+					signal: watchdog.signal
+				}, {
+					attachments,
+					resolveImageAccess: (ref) => this.config.resolveImageAccess?.(attachments, ref),
+					maxRequestImageBytes: profile.maxRequestImageBytes,
+					requestImagePolicy: {
+						maxPixels: profile.requestImagePixelBudget,
+						maxBytes: profile.requestImageMaxBytes
+					}
+				}, onReplayDegrade);`;
+
+  if (source.includes(context012)) {
+    source = replaceOnce(
+      source,
+      context012,
+      `const contextPromise = Promise.resolve().then(() => attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : toPiContext({
+					...options,
+					signal: watchdog.signal
+				}, {
+					attachments,
+					resolveImageAccess: (ref) => this.config.resolveImageAccess?.(attachments, ref),
+					maxRequestImageBytes: profile.maxRequestImageBytes,
+					requestImagePolicy: {
+						maxPixels: profile.requestImagePixelBudget,
+						maxBytes: profile.requestImageMaxBytes
+					}
+				}, onReplayDegrade));
+				const [apiKey, context] = await Promise.all([apiKeyPromise, contextPromise]);`,
+      "parallel request-context conversion (0.1.2)",
+    );
+  } else {
+    source = replaceOnce(
+      source,
+      context011,
+      `const contextPromise = Promise.resolve().then(() => attachments === void 0 ? toPiContext(options, void 0, onReplayDegrade) : toPiContext({
 					...options,
 					signal: watchdog.signal
 				}, attachments, onReplayDegrade, profile.maxRequestImageBytes, {
@@ -45,18 +81,20 @@ export function patchPiAiSource(source) {
 					maxBytes: profile.requestImageMaxBytes
 				}));
 				const [apiKey, context] = await Promise.all([apiKeyPromise, contextPromise]);`,
-    "parallel request-context conversion",
-  );
+      "parallel request-context conversion",
+    );
+  }
   return source;
 }
 
 /**
- * The turn clock is useful while waiting for the first provider event. The
- * upstream UI hid it for 15 seconds, which made the pre-first-token phase look
- * like an unstarted protocol conversion.
+ * The turn clock is useful while waiting for the first provider event. In
+ * older upstream UI (0.1.1), it was hidden for 15 seconds. In 0.1.2+, the
+ * conversation timer and token display are redesigned upstream.
  */
 export function patchConversationSource(source) {
   if (source.includes("const showClock = true;")) return source;
+  if (!source.includes("const showClock = elapsedMs >= 15e3;")) return source;
   return replaceOnce(
     source,
     "const showClock = elapsedMs >= 15e3;",

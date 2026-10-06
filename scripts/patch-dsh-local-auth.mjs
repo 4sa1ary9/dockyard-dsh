@@ -18,12 +18,66 @@ function replaceRegex(pattern, replacer, label) {
   source = source.replace(pattern, replacer);
 }
 
-replaceOnce(
-  'import { randomUUID } from "node:crypto";\n',
-  'import { randomUUID, timingSafeEqual } from "node:crypto";\n',
-  "crypto import",
-);
-replaceOnce(
+if (source.includes("var HostConnectionService = class extends Service {")) {
+  // DSH 0.1.2+
+  const authHelper = `const LOCAL_AUTH_COOKIE = "DockyardDSHLocalAuth";
+function localAuthValue(request) {
+\tconst authorization = header(request.headers, "authorization");
+\tif (authorization?.startsWith("Bearer ")) return authorization.slice(7).trim();
+\tconst cookie = header(request.headers, "cookie") ?? "";
+\tfor (const part of cookie.split(";")) {
+\t\tconst separator = part.indexOf("=");
+\t\tif (separator < 0) continue;
+\t\tif (part.slice(0, separator).trim() === LOCAL_AUTH_COOKIE) return part.slice(separator + 1).trim();
+\t}
+\treturn null;
+}
+function hasLocalAuth(request, expectedToken) {
+\tif (!expectedToken) return true;
+\tconst actual = localAuthValue(request);
+\tif (!actual) return false;
+\tconst expectedBytes = Buffer.from(expectedToken, "utf8");
+\tconst actualBytes = Buffer.from(actual, "utf8");
+\tif (expectedBytes.byteLength !== actualBytes.byteLength) return false;
+\treturn timingSafeEqual(expectedBytes, actualBytes);
+}
+`;
+  replaceOnce(
+    "var HostConnectionService = class extends Service {",
+    authHelper + "var HostConnectionService = class extends Service {",
+    "auth helper (0.1.2)",
+  );
+  replaceOnce(
+    `\trequestRejection(request) {
+\t\tif (!isTrustedApiRequest(request, this.trustedHosts)) return 403;
+\t\treturn this.browserAuth.isAuthenticated(request) ? void 0 : 401;
+\t}`,
+    `\trequestRejection(request) {
+\t\tconst localAuthToken = process.env.DSH_LOCAL_AUTH_TOKEN?.trim() || null;
+\t\tif (localAuthToken && hasLocalAuth(request, localAuthToken)) {
+\t\t\tif (!isTrustedApiRequest(request, this.trustedHosts)) return 403;
+\t\t\treturn void 0;
+\t\t}
+\t\tif (!isTrustedApiRequest(request, this.trustedHosts)) return 403;
+\t\treturn this.browserAuth.isAuthenticated(request) ? void 0 : 401;
+\t}`,
+    "request rejection auth (0.1.2)",
+  );
+  replaceOnce(
+    `\tauthorizeIndex(req, res) {`,
+    `\tauthorizeIndex(req, res) {
+\t\tconst localAuthToken = process.env.DSH_LOCAL_AUTH_TOKEN?.trim() || null;
+\t\tif (localAuthToken && hasLocalAuth(req, localAuthToken)) return true;`,
+    "authorize index auth (0.1.2)",
+  );
+} else {
+  // DSH 0.1.1
+  replaceOnce(
+    'import { randomUUID } from "node:crypto";\n',
+    'import { randomUUID, timingSafeEqual } from "node:crypto";\n',
+    "crypto import",
+  );
+  replaceOnce(
 `function isTrustedApiRequest(request, trustedHosts) {
 \tconst host = header(request.headers, "host");
 \tif (host === void 0) return false;
@@ -79,17 +133,17 @@ function hasLocalAuth(request, expectedToken) {
 }
 //#endregion
 `,
-  "trust helper",
-);
-replaceRegex(
+    "trust helper",
+  );
+  replaceRegex(
 /\tconst trustedHosts = config\?\.trustedHosts \?\? \[\];\n\tconst maxRequestBodyBytes = config\?\.maxRequestBodyBytes \?\? \d+;\n\tfor \(const entry of trustedHosts\) assertTrustedAuthority\(entry\);\n/,
 (matched) => matched.replace(
   /\n\tfor \(const entry of trustedHosts\) assertTrustedAuthority\(entry\);\n/,
   "\n\tconst localAuthToken = process.env.DSH_LOCAL_AUTH_TOKEN?.trim() || null;\n\tfor (const entry of trustedHosts) assertTrustedAuthority(entry);\n",
 ),
-  "runtime token",
-);
-replaceOnce(
+    "runtime token",
+  );
+  replaceOnce(
 `\t\tpath: API_PATH,
 \t\thandler: async (req, res) => {
 \t\t\tif (!isTrustedApiRequest(req, trustedHosts)) {
@@ -103,9 +157,9 @@ replaceOnce(
 \t\t\t}
 \t\t\tif (!isTrustedApiRequest(req, trustedHosts)) {
 `,
-  "HTTP auth gate",
-);
-replaceOnce(
+    "HTTP auth gate",
+  );
+  replaceOnce(
 `\t\t\t\tpath,
 \t\t\t\thandler: (req, socket, head) => {
 \t\t\t\t\tif (!isTrustedApiRequest(req, trustedHosts)) {
@@ -118,9 +172,9 @@ replaceOnce(
 \t\t\t\t\t}
 \t\t\t\t\tif (!isTrustedApiRequest(req, trustedHosts)) {
 `,
-  "WebSocket auth gate",
-);
-replaceOnce(
+    "WebSocket auth gate",
+  );
+  replaceOnce(
 `function rejectWebSocketUpgrade(socket) {
 \tsocket.end([
 \t\t"HTTP/1.1 403 Forbidden",
@@ -146,8 +200,9 @@ replaceOnce(
 \t].join("\\r\\n"));
 }
 `,
-  "WebSocket rejection",
-);
+    "WebSocket rejection",
+  );
+}
 // Write atomically: an interrupted in-place write would truncate the patched
 // dependency file and break every later DSH boot until it is reinstalled.
 const tempPath = `${file}.${randomUUID()}.tmp`;

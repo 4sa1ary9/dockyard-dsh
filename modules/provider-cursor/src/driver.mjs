@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
 import { createCliStatusAuthorizer } from "../../../packages/oauth/src/cli-status-authorizer.mjs";
-import { createOfficialSessionAuthorizer } from "../../../packages/oauth/src/official-session-authorizer.mjs";
 import {
   cliRequestPrompt,
   createCliAgentExecutor,
@@ -560,25 +559,6 @@ export class CursorSubscriptionDriver {
       apiBaseUrl: this.apiBaseUrl,
       fetchImpl: this.fetchImpl,
     });
-    this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
-      providerId: PROVIDER_ID,
-      source: sessionSource,
-      instructions: "请在 Cursor 官方客户端完成登录，完成后回到 Dockyard DSH。",
-      readSession: async (context = {}) => {
-        const status = this.sessionReader
-          ? await this.#readStatus(context.signal)
-          : (() => {
-            const desktop = this.#readDesktopSession();
-            return desktop ? statusFromDesktopSession(desktop) : null;
-          })();
-        if (!status?.loggedIn) return { accounts: [] };
-        const desktop = status.source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
-        const candidate = desktop
-          ? candidateFromDesktopSession(desktop)
-          : candidateFromStatus(status, { source: status.source, sourceKind: status.sourceKind });
-        return { accounts: [await this.importAccount(candidate, context)] };
-      },
-    });
     this.cliAuthorizer = createCliStatusAuthorizer({
       providerId: PROVIDER_ID,
       cliPath,
@@ -872,24 +852,20 @@ export class CursorSubscriptionDriver {
   }
 
   async pollAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:")
-      ? this.clientSessionAuthorizer
-      : sessionId?.includes(":browser:")
-        ? this.browserAuthorizer
-        : this.oauthAuthorizer === this.browserAuthorizer
-          ? this.cliAuthorizer
-          : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
     return authorizer.poll(sessionId, context);
   }
 
   async cancelAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:")
-      ? this.clientSessionAuthorizer
-      : sessionId?.includes(":browser:")
-        ? this.browserAuthorizer
-        : this.oauthAuthorizer === this.browserAuthorizer
-          ? this.cliAuthorizer
-          : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
     return authorizer.cancel(sessionId, context);
   }
 

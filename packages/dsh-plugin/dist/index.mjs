@@ -8,85 +8,184 @@ var __export = (target, all) => {
     __defProp(target, name2, { get: all[name2], enumerable: true });
 };
 
-// packages/dsh-plugin/src/native-key-presets.mjs
-var native_key_presets_exports = {};
-__export(native_key_presets_exports, {
-  NATIVE_KEY_PRESETS: () => NATIVE_KEY_PRESETS,
-  nativeKeyPreset: () => nativeKeyPreset,
-  nativeKeyPresetView: () => nativeKeyPresetView
-});
-function nativeKeyPreset(presetId) {
-  const id = typeof presetId === "string" ? presetId.trim().toLowerCase() : "";
-  if (id.length === 0) return null;
-  return NATIVE_KEY_PRESETS.find((preset) => preset.id === id) ?? NATIVE_KEY_PRESETS.find((preset) => preset.provider === id) ?? null;
+// packages/providers/src/provider-utils.mjs
+import { readFile } from "node:fs/promises";
+async function readJsonFile(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
 }
-function nativeKeyPresetView(preset) {
-  return {
-    id: preset.id,
-    name: preset.name,
-    provider: preset.provider,
-    baseURL: preset.baseURL,
-    api: preset.api,
-    modelCount: preset.models.length,
-    models: preset.models.map((model) => model.id),
-    sourceUrl: preset.sourceUrl,
-    notice: preset.notice
-  };
+function decodeJwtPayload(token) {
+  if (typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
 }
-var NATIVE_KEY_PRESETS;
-var init_native_key_presets = __esm({
-  "packages/dsh-plugin/src/native-key-presets.mjs"() {
-    NATIVE_KEY_PRESETS = Object.freeze([
-      Object.freeze({
-        id: "glm-coding-plan",
-        name: "GLM Coding Plan\uFF08\u667A\u8C31\uFF09",
-        provider: "glm-coding-plan",
-        baseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
-        api: "openai-completions",
-        credentialRef: "GLM_CODING_PLAN_API_KEY",
-        sourceUrl: "https://docs.bigmodel.cn/cn/coding-plan/quick-start",
-        notice: "\u5382\u5546\u628A Coding Plan \u9650\u5B9A\u5728\u53D7\u652F\u6301\u7684\u7F16\u7A0B\u5DE5\u5177\u4E0E\u4EA7\u54C1\u73AF\u5883\uFF0C\u63A5\u5165\u524D\u8BF7\u786E\u8BA4\u5F53\u524D\u7528\u9014\u7B26\u5408\u89C4\u5219\u3002",
-        models: Object.freeze([
-          Object.freeze({ id: "glm-5.2", name: "GLM-5.2" }),
-          Object.freeze({ id: "glm-5-turbo", name: "GLM-5-Turbo" }),
-          Object.freeze({ id: "glm-4.7", name: "GLM-4.7" })
-        ])
-      }),
-      Object.freeze({
-        id: "kimi-code-plan",
-        name: "Kimi Code\uFF08\u6708\u4E4B\u6697\u9762\uFF09",
-        provider: "kimi-code-plan",
-        baseURL: "https://api.kimi.com/coding/v1",
-        api: "openai-completions",
-        credentialRef: "KIMI_CODE_PLAN_API_KEY",
-        sourceUrl: "https://www.kimi.com/help/kimi-code/membership-guide",
-        notice: "\u4F7F\u7528 Kimi Code \u8BA2\u9605\u914D\u5957\u7684 API Key\uFF1B\u8FD9\u4E0D\u662F Kimi \u5F00\u653E\u5E73\u53F0\u7684\u901A\u7528 API Key\u3002",
-        models: Object.freeze([
-          Object.freeze({ id: "k3", name: "K3" }),
-          Object.freeze({ id: "kimi-for-coding", name: "Kimi for Coding" }),
-          Object.freeze({ id: "kimi-for-coding-highspeed", name: "Kimi for Coding HighSpeed" })
-        ])
-      }),
-      Object.freeze({
-        id: "qwen-coding-plan",
-        name: "ModelStudio\uFF08\u963F\u91CC\u767E\u70BC\uFF09",
-        provider: "qwen-coding-plan",
-        baseURL: "https://coding.dashscope.aliyuncs.com/v1",
-        api: "openai-completions",
-        credentialRef: "QWEN_CODING_PLAN_API_KEY",
-        sourceUrl: "https://help.aliyun.com/zh/model-studio/coding-plan",
-        notice: "\u4E13\u7528 Key \u9762\u5411\u4EA4\u4E92\u5F0F\u7F16\u7A0B\u5DE5\u5177\uFF0C\u5382\u5546\u7981\u6B62\u81EA\u5B9A\u4E49\u540E\u7AEF\u3001\u81EA\u52A8\u5316\u811A\u672C\u548C\u975E\u4EA4\u4E92\u6279\u5904\u7406\u3002",
-        models: Object.freeze([
-          Object.freeze({ id: "qwen3.7-plus", name: "Qwen 3.7 Plus" }),
-          Object.freeze({ id: "qwen3.6-plus", name: "Qwen 3.6 Plus" }),
-          Object.freeze({ id: "qwen3-coder-next", name: "Qwen 3 Coder Next" }),
-          Object.freeze({ id: "qwen3-coder-plus", name: "Qwen 3 Coder Plus" }),
-          Object.freeze({ id: "kimi-k2.5", name: "Kimi K2.5" }),
-          Object.freeze({ id: "glm-5", name: "GLM-5" }),
-          Object.freeze({ id: "MiniMax-M2.5", name: "MiniMax M2.5" })
-        ])
-      })
-    ]);
+function isoFromEpoch(value) {
+  if (value === void 0 || value === null || value === "") return null;
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric) ? new Date(numeric < 1e10 ? numeric * 1e3 : numeric) : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+function addSecondsIso(seconds, now = /* @__PURE__ */ new Date()) {
+  const numeric = Number(seconds);
+  if (!Number.isFinite(numeric)) return null;
+  return new Date(now.getTime() + numeric * 1e3).toISOString();
+}
+function finiteNumber(value) {
+  if (value === void 0 || value === null || value === "") return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+function stringValue(value) {
+  return value === void 0 || value === null || value === "" ? null : String(value);
+}
+function commonAccountModels(catalogs) {
+  if (catalogs.length < 2) return catalogs[0] ?? [];
+  const indexes = catalogs.map((models) => new Map(models.map((model) => [model.id, model])));
+  return (catalogs[0] ?? []).filter((model) => indexes.every((index) => index.has(model.id))).map((model) => {
+    const entries = indexes.map((index) => index.get(model.id));
+    const result = { ...model };
+    for (const field of ["contextWindow", "maxTokens"]) {
+      const values = entries.map((entry) => entry[field]);
+      if (values.every((value) => Number.isInteger(value) && value > 0)) result[field] = Math.min(...values);
+      else delete result[field];
+    }
+    if (entries.every((entry) => Array.isArray(entry.inputModalities))) {
+      result.inputModalities = model.inputModalities.filter((value) => entries.every((entry) => entry.inputModalities.includes(value)));
+    } else delete result.inputModalities;
+    const efforts = (model.reasoning?.efforts ?? []).filter((effort) => entries.every((entry) => entry.reasoning?.efforts?.some((value) => value.id === effort.id)));
+    if (efforts.length) {
+      result.reasoning = { efforts, ...efforts.some((effort) => effort.id === model.reasoning.defaultEffort) ? { defaultEffort: model.reasoning.defaultEffort } : {} };
+    } else delete result.reasoning;
+    return result;
+  });
+}
+async function fetchJson(url, init = {}, { timeoutMs = 2e4, fetchImpl = fetch } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const externalSignal = init?.signal;
+  const abortFromCaller = () => controller.abort(externalSignal?.reason);
+  if (externalSignal?.aborted) controller.abort(externalSignal.reason);
+  else externalSignal?.addEventListener?.("abort", abortFromCaller, { once: true });
+  try {
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    const text3 = await response.text();
+    let body = null;
+    try {
+      body = text3 ? JSON.parse(text3) : null;
+    } catch {
+      body = null;
+    }
+    if (!response.ok) {
+      const error = new Error(`Provider request failed (${response.status})`);
+      error.status = response.status;
+      error.bodyKeys = body && typeof body === "object" ? Object.keys(body) : [];
+      const upstreamError = body?.error;
+      const upstreamCode = typeof upstreamError === "string" ? upstreamError : upstreamError && typeof upstreamError === "object" ? upstreamError.code ?? upstreamError.type : body?.error_code ?? body?.code;
+      if (typeof upstreamCode === "string" && upstreamCode.length > 0) error.upstreamCode = upstreamCode;
+      throw error;
+    }
+    return { body, response };
+  } finally {
+    clearTimeout(timer);
+    externalSignal?.removeEventListener?.("abort", abortFromCaller);
+  }
+}
+function redactError(error) {
+  if (!error) return null;
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = error?.detail ? ` ${String(error.detail)}` : "";
+  const code = error?.code !== void 0 && error?.code !== null ? ` [code ${String(error.code)}]` : "";
+  return `${message}${detail}${code}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]").replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]").slice(0, 300);
+}
+function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date(), prefix = "quota" } = {}) {
+  const windows = [];
+  function visit(node, path, label) {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    const usedPercent = finiteNumber(node.used_percent ?? node.usedPercent);
+    const remainingFraction = finiteNumber(node.remaining_fraction ?? node.remainingFraction);
+    const remainingValue = finiteNumber(node.remaining);
+    const limitValue = finiteNumber(node.limit);
+    const resetAt = isoFromEpoch(node.reset_at ?? node.resetAt) ?? addSecondsIso(node.reset_after_seconds ?? node.resetAfterSeconds, now);
+    const hasQuotaShape = usedPercent !== null || remainingFraction !== null || remainingValue !== null || limitValue !== null;
+    if (hasQuotaShape) {
+      let remaining = remainingValue;
+      let limit = limitValue;
+      let unit = stringValue(node.unit);
+      if (remaining === null && remainingFraction !== null) {
+        remaining = remainingFraction;
+        limit = limit ?? 1;
+        unit = unit ?? "fraction";
+      } else if (remaining === null && usedPercent !== null) {
+        remaining = Math.max(0, 100 - usedPercent);
+        limit = limit ?? 100;
+        unit = unit ?? "percent";
+      }
+      windows.push({
+        id: path || prefix,
+        name: label || path || prefix,
+        remaining,
+        limit,
+        unit,
+        resetAt,
+        source
+      });
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (child && typeof child === "object" && !Array.isArray(child)) {
+        visit(child, path ? `${path}.${key}` : key, key);
+      }
+    }
+  }
+  visit(value, "", prefix);
+  const unique = /* @__PURE__ */ new Map();
+  for (const window of windows) unique.set(window.id, window);
+  return [...unique.values()];
+}
+function selectPrimaryQuotaWindow(windows) {
+  if (!windows?.length) return {};
+  const preferred = windows.find((window) => /primary|weekly|five.?hour|5h/i.test(`${window.id} ${window.name}`));
+  return preferred ?? windows[0];
+}
+function isLoopbackHostname(hostname) {
+  const value = String(hostname ?? "").trim().toLowerCase();
+  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+  return LOOPBACK_HOSTNAMES.has(bare);
+}
+function assertSecureEndpointUrl(value, label = "endpoint") {
+  const raw = String(value ?? "").trim();
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`${label} is not a valid URL`);
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(`${label} must use http(s), got: ${url.protocol}`);
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    throw new Error(`${label} over plain http must target a loopback host, got: ${url.hostname}`);
+  }
+  if (url.username || url.password) {
+    throw new Error(`${label} must not embed credentials in the URL`);
+  }
+  if (url.hash) {
+    url.hash = "";
+  }
+  return url.toString();
+}
+var LOOPBACK_HOSTNAMES;
+var init_provider_utils = __esm({
+  "packages/providers/src/provider-utils.mjs"() {
+    LOOPBACK_HOSTNAMES = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1"]);
   }
 });
 
@@ -106,6 +205,7 @@ function publicAuthResult(result) {
     ...result.authorizationUrl ? { authorizationUrl: result.authorizationUrl } : {},
     ...result.instructions ? { instructions: result.instructions } : {},
     ...result.browserOpened ? { browserOpened: true } : {},
+    ...result.terminalOpened ? { terminalOpened: true } : {},
     ...result.inputRequired ? { inputRequired: true } : {},
     ...result.authorizationCodeRequired ? { authorizationCodeRequired: true } : {},
     ...result.diagnostic ? { diagnostic: result.diagnostic } : {},
@@ -120,6 +220,7 @@ function markRemoteMethods() {
   for (const name2 of [
     "snapshot",
     "refresh",
+    "catalog",
     "scan",
     "add",
     "login",
@@ -134,8 +235,6 @@ function markRemoteMethods() {
     "nativeKeyRegister",
     "nativeKeyUnregister",
     "nativeKeySetPolicy",
-    "nativeKeyPresets",
-    "nativeKeyImportPreset",
     "getContextWindowOverride",
     "setContextWindowOverride"
   ]) {
@@ -155,6 +254,7 @@ function markRemoteMethods() {
 var DockyardRemoteService;
 var init_dockyard_remote_host = __esm({
   "packages/dsh-plugin/src/dockyard-remote-host.mjs"() {
+    init_provider_utils();
     DockyardRemoteService = class extends TypertRemoteService {
       static inject = [];
       constructor(ctx, config = {}) {
@@ -171,6 +271,20 @@ var init_dockyard_remote_host = __esm({
         const result = await this.dockyard.refresh(providerId);
         return envelope(result, await this.dockyard.snapshot());
       }
+      async catalog(request = {}) {
+        try {
+          const result = await this.dockyard.catalog(request?.providerId ?? null, { force: request?.force ?? false });
+          const providers = (Array.isArray(result) ? result : [result]).map(({ providerId, catalog }) => ({
+            providerId,
+            count: Array.isArray(catalog?.models) ? catalog.models.length : 0,
+            source: typeof catalog?.source === "string" ? redactError(catalog.source) : null,
+            diagnostic: redactError(catalog?.diagnostic ?? (Array.isArray(catalog?.diagnostics) ? catalog.diagnostics.join("\uFF1B") : null))
+          }));
+          return { providers, count: providers.reduce((sum, provider) => sum + provider.count, 0) };
+        } finally {
+          this.ctx.emit("llm/adapters-updated");
+        }
+      }
       async scan(request = {}) {
         const result = await this.dockyard.scan(request?.providerId ?? null);
         return envelope(result, await this.dockyard.snapshot());
@@ -180,7 +294,9 @@ var init_dockyard_remote_host = __esm({
         return envelope(result, await this.dockyard.snapshot());
       }
       async login(request) {
-        const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId, { openBrowser: false }));
+        const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId, {
+          openBrowser: request.openBrowser === true
+        }));
         return envelope(result, await this.dockyard.snapshot());
       }
       async poll(request) {
@@ -230,19 +346,6 @@ var init_dockyard_remote_host = __esm({
       async nativeKeySetPolicy(request = {}) {
         if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool \u5C1A\u672A\u6302\u8F7D");
         return this.nativeKeyPool.setPolicy(request.providerId, request.policy);
-      }
-      // Domestic coding-plan presets. The Key rides only through the host-side
-      // credential write; the browser receives the secret-free status envelope.
-      async nativeKeyPresets() {
-        if (!this.nativeKeyPool) return { presets: [] };
-        return this.nativeKeyPool.listKeyPresets();
-      }
-      async nativeKeyImportPreset(request = {}) {
-        if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool \u5C1A\u672A\u6302\u8F7D");
-        return this.nativeKeyPool.importKeyPreset(request.presetId, {
-          apiKey: request.apiKey ?? "",
-          label: request.label ?? ""
-        });
       }
       async getContextWindowOverride(request = {}) {
         return this.dockyard.getContextWindowOverride(request);
@@ -655,162 +758,8 @@ function defineProviderModule({
   return Object.freeze(module);
 }
 
-// packages/providers/src/provider-utils.mjs
-import { readFile } from "node:fs/promises";
-async function readJsonFile(path) {
-  try {
-    return JSON.parse(await readFile(path, "utf8"));
-  } catch (error) {
-    if (error?.code === "ENOENT") return null;
-    throw error;
-  }
-}
-function decodeJwtPayload(token) {
-  if (typeof token !== "string") return null;
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-function isoFromEpoch(value) {
-  if (value === void 0 || value === null || value === "") return null;
-  const numeric = Number(value);
-  const date = Number.isFinite(numeric) ? new Date(numeric < 1e10 ? numeric * 1e3 : numeric) : new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-function addSecondsIso(seconds, now = /* @__PURE__ */ new Date()) {
-  const numeric = Number(seconds);
-  if (!Number.isFinite(numeric)) return null;
-  return new Date(now.getTime() + numeric * 1e3).toISOString();
-}
-function finiteNumber(value) {
-  if (value === void 0 || value === null || value === "") return null;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
-}
-function stringValue(value) {
-  return value === void 0 || value === null || value === "" ? null : String(value);
-}
-async function fetchJson(url, init = {}, { timeoutMs = 2e4, fetchImpl = fetch } = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const externalSignal = init?.signal;
-  const abortFromCaller = () => controller.abort(externalSignal?.reason);
-  if (externalSignal?.aborted) controller.abort(externalSignal.reason);
-  else externalSignal?.addEventListener?.("abort", abortFromCaller, { once: true });
-  try {
-    const response = await fetchImpl(url, { ...init, signal: controller.signal });
-    const text3 = await response.text();
-    let body = null;
-    try {
-      body = text3 ? JSON.parse(text3) : null;
-    } catch {
-      body = null;
-    }
-    if (!response.ok) {
-      const error = new Error(`Provider request failed (${response.status})`);
-      error.status = response.status;
-      error.bodyKeys = body && typeof body === "object" ? Object.keys(body) : [];
-      const upstreamError = body?.error;
-      const upstreamCode = typeof upstreamError === "string" ? upstreamError : upstreamError && typeof upstreamError === "object" ? upstreamError.code ?? upstreamError.type : body?.error_code ?? body?.code;
-      if (typeof upstreamCode === "string" && upstreamCode.length > 0) error.upstreamCode = upstreamCode;
-      throw error;
-    }
-    return { body, response };
-  } finally {
-    clearTimeout(timer);
-    externalSignal?.removeEventListener?.("abort", abortFromCaller);
-  }
-}
-function redactError(error) {
-  if (!error) return null;
-  const message = error instanceof Error ? error.message : String(error);
-  const detail = error?.detail ? ` ${String(error.detail)}` : "";
-  const code = error?.code !== void 0 && error?.code !== null ? ` [code ${String(error.code)}]` : "";
-  return `${message}${detail}${code}`.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").replace(/(access|refresh|id)[_-]?token["'=:\s]+[^,\s}]+/gi, "$1_token=[redacted]").replace(/\b(?:sk|sk-ant|sk-proj|sk-svcacct|xai|agy|gsk|ghp|gho|ghu|github_pat|deepseek|pplx|nvapi|zai|glm)[-_][A-Za-z0-9_-]{12,}\b/gi, "[redacted]").replace(/(api[_-]?key|client[_-]?secret|session[_-]?token|private[_-]?key)["'=:\s]+[^,\s}"']+/gi, "$1=[redacted]").slice(0, 300);
-}
-function recursiveQuotaWindows(value, { source, now = /* @__PURE__ */ new Date(), prefix = "quota" } = {}) {
-  const windows = [];
-  function visit(node, path, label) {
-    if (!node || typeof node !== "object" || Array.isArray(node)) return;
-    const usedPercent = finiteNumber(node.used_percent ?? node.usedPercent);
-    const remainingFraction = finiteNumber(node.remaining_fraction ?? node.remainingFraction);
-    const remainingValue = finiteNumber(node.remaining);
-    const limitValue = finiteNumber(node.limit);
-    const resetAt = isoFromEpoch(node.reset_at ?? node.resetAt) ?? addSecondsIso(node.reset_after_seconds ?? node.resetAfterSeconds, now);
-    const hasQuotaShape = usedPercent !== null || remainingFraction !== null || remainingValue !== null || limitValue !== null;
-    if (hasQuotaShape) {
-      let remaining = remainingValue;
-      let limit = limitValue;
-      let unit = stringValue(node.unit);
-      if (remaining === null && remainingFraction !== null) {
-        remaining = remainingFraction;
-        limit = limit ?? 1;
-        unit = unit ?? "fraction";
-      } else if (remaining === null && usedPercent !== null) {
-        remaining = Math.max(0, 100 - usedPercent);
-        limit = limit ?? 100;
-        unit = unit ?? "percent";
-      }
-      windows.push({
-        id: path || prefix,
-        name: label || path || prefix,
-        remaining,
-        limit,
-        unit,
-        resetAt,
-        source
-      });
-    }
-    for (const [key, child] of Object.entries(node)) {
-      if (child && typeof child === "object" && !Array.isArray(child)) {
-        visit(child, path ? `${path}.${key}` : key, key);
-      }
-    }
-  }
-  visit(value, "", prefix);
-  const unique = /* @__PURE__ */ new Map();
-  for (const window of windows) unique.set(window.id, window);
-  return [...unique.values()];
-}
-function selectPrimaryQuotaWindow(windows) {
-  if (!windows?.length) return {};
-  const preferred = windows.find((window) => /primary|weekly|five.?hour|5h/i.test(`${window.id} ${window.name}`));
-  return preferred ?? windows[0];
-}
-var LOOPBACK_HOSTNAMES = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1"]);
-function isLoopbackHostname(hostname) {
-  const value = String(hostname ?? "").trim().toLowerCase();
-  const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
-  return LOOPBACK_HOSTNAMES.has(bare);
-}
-function assertSecureEndpointUrl(value, label = "endpoint") {
-  const raw = String(value ?? "").trim();
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new Error(`${label} is not a valid URL`);
-  }
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error(`${label} must use http(s), got: ${url.protocol}`);
-  }
-  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
-    throw new Error(`${label} over plain http must target a loopback host, got: ${url.hostname}`);
-  }
-  if (url.username || url.password) {
-    throw new Error(`${label} must not embed credentials in the URL`);
-  }
-  if (url.hash) {
-    url.hash = "";
-  }
-  return url.toString();
-}
-
 // packages/core/src/dsh-route.mjs
+init_provider_utils();
 function selectionContext(context, excludedIds) {
   if (excludedIds.size === 0) return context;
   return { ...context, excludeAccountIds: [...excludedIds] };
@@ -1408,7 +1357,17 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
   if (owned.length === 0) throw new ValidationError("At least one Dockyard provider is required");
   const catalogPromises = /* @__PURE__ */ new Map();
   const catalogCache = /* @__PURE__ */ new Map();
+  const catalogScopes = /* @__PURE__ */ new Map();
   const STREAM_CATALOG_REFRESH_MS = 6e4;
+  function syncCatalogScope(provider) {
+    const state = runtime.snapshot?.()?.providers?.find((entry) => entry.providerId === provider);
+    const scope = JSON.stringify([state?.policy, state?.defaultAccountId, state?.accounts?.map((account) => account.accountId).sort()]);
+    if (catalogScopes.get(provider) !== scope) {
+      catalogScopes.set(provider, scope);
+      catalogCache.delete(provider);
+      catalogPromises.delete(provider);
+    }
+  }
   async function ensureRuntimeReady() {
     if (typeof runtime.init === "function") await runtime.init();
   }
@@ -1437,10 +1396,11 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     });
   }
   async function providerCatalog(provider, signal) {
+    syncCatalogScope(provider);
     let promise = catalogPromises.get(provider);
     if (!promise) {
       promise = Promise.resolve().then(() => runtime.getCatalog(provider, {})).then((catalog) => {
-        catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
+        if (catalogPromises.get(provider) === promise) catalogCache.set(provider, { value: catalog, fetchedAt: Date.now() });
         return catalog;
       }).finally(() => {
         if (catalogPromises.get(provider) === promise) catalogPromises.delete(provider);
@@ -1450,6 +1410,7 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     return raceCallerSignal(promise, signal);
   }
   function cachedProviderCatalog(provider) {
+    syncCatalogScope(provider);
     const entry = catalogCache.get(provider);
     if (!entry) return null;
     if (Date.now() - entry.fetchedAt >= STREAM_CATALOG_REFRESH_MS && !catalogPromises.has(provider)) {
@@ -1459,18 +1420,26 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     return entry.value;
   }
   function warmProviderCatalog(provider) {
+    syncCatalogScope(provider);
     if (!catalogCache.has(provider) && !catalogPromises.has(provider)) {
       void providerCatalog(provider).catch(() => {
       });
     }
   }
   function fastResolveModel(provider, model) {
+    const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
+    const fallback = {
+      provider,
+      id: model,
+      name: model,
+      ...isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}
+    };
     const catalog = cachedProviderCatalog(provider);
     if (!catalog) {
       warmProviderCatalog(provider);
-      return { provider, id: model, name: model };
+      return fallback;
     }
-    return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? { provider, id: model, name: model };
+    return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? fallback;
   }
   return {
     providerInfo(provider) {
@@ -1488,9 +1457,16 @@ function createDockyardLlmAdapter({ runtime, providerIds, attachmentsResolver = 
     },
     async resolveModel(provider, model, signal) {
       await ensureRuntimeReady();
-      if (!providerHasConnectedAccount(runtime, provider)) return { provider, id: model, name: model };
+      const isGemini = typeof model === "string" && model.toLowerCase().includes("gemini");
+      const fallback = {
+        provider,
+        id: model,
+        name: model,
+        ...isGemini ? { context: { contextWindow: 1048576 }, defaultMaxTokens: 65536 } : {}
+      };
+      if (!providerHasConnectedAccount(runtime, provider)) return fallback;
       const catalog = await providerCatalog(provider, signal);
-      return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? { provider, id: model, name: model };
+      return providerCatalogModels(provider, catalog).find((entry) => entry.id === model) ?? fallback;
     },
     async prepareCall(provider, model, signal) {
       return {
@@ -1614,9 +1590,9 @@ var DshInjectionBridge = class {
 };
 
 // packages/vault/src/index.mjs
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile as readFile2, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile as readFile2, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1769,18 +1745,26 @@ var WindowsDpapiSecretStore = class {
     return Buffer.from(encoded, "base64");
   }
   async read(ref) {
+    let packed;
     try {
-      const packed = await readFile2(this.#fileFor(ref));
-      return JSON.parse((await this.#transform("unprotect", packed)).toString("utf8"));
+      packed = await readFile2(this.#fileFor(ref));
     } catch (error) {
       if (error?.code === "ENOENT") return null;
       throw error;
     }
+    return JSON.parse((await this.#transform("unprotect", packed)).toString("utf8"));
   }
   async write(ref, value) {
     await mkdir(this.directory, { recursive: true });
     const packed = await this.#transform("protect", Buffer.from(JSON.stringify(value), "utf8"));
-    await writeFile(this.#fileFor(ref), packed);
+    const file = this.#fileFor(ref);
+    const temporary = `${file}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, packed, { flag: "wx", mode: 384 });
+      await rename(temporary, file);
+    } finally {
+      await rm(temporary, { force: true });
+    }
     return ref;
   }
   async delete(ref) {
@@ -1822,10 +1806,10 @@ var secretStoreConstants = Object.freeze({
 });
 
 // packages/runtime/src/state-store.mjs
-import { mkdir as mkdir2, open, readFile as readFile3, rename, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
+import { mkdir as mkdir2, open, readFile as readFile3, rename as rename2, rm as rm2, stat, writeFile as writeFile2 } from "node:fs/promises";
 import { dirname as dirname2, join as join2 } from "node:path";
 import { homedir as homedir2 } from "node:os";
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 var LOCK_RETRY_MS = 25;
 var LOCK_TIMEOUT_MS = 3e4;
 var LOCK_STALE_MS = 12e4;
@@ -1867,7 +1851,7 @@ async function acquireFileLock(filePath) {
   while (true) {
     try {
       const handle = await open(lockPath, "wx", 384);
-      const token = randomUUID();
+      const token = randomUUID2();
       try {
         await handle.writeFile(`${process.pid} ${token}
 `, "utf8");
@@ -1963,7 +1947,7 @@ var JsonStateStore = class {
         if (!(retryError instanceof SyntaxError)) throw retryError;
       }
       const archivePath = `${this.filePath}.corrupted.${Date.now()}`;
-      await rename(this.filePath, archivePath).catch(() => {
+      await rename2(this.filePath, archivePath).catch(() => {
       });
       return emptyState();
     }
@@ -1997,7 +1981,7 @@ var JsonStateStore = class {
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
     await mkdir2(dirname2(this.filePath), { recursive: true, mode: 448 });
-    const tempPath = `${this.filePath}.${randomUUID()}.tmp`;
+    const tempPath = `${this.filePath}.${randomUUID2()}.tmp`;
     let committed = false;
     try {
       await writeFile2(tempPath, `${JSON.stringify(next, null, 2)}
@@ -2008,7 +1992,7 @@ var JsonStateStore = class {
       } finally {
         await handle.close();
       }
-      await rename(tempPath, this.filePath);
+      await rename2(tempPath, this.filePath);
       committed = true;
       try {
         const directory = await open(dirname2(this.filePath), "r");
@@ -2223,7 +2207,8 @@ import { homedir as homedir3 } from "node:os";
 import { join as join4 } from "node:path";
 
 // packages/oauth/src/browser-oauth-authorizer.mjs
-import { createHash as createHash2, randomBytes, randomUUID as randomUUID2 } from "node:crypto";
+init_provider_utils();
+import { createHash as createHash2, randomBytes, randomUUID as randomUUID3 } from "node:crypto";
 import { createServer } from "node:http";
 var DEFAULT_TIMEOUT_MS = 10 * 60 * 1e3;
 var DEFAULT_CALLBACK_PATH = "/oauth/callback";
@@ -2455,7 +2440,7 @@ function createBrowserOAuthAuthorizer({
   async function begin() {
     const pkce = createPkce();
     const session = {
-      sessionId: `${providerId}:browser:${randomUUID2()}`,
+      sessionId: `${providerId}:browser:${randomUUID3()}`,
       providerId,
       status: "pending",
       authorizationUrl: null,
@@ -2564,7 +2549,8 @@ var browserOAuthAuthorizerConstants = Object.freeze({
 });
 
 // packages/oauth/src/cli-oauth-authorizer.mjs
-import { randomUUID as randomUUID3 } from "node:crypto";
+init_provider_utils();
+import { randomUUID as randomUUID4 } from "node:crypto";
 import { mkdir as mkdir3, mkdtemp, readFile as readFile4, rm as rm3 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as join3 } from "node:path";
@@ -2773,7 +2759,7 @@ function createCliOAuthAuthorizer({
     const profileDir = profileDirectory ?? await mkdtemp(join3(tmpdir(), profilePrefix));
     if (!cleanupProfile) await mkdir3(profileDir, { recursive: true });
     const session = {
-      sessionId: `${providerId}:${randomUUID3()}`,
+      sessionId: `${providerId}:${randomUUID4()}`,
       providerId,
       profileDir,
       cleanupProfile,
@@ -2849,6 +2835,9 @@ function createCliOAuthAuthorizer({
   return Object.freeze({ begin, poll, cancel });
 }
 var cliOAuthAuthorizerConstants = Object.freeze({ defaultTimeoutMs: DEFAULT_TIMEOUT_MS2 });
+
+// modules/provider-codex/src/driver.mjs
+init_provider_utils();
 
 // packages/providers/src/session-source.mjs
 var OFFICIAL_SESSION_AUTH_KIND = "official_session";
@@ -3347,11 +3336,11 @@ var CodexOAuthDriver = class {
     wrapped.authForbidden = !sawAuthExpired && sawAuthForbidden;
     throw wrapped;
   }
-  async getCatalog() {
+  async getCatalog(context = {}) {
     if (this.catalogLoader) {
       try {
-        const catalog = await this.catalogLoader();
-        if (Array.isArray(catalog?.models) && catalog.models.length > 0) return catalog;
+        const catalog = await this.catalogLoader({ ...context, readCredential: (account) => this.#liveCredential(account, context) });
+        if (Array.isArray(catalog?.models)) return catalog;
       } catch {
       }
     }
@@ -3364,7 +3353,16 @@ var CodexOAuthDriver = class {
   async invoke(request, invocation, context = {}) {
     const credential = await this.#liveCredential(invocation.account, context);
     const executor = context.requestExecutor ?? this.requestExecutor ?? nativeCodexExecutor;
-    return executor({ request, invocation, credential, context });
+    const catalog = this.catalogLoader ? await this.catalogLoader({
+      ...context,
+      accounts: [invocation.account],
+      accountId: invocation.account.accountId,
+      policy: "manual",
+      defaultAccountId: invocation.account.accountId,
+      readCredential: async () => credential
+    }) : null;
+    const catalogModel2 = catalog?.models?.find((model) => model.id === request.model);
+    return executor({ request, invocation, credential, context, catalogModel: catalogModel2 });
   }
   async stream(request, invocation, context = {}) {
     return this.invoke(request, invocation, context);
@@ -3379,28 +3377,38 @@ function createCodexPiAiExecutor({
   if (!PiAiAdapter || !createProvider || !openAICodexResponsesApi) {
     throw new Error("Codex DSH transport dependencies are incomplete");
   }
-  return async function executeCodex({ request, credential, context = {} }) {
+  return async function executeCodex({ request, credential, context = {}, catalogModel: liveModel = null }) {
     const modelId = String(request.model);
     const requestedEffort = typeof request.reasoningEffort === "string" ? request.reasoningEffort : void 0;
-    const catalogModel2 = typeof modelResolver === "function" ? modelResolver(modelId) : null;
+    const catalogModel2 = liveModel ?? (typeof modelResolver === "function" ? modelResolver(modelId) : null);
     const contextWindow = catalogModel2?.contextWindow;
     const maxTokens = catalogModel2?.maxTokens;
-    if (!Number.isInteger(contextWindow) || contextWindow <= 0 || !Number.isInteger(maxTokens) || maxTokens <= 0) {
-      throw new Error(`Codex live model catalog did not return context/output capacities for "${modelId}"`);
+    if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
+      throw new Error(`Codex live model catalog did not return context capacity for "${modelId}"`);
     }
-    const thinkingLevelMap = catalogModel2?.thinkingLevelMap;
+    const thinkingLevelMap = catalogModel2?.thinkingLevelMap ?? (catalogModel2?.reasoning?.efforts ? Object.fromEntries(catalogModel2.reasoning.efforts.map((effort) => [effort.id, effort.id])) : void 0);
+    const wireEffort = requestedEffort !== void 0 && requestedEffort !== "off" ? thinkingLevelMap?.[requestedEffort] : void 0;
+    if (requestedEffort !== void 0 && requestedEffort !== "off" && (typeof wireEffort !== "string" || !wireEffort)) {
+      const error = new Error(`Codex live model catalog does not support reasoning effort "${requestedEffort}" for "${modelId}"`);
+      error.code = "UNSUPPORTED_REASONING_EFFORT";
+      throw error;
+    }
     const model = {
       id: modelId,
       name: typeof catalogModel2?.name === "string" && catalogModel2.name.length > 0 ? catalogModel2.name : modelId,
       api: "openai-codex-responses",
       provider: PROVIDER_ID,
       baseUrl: DEFAULT_CODEX_BASE_URL,
-      reasoning: typeof catalogModel2?.reasoning === "boolean" ? catalogModel2.reasoning : requestedEffort !== void 0,
-      ...thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {},
-      input: Array.isArray(catalogModel2?.input) && catalogModel2.input.length > 0 ? [...catalogModel2.input] : ["text"],
+      reasoning: typeof catalogModel2?.reasoning === "boolean" ? catalogModel2.reasoning : Boolean(thinkingLevelMap) || requestedEffort !== void 0,
+      // DSH/pi-ai enumerate only their installed effort names. A temporary
+      // supported slot preserves new official wire values such as "ultra".
+      ...thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap, ...wireEffort ? { high: wireEffort } : {} } } : {},
+      input: Array.isArray(catalogModel2?.inputModalities ?? catalogModel2?.input) && (catalogModel2.inputModalities ?? catalogModel2.input).length > 0 ? [...catalogModel2.inputModalities ?? catalogModel2.input] : ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow,
-      maxTokens
+      // Codex's served directory omits an output cap; its Responses transport
+      // leaves that limit to the server instead of sending max_output_tokens.
+      ...Number.isInteger(maxTokens) && maxTokens > 0 ? { maxTokens } : {}
     };
     const provider = createProvider({
       id: PROVIDER_ID,
@@ -3423,6 +3431,7 @@ function createCodexPiAiExecutor({
       displayName: "OpenAI Codex",
       piProvider: provider,
       configuredMaxTokens: /* @__PURE__ */ new Map(),
+      modelErrors: /* @__PURE__ */ new Map(),
       streamIdleTimeoutMs: 3e5
     };
     const adapter = new PiAiAdapter({
@@ -3433,7 +3442,7 @@ function createCodexPiAiExecutor({
       // Codex driver callers and tests that do not mount attachments.
       resolveAttachments: () => context.attachments
     });
-    return adapter.stream(request);
+    return adapter.stream(wireEffort ? { ...request, reasoningEffort: "high" } : request);
   };
 }
 async function nativeCodexExecutor(envelope2) {
@@ -3478,8 +3487,8 @@ function createCodexModule({ driver = {} } = {}) {
 
 // modules/provider-antigravity/src/driver.mjs
 import { spawn as spawn4 } from "node:child_process";
-import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile5, rename as rename2, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
+import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
+import { mkdir as mkdir4, mkdtemp as mkdtemp2, readFile as readFile5, rename as rename3, rm as rm4, writeFile as writeFile3 } from "node:fs/promises";
 import { homedir as homedir5, tmpdir as tmpdir2 } from "node:os";
 import { dirname as dirname3, join as join6 } from "node:path";
 
@@ -3644,6 +3653,9 @@ var cliAgentTransportConstants = Object.freeze({
   defaultOutputFormat: "stream-json"
 });
 
+// modules/provider-antigravity/src/driver.mjs
+init_provider_utils();
+
 // modules/provider-antigravity/src/native-transport.mjs
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir as homedir4 } from "node:os";
@@ -3651,13 +3663,10 @@ import { join as join5 } from "node:path";
 import { execFileSync } from "node:child_process";
 
 // packages/providers/src/native-transport.mjs
+init_provider_utils();
 function numericStatus(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
-}
-function isLoopbackHostname4(hostname) {
-  const normalized = String(hostname ?? "").toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 function validateNativeEndpoint(value, { providerId = "provider" } = {}) {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -3675,7 +3684,7 @@ function validateNativeEndpoint(value, { providerId = "provider" } = {}) {
   if (url.hash) {
     throw new Error(`${providerId} endpoint must not include a URL fragment`);
   }
-  const localHttp = url.protocol === "http:" && isLoopbackHostname4(url.hostname);
+  const localHttp = url.protocol === "http:" && isLoopbackHostname(url.hostname);
   if (url.protocol !== "https:" && !localHttp) {
     throw new Error(`${providerId} endpoint must use HTTPS; HTTP is only allowed for loopback development`);
   }
@@ -4115,6 +4124,7 @@ function finishReason(value, fallback = "stop") {
 }
 
 // modules/provider-antigravity/src/native-transport.mjs
+init_provider_utils();
 var PROVIDER_ID2 = "antigravity";
 var DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
 var DEFAULT_QUOTA_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
@@ -4123,6 +4133,35 @@ var MACOS_SECURITY_BIN = "/usr/bin/security";
 var AGY_KEYCHAIN_SERVICE = "gemini";
 var AGY_KEYCHAIN_ACCOUNT = "antigravity";
 var AGY_KEYCHAIN_VALUE_PREFIX = "go-keyring-base64:";
+var WINDOWS_AGY_CREDENTIAL_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DockyardAgyCredential {
+  [DllImport("Advapi32.dll", EntryPoint="CredReadW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern bool CredRead(string target, uint type, int flags, out IntPtr credential);
+  [DllImport("Advapi32.dll")] private static extern void CredFree(IntPtr credential);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct Credential {
+    public uint Flags; public uint Type; public string TargetName; public string Comment;
+    public long LastWritten; public uint BlobSize; public IntPtr Blob; public uint Persist;
+    public uint AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
+  }
+  public static byte[] Read() {
+    IntPtr pointer;
+    if (!CredRead("${AGY_KEYCHAIN_SERVICE}:${AGY_KEYCHAIN_ACCOUNT}", 1, 0, out pointer)) return null;
+    try {
+      var credential = Marshal.PtrToStructure<Credential>(pointer);
+      var bytes = new byte[credential.BlobSize];
+      Marshal.Copy(credential.Blob, bytes, 0, bytes.Length);
+      return bytes;
+    } finally { CredFree(pointer); }
+  }
+}
+'@
+$bytes = [DockyardAgyCredential]::Read()
+if ($null -ne $bytes) { [Console]::Out.Write([System.Text.Encoding]::UTF8.GetString($bytes)) }
+`;
 var ANTIGRAVITY_INFO_PATHS = [
   "/Applications/Antigravity.app/Contents/Info.plist",
   join5(homedir4(), "Applications/Antigravity.app/Contents/Info.plist")
@@ -4355,10 +4394,29 @@ function parseAntigravityKeychainValue(value) {
 var cachedKeychainToken = null;
 var lastKeychainReadTime = 0;
 var KEYCHAIN_CACHE_TTL_MS = 6e4;
-function readAntigravityKeychainToken({ home = homedir4() } = {}) {
-  if (process.platform !== "darwin") return null;
+function readAntigravityWindowsCredential({ execFileImpl = execFileSync } = {}) {
+  try {
+    const value = execFileImpl("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_AGY_CREDENTIAL_SCRIPT], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+      timeout: 1e4,
+      maxBuffer: 1048576
+    });
+    return parseAntigravityKeychainValue(value);
+  } catch {
+    return null;
+  }
+}
+function readAntigravityKeychainToken({ home = homedir4(), force = false } = {}) {
+  if (process.platform !== "darwin" && process.platform !== "win32") return null;
   const now = Date.now();
-  if (cachedKeychainToken && now - lastKeychainReadTime < KEYCHAIN_CACHE_TTL_MS) {
+  if (!force && lastKeychainReadTime && now - lastKeychainReadTime < KEYCHAIN_CACHE_TTL_MS) {
+    return cachedKeychainToken;
+  }
+  if (process.platform === "win32") {
+    cachedKeychainToken = readAntigravityWindowsCredential();
+    lastKeychainReadTime = now;
     return cachedKeychainToken;
   }
   try {
@@ -4421,7 +4479,7 @@ function projectIdFromLoadCodeAssist(value, depth = 0) {
   return null;
 }
 function createAntigravityProjectResolver({
-  endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
+  endpoint = process.env.DOCKYARD_ANTIGRAVITY_PROJECT_ENDPOINT || DEFAULT_PROJECT_ENDPOINT,
   env = process.env,
   home = homedir4(),
   timeoutMs = 2e4,
@@ -4430,7 +4488,7 @@ function createAntigravityProjectResolver({
   project = void 0,
   userAgent = process.env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent()
 } = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID2 });
+  const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID2 });
   const configuredProject = typeof project === "string" && project.trim() ? project.trim() : null;
   const cache = /* @__PURE__ */ new Map();
   return async ({ credential = null, account = null, context = {} } = {}) => {
@@ -4521,9 +4579,7 @@ async function geminiParts(content, attachments, { signedToolCallIds = /* @__PUR
         parts.push({
           functionCall: {
             name: name2,
-            args,
-            thoughtSignature: signature,
-            thought_signature: signature
+            args
           },
           thoughtSignature: signature,
           thought_signature: signature
@@ -4546,11 +4602,25 @@ function modelRequiresThoughtSignatures(model) {
   return true;
 }
 var DEFAULT_SLIDING_WINDOW_MESSAGES = 40;
-function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WINDOW_MESSAGES } = {}) {
+var SLIDING_WINDOW_QUANTUM = 20;
+function resolveMaxMessages(request) {
+  const envLimit = Number.parseInt(process.env.DOCKYARD_ANTIGRAVITY_MAX_MESSAGES ?? "", 10);
+  if (Number.isSafeInteger(envLimit) && envLimit > 0) return envLimit;
+  if (Number.isSafeInteger(request?.maxMessages) && request.maxMessages > 0) return request.maxMessages;
+  const contextWindow = request?.modelContext?.contextWindow;
+  if (Number.isSafeInteger(contextWindow) && contextWindow >= 5e5) {
+    return 500;
+  }
+  return DEFAULT_SLIDING_WINDOW_MESSAGES;
+}
+function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WINDOW_MESSAGES, quantum = SLIDING_WINDOW_QUANTUM } = {}) {
   if (!Array.isArray(messages) || messages.length <= maxMessages) return messages;
   const initialIndex = messages.findIndex((m) => m?.role === "user" || m?.role === "system");
   const prefix = initialIndex >= 0 ? [messages[initialIndex]] : [];
-  const windowCount = Math.max(10, maxMessages - prefix.length - 1);
+  const rawWindowCount = Math.max(10, maxMessages - prefix.length - 1);
+  const excess = messages.length - maxMessages;
+  const quantOffset = excess > 0 ? Math.floor(excess / quantum) * quantum : 0;
+  const windowCount = Math.max(10, rawWindowCount + (excess - quantOffset));
   const recent = messages.slice(-windowCount);
   const startIndex = messages.length - windowCount;
   if (startIndex > 0) {
@@ -4564,26 +4634,46 @@ function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WIN
   if (compactedCount <= 0) return messages;
   const milestone = {
     role: "user",
-    content: `[System Note: Context sliding window active. ${compactedCount} intermediate messages were dynamically compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]`
+    content: "[System Note: Context sliding window active. Intermediate messages were compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]"
   };
   return [...prefix, milestone, ...recent];
 }
 function sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures) {
   if (!requireThoughtSignatures || !Array.isArray(contents)) return contents;
-  const hasUnsignedFunctionCall = contents.some(
-    (content) => (content?.parts ?? []).some((part) => part?.functionCall && !thoughtSignatureFrom(part))
-  );
-  if (hasUnsignedFunctionCall) {
+  const unsignedCallNames = /* @__PURE__ */ new Set();
+  for (const content of contents) {
+    for (const part of content?.parts ?? []) {
+      const rawCall = part?.functionCall ?? part?.function_call;
+      if (rawCall && !thoughtSignatureFrom(part)) {
+        unsignedCallNames.add(rawCall.name);
+      }
+    }
+  }
+  if (unsignedCallNames.size === 0) {
     return contents.map((content) => ({
       ...content,
       parts: (content?.parts ?? []).map((part) => {
-        if (part?.functionCall) {
-          return { text: toolCallText(part.functionCall.name, part.functionCall.args) };
-        }
-        if (part?.functionResponse) {
-          const name2 = part.functionResponse.name ?? "tool";
-          const result = part.functionResponse.response?.content ?? part.functionResponse.response ?? "";
-          return { text: `[tool result: ${name2}] ${typeof result === "string" ? result : JSON.stringify(result)}` };
+        const rawCall = part?.functionCall ?? part?.function_call;
+        if (rawCall) {
+          const signature = thoughtSignatureFrom(part);
+          const {
+            thoughtSignature: _ignoredTs1,
+            thought_signature: _ignoredTs2,
+            ...cleanedCall
+          } = rawCall;
+          const callKey = part.functionCall ? "functionCall" : "function_call";
+          if (signature) {
+            return {
+              ...part,
+              thoughtSignature: signature,
+              thought_signature: signature,
+              [callKey]: cleanedCall
+            };
+          }
+          return {
+            ...part,
+            [callKey]: cleanedCall
+          };
         }
         return part;
       })
@@ -4592,19 +4682,31 @@ function sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures
   return contents.map((content) => ({
     ...content,
     parts: (content?.parts ?? []).map((part) => {
-      if (part?.functionCall) {
+      const rawCall = part?.functionCall ?? part?.function_call;
+      if (rawCall) {
         const signature = thoughtSignatureFrom(part);
-        if (signature) {
-          return {
-            ...part,
-            thoughtSignature: signature,
-            thought_signature: signature,
-            functionCall: {
-              ...part.functionCall,
-              thoughtSignature: signature,
-              thought_signature: signature
-            }
-          };
+        if (!signature) {
+          return { text: toolCallText(rawCall.name, rawCall.args ?? rawCall.arguments) };
+        }
+        const {
+          thoughtSignature: _ignoredTs1,
+          thought_signature: _ignoredTs2,
+          ...cleanedCall
+        } = rawCall;
+        const callKey = part.functionCall ? "functionCall" : "function_call";
+        return {
+          ...part,
+          thoughtSignature: signature,
+          thought_signature: signature,
+          [callKey]: cleanedCall
+        };
+      }
+      const resp = part?.functionResponse ?? part?.function_response;
+      if (resp) {
+        const name2 = resp.name ?? "tool";
+        if (unsignedCallNames.has(name2)) {
+          const result = resp.response?.content ?? resp.response ?? "";
+          return { text: `[tool result: ${name2}] ${typeof result === "string" ? result : JSON.stringify(result)}` };
         }
       }
       return part;
@@ -4613,7 +4715,8 @@ function sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures
 }
 async function buildGeminiContents(request, attachments) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
-  const messages = compactMessagesForContext(rawMessages);
+  const maxMessages = resolveMaxMessages(request);
+  const messages = compactMessagesForContext(rawMessages, { maxMessages });
   const signedToolCallIds = collectSignedToolCallIds(messages);
   const requireThoughtSignatures = modelRequiresThoughtSignatures(request.model);
   const contents = [];
@@ -4648,7 +4751,71 @@ function buildGeminiTools(tools) {
     ...tool?.description ? { description: String(tool.description) } : {},
     parameters: sanitizeSchema(tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" })
   }));
+  declarations.sort((a, b) => a.name.localeCompare(b.name));
   return declarations.length > 0 ? [{ functionDeclarations: declarations }] : void 0;
+}
+function resolveAntigravityThinkingConfig(request = {}) {
+  if (request.thinkingConfig && typeof request.thinkingConfig === "object") {
+    return {
+      includeThoughts: true,
+      ...request.thinkingConfig
+    };
+  }
+  const effort = String(
+    request.reasoningEffort ?? request.reasoning_effort ?? (typeof request.thinking === "string" ? request.thinking : null) ?? ""
+  ).toLowerCase().trim();
+  if (effort === "none" || effort === "off" || request.thinking === false) {
+    return {
+      includeThoughts: false,
+      thinkingBudget: 0
+    };
+  }
+  if (effort === "low") {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 1024
+    };
+  }
+  if (effort === "medium") {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 8192
+    };
+  }
+  if (effort === "high") {
+    return {
+      includeThoughts: true,
+      thinkingBudget: -1
+    };
+  }
+  if (Number.isInteger(request.thinkingBudget)) {
+    return {
+      includeThoughts: request.thinkingBudget > 0,
+      thinkingBudget: request.thinkingBudget
+    };
+  }
+  const modelName = String(request.model ?? "").toLowerCase();
+  if (modelName.endsWith("-low")) {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 1024
+    };
+  }
+  if (modelName.endsWith("-medium")) {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 8192
+    };
+  }
+  if (modelName.endsWith("-high")) {
+    return {
+      includeThoughts: true,
+      thinkingBudget: -1
+    };
+  }
+  return {
+    includeThoughts: true
+  };
 }
 async function buildAntigravityRequest(request = {}, context = {}) {
   const nativeRequest = {
@@ -4667,9 +4834,13 @@ async function buildAntigravityRequest(request = {}, context = {}) {
   }
   nativeRequest.generationConfig = {
     temperature: request.temperature ?? 0.7,
-    maxOutputTokens: request.maxTokens ?? 4096,
+    maxOutputTokens: Number.isInteger(request.maxTokens) && request.maxTokens > 0 ? request.maxTokens : Number.isInteger(request.modelContext?.maxTokens) && request.modelContext.maxTokens > 0 ? request.modelContext.maxTokens : 65536,
     ...Array.isArray(request.responseModalities) ? { responseModalities: request.responseModalities } : request.modalities ? { responseModalities: request.modalities } : {}
   };
+  const thinkingConfig = resolveAntigravityThinkingConfig(request);
+  if (thinkingConfig) {
+    nativeRequest.generationConfig.thinkingConfig = thinkingConfig;
+  }
   return nativeRequest;
 }
 function responsePayload(value) {
@@ -4709,14 +4880,24 @@ function saveInlineImageToArtifacts(inlineData, workingDir = process.cwd()) {
 }
 function parseTextToolCall(value) {
   if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  const match = trimmed.match(/^\[(?:tool call|Tool Call):\s*([a-zA-Z0-9_.:-]+)\]\s*([\s\S]*)$/i);
+  const match = value.match(/(?:^|\n)\s*\[(?:tool call|Tool Call):\s*([a-zA-Z0-9_.:-]+)\]\s*([\s\S]*)$/i);
   if (!match) return null;
-  const name2 = match[1];
+  const leadingText = value.slice(0, match.index).trim();
+  let name2 = match[1];
+  if (name2.startsWith("default_api:")) {
+    name2 = name2.slice("default_api:".length);
+  }
+  if (name2 === "run_command") {
+    name2 = "bash";
+  }
   let argumentsValue = match[2].trim();
   if (argumentsValue.startsWith("{") && argumentsValue.endsWith("}")) {
     try {
-      JSON.parse(argumentsValue);
+      const parsed = JSON.parse(argumentsValue);
+      if (name2 === "bash" && !parsed.command && parsed.CommandLine) {
+        parsed.command = parsed.CommandLine;
+      }
+      argumentsValue = JSON.stringify(parsed);
     } catch {
       argumentsValue = JSON.stringify({ input: argumentsValue });
     }
@@ -4725,14 +4906,17 @@ function parseTextToolCall(value) {
   } else {
     argumentsValue = "{}";
   }
-  return { name: name2, argumentsValue };
+  return { name: name2, argumentsValue, leadingText };
 }
 function isPotentialTextToolCall(text3) {
   if (typeof text3 !== "string" || text3.length === 0) return false;
-  if (!text3.startsWith("[")) return false;
-  const prefix = "[tool call:";
-  const lower = text3.toLowerCase();
-  return prefix.startsWith(lower) || lower.startsWith(prefix);
+  const trimmed = text3.trimStart();
+  if (trimmed.startsWith("[")) {
+    const prefix = "[tool call:";
+    const lower = trimmed.toLowerCase();
+    if (prefix.startsWith(lower) || lower.startsWith(prefix)) return true;
+  }
+  return /\[(?:tool call|Tool Call):/i.test(text3);
 }
 async function* streamAntigravityResponse(response, context) {
   let text3 = "";
@@ -4863,6 +5047,15 @@ async function* streamAntigravityResponse(response, context) {
       if (textOpen) {
         const textTool = parseTextToolCall(text3);
         if (textTool) {
+          if (!textStarted) {
+            if (textTool.leadingText) {
+              yield { type: "block-start", index: textIndex, blockType: "text" };
+              yield { type: "text-delta", index: textIndex, text: textTool.leadingText };
+              yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText } };
+            }
+          } else {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText || text3 } };
+          }
           const toolIndex = nextIndex++;
           const toolId = firstString(textTool.name, `tool-${toolIndex}`);
           const toolBlock = { type: "tool-call", id: toolId, name: textTool.name, arguments: textTool.argumentsValue };
@@ -4902,6 +5095,15 @@ async function* streamAntigravityResponse(response, context) {
   if (textOpen) {
     const textTool = parseTextToolCall(text3);
     if (textTool) {
+      if (!textStarted) {
+        if (textTool.leadingText) {
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+          yield { type: "text-delta", index: textIndex, text: textTool.leadingText };
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText } };
+        }
+      } else {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText || text3 } };
+      }
       const toolIndex = nextIndex++;
       const toolId = firstString(textTool.name, `tool-${toolIndex}`);
       const toolBlock = { type: "tool-call", id: toolId, name: textTool.name, arguments: textTool.argumentsValue };
@@ -4916,12 +5118,15 @@ async function* streamAntigravityResponse(response, context) {
       }
       yield { type: "block-end", index: textIndex, block: { type: "text", text: text3 } };
     }
+  } else if (stop !== "tool_calls") {
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "" } };
   }
   if (usage) yield { type: "usage", usage };
   yield { type: "finish", reason: finishReason(stop) };
 }
 function createAntigravityNativeExecutor({
-  endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_ENDPOINT || DEFAULT_ENDPOINT,
+  endpoint = process.env.DOCKYARD_ANTIGRAVITY_ENDPOINT || DEFAULT_ENDPOINT,
   // Never fabricate an upstream project: when neither configuration nor a
   // resolver yields the account's Code Assist project, the request fails with
   // a clear diagnostic instead of sending a guessed envelope value.
@@ -4933,7 +5138,7 @@ function createAntigravityNativeExecutor({
   projectResolver = null,
   userAgent = process.env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent()
 } = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID2 });
+  const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID2 });
   const executor = async ({ request = {}, invocation, context = {} } = {}) => {
     let credential = null;
     if (context.secretStore) {
@@ -4984,7 +5189,7 @@ function createAntigravityNativeExecutor({
   return executor;
 }
 function createAntigravityNativeQuotaReader({
-  endpoint: endpoint2 = process.env.DOCKYARD_ANTIGRAVITY_QUOTA_ENDPOINT || DEFAULT_QUOTA_ENDPOINT,
+  endpoint = process.env.DOCKYARD_ANTIGRAVITY_QUOTA_ENDPOINT || DEFAULT_QUOTA_ENDPOINT,
   env = process.env,
   home = homedir4(),
   timeoutMs = 2e4,
@@ -4994,7 +5199,7 @@ function createAntigravityNativeQuotaReader({
   projectResolver = null,
   userAgent = env.DOCKYARD_ANTIGRAVITY_USER_AGENT || detectAntigravityUserAgent()
 } = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID2 });
+  const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID2 });
   return async ({ credential = null, account = null, context = {} } = {}) => {
     const auth = await tokenResolver({
       credential,
@@ -5060,13 +5265,31 @@ var ANTIGRAVITY_BROWSER_SCOPES = process.env.DOCKYARD_ANTIGRAVITY_OAUTH_SCOPE ||
   // The same OAuth token is used both for userinfo and Google's Code Assist
   // endpoints. Keep the upstream API scope instead of authorizing a token
   // that can identify the user but cannot call streamGenerateContent.
+  "https://www.googleapis.com/auth/aicode",
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/userinfo.email",
-  "https://www.googleapis.com/auth/userinfo.profile"
+  "https://www.googleapis.com/auth/userinfo.profile",
+  "https://www.googleapis.com/auth/cclog",
+  "https://www.googleapis.com/auth/experimentsandconfigs"
 ].join(" ");
 var OFFICIAL_ANTIGRAVITY_MODEL_METADATA = Object.freeze([
   Object.freeze({
+    id: "gemini-3.8-flash",
+    contextWindow: 1048576,
+    maxTokens: 65536
+  }),
+  Object.freeze({
+    id: "gemini-3.8-pro",
+    contextWindow: 1048576,
+    maxTokens: 65536
+  }),
+  Object.freeze({
     id: "gemini-3.7-flash",
+    contextWindow: 1048576,
+    maxTokens: 65536
+  }),
+  Object.freeze({
+    id: "gemini-3.7-pro",
     contextWindow: 1048576,
     maxTokens: 65536
   })
@@ -5380,13 +5603,13 @@ async function writeAntigravityCatalogCache(filePath, cache) {
   if (!filePath) return;
   await mkdir4(dirname3(filePath), { recursive: true, mode: 448 });
   const entries = Object.entries(cache.entries ?? {}).slice(-8);
-  const tempPath = `${filePath}.${randomUUID4()}.tmp`;
+  const tempPath = `${filePath}.${randomUUID5()}.tmp`;
   try {
     await writeFile3(tempPath, JSON.stringify({ schema: 1, entries: Object.fromEntries(entries) }), {
       encoding: "utf8",
       mode: 384
     });
-    await rename2(tempPath, filePath);
+    await rename3(tempPath, filePath);
   } finally {
     await rm4(tempPath, { force: true }).catch(() => {
     });
@@ -5721,10 +5944,95 @@ function publicAntigravityAuthSession(session) {
     authorizationUrl: session.authorizationUrl,
     instructions: session.instructions,
     startedAt: session.startedAt,
-    ...session.browserOpened ? { browserOpened: true } : {},
+    browserOpened: session.browserOpened === true,
+    ...session.terminalOpened ? { terminalOpened: true } : {},
     ...session.inputRequired ? { inputRequired: true } : {},
     diagnostic: session.diagnostic ?? null
   };
+}
+async function launchAntigravityInteractiveTerminal({
+  cliPath = DEFAULT_CLI,
+  environment = process.env,
+  commandRunner = runCommand
+} = {}) {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$agyCommand = Get-Command -Name $env:DOCKYARD_ANTIGRAVITY_LOGIN_CLI -CommandType Application -ErrorAction Stop",
+    "Start-Process -FilePath $agyCommand.Source -WorkingDirectory $env:DOCKYARD_ANTIGRAVITY_LOGIN_HOME -WindowStyle Normal -ErrorAction Stop | Out-Null"
+  ].join("; ");
+  await commandRunner("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    env: { ...environment, DOCKYARD_ANTIGRAVITY_LOGIN_CLI: cliPath, DOCKYARD_ANTIGRAVITY_LOGIN_HOME: homedir5() },
+    includeAccountInfo: true,
+    timeoutMs: 15e3
+  });
+}
+function createAntigravityInteractiveAuthorizer({
+  cliPath = DEFAULT_CLI,
+  environment = process.env,
+  timeoutMs = DEFAULT_AUTH_TIMEOUT_MS,
+  launchTerminal = launchAntigravityInteractiveTerminal,
+  tokenReader = ({ force = true } = {}) => environment.DOCKYARD_ANTIGRAVITY_TOKEN_FILE ? readAntigravityTokenFile({ env: environment }) : readAntigravityKeychainToken({ force }) ?? readAntigravityTokenFile({ env: environment })
+} = {}) {
+  const sessions = /* @__PURE__ */ new Map();
+  const instructions = "\u8BF7\u5728\u5B98\u65B9 agy \u7EC8\u7AEF\u5B8C\u6210\u767B\u5F55\uFF1BDockyard \u4F1A\u8BFB\u53D6\u5E76\u63A5\u5165\u672C\u673A\u5F53\u524D\u8D26\u53F7\u3002\u5207\u6362\u8D26\u53F7\u8BF7\u5728\u5B98\u65B9\u7EC8\u7AEF\u4F7F\u7528 /logout \u540E\u91CD\u65B0\u767B\u5F55\u3002";
+  const usable = (auth) => Boolean(auth?.token && (!auth.expiresAt || Date.parse(auth.expiresAt) > Date.now() + 3e4));
+  function complete(session, auth, context) {
+    session.status = "completed";
+    session.instructions = "\u5DF2\u8BFB\u53D6\u5B98\u65B9 agy \u7684\u672C\u673A\u767B\u5F55\u6001\uFF0C\u5F53\u524D\u8D26\u53F7\u5DF2\u63A5\u5165 Dockyard\u3002";
+    sessions.delete(session.sessionId);
+    return {
+      ...publicAntigravityAuthSession(session),
+      accounts: [candidate(context.now instanceof Date ? context.now : /* @__PURE__ */ new Date(), {
+        email: auth.email,
+        session: auth,
+        existingAccounts: context.accounts ?? [],
+        source: "official_antigravity_cli_session",
+        sourceKind: OFFICIAL_SESSION_SOURCE_KINDS.CLI
+      })]
+    };
+  }
+  async function begin(context = {}) {
+    const session = {
+      sessionId: `${PROVIDER_ID3}:interactive:${randomUUID5()}`,
+      providerId: PROVIDER_ID3,
+      status: "pending",
+      instructions,
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      browserOpened: false,
+      terminalOpened: false,
+      authorizationUrl: null,
+      diagnostic: null
+    };
+    const auth = await tokenReader({ force: true });
+    if (usable(auth)) return complete(session, auth, context);
+    try {
+      await launchTerminal({ cliPath, environment });
+      session.terminalOpened = true;
+      sessions.set(session.sessionId, session);
+    } catch {
+      session.status = "failed";
+      session.diagnostic = "\u65E0\u6CD5\u6253\u5F00\u5B98\u65B9 agy \u7EC8\u7AEF\u3002\u8BF7\u5728\u7EC8\u7AEF\u8FD0\u884C agy \u5B8C\u6210\u767B\u5F55\uFF0C\u7136\u540E\u56DE\u5230 Dockyard \u626B\u63CF\u5E76\u6DFB\u52A0\u8D26\u53F7\u3002";
+    }
+    return publicAntigravityAuthSession(session);
+  }
+  async function poll(sessionId, context = {}) {
+    const session = sessions.get(sessionId);
+    if (!session) return { sessionId, providerId: PROVIDER_ID3, status: "missing", instructions };
+    if (Date.now() - Date.parse(session.startedAt) >= timeoutMs) {
+      sessions.delete(sessionId);
+      return { ...publicAntigravityAuthSession(session), status: "failed", diagnostic: "\u7B49\u5F85\u5B98\u65B9\u7EC8\u7AEF\u767B\u5F55\u8D85\u65F6\u3002\u5B8C\u6210\u767B\u5F55\u540E\uFF0C\u8BF7\u91CD\u65B0\u626B\u63CF\u5E76\u6DFB\u52A0\u8D26\u53F7\u3002" };
+    }
+    const auth = await tokenReader();
+    return usable(auth) ? complete(session, auth, context) : publicAntigravityAuthSession(session);
+  }
+  async function cancel(sessionId) {
+    sessions.delete(sessionId);
+    return { sessionId, providerId: PROVIDER_ID3, status: "cancelled" };
+  }
+  async function submitAuthorizationCode() {
+    throw new Error("\u8BF7\u5728\u5B98\u65B9 agy \u7EC8\u7AEF\u8F93\u5165\u9A8C\u8BC1\u7801\uFF0C\u5B8C\u6210\u540E Dockyard \u4F1A\u81EA\u52A8\u63A5\u5165\u5F53\u524D\u8D26\u53F7\u3002");
+  }
+  return Object.freeze({ begin, poll, cancel, submitAuthorizationCode });
 }
 function createAntigravityOAuthAuthorizer({
   cliPath = process.env.DOCKYARD_ANTIGRAVITY_CLI || DEFAULT_CLI,
@@ -5735,7 +6043,7 @@ function createAntigravityOAuthAuthorizer({
   tokenReader = readAntigravityTokenFile,
   usePty = process.platform === "darwin",
   ptyPythonPath = process.env.DOCKYARD_ANTIGRAVITY_PTY_PYTHON || "python3",
-  instructions = "\u5DF2\u6253\u5F00 Google \u5B98\u65B9\u9A8C\u8BC1\u9875\uFF1B\u9009\u62E9\u8D26\u53F7\u5E76\u5B8C\u6210\u9A8C\u8BC1\u540E\uFF0CDSH \u4F1A\u81EA\u52A8\u63A5\u5165\u3002"
+  instructions = "\u6B63\u5728\u51C6\u5907 Google \u5B98\u65B9\u9A8C\u8BC1\uFF1B\u6388\u6743\u94FE\u63A5\u51FA\u73B0\u540E\uFF0C\u8BF7\u6253\u5F00\u94FE\u63A5\u5E76\u5B8C\u6210\u767B\u5F55\u3002"
 } = {}) {
   if (!cliPath) throw new Error("Antigravity OAuth authorizer requires an agy CLI path");
   if (typeof spawnImpl !== "function") throw new Error("Antigravity OAuth authorizer requires a process spawner");
@@ -5771,7 +6079,7 @@ function createAntigravityOAuthAuthorizer({
         if (!auth?.token) {
           if (session.exitCode === null) return publicAntigravityAuthSession(session);
           session.status = "failed";
-          session.diagnostic = session.timedOut ? "Google \u9A8C\u8BC1\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002" : session.launchError ? `\u65E0\u6CD5\u542F\u52A8 agy \u5B98\u65B9\u9A8C\u8BC1\uFF1A${session.launchError}` : `agy \u5B98\u65B9\u9A8C\u8BC1\u672A\u5B8C\u6210\uFF08\u9000\u51FA\u7801 ${session.exitCode ?? "unknown"}\uFF09\u3002`;
+          session.diagnostic = session.timedOut ? "Google \u9A8C\u8BC1\u8D85\u65F6\uFF0C\u8BF7\u91CD\u65B0\u70B9\u51FB\u767B\u5F55\u6DFB\u52A0\u8D26\u53F7\u3002" : session.launchError ? `\u65E0\u6CD5\u542F\u52A8 agy \u5B98\u65B9\u9A8C\u8BC1\uFF1A${session.launchError}` : /authentication required|not logged into Antigravity|interactive (?:terminal|session)|not a terminal/i.test(session.output) ? "\u5F53\u524D agy \u9700\u8981\u5728\u4EA4\u4E92\u7EC8\u7AEF\u5B8C\u6210\u9996\u6B21\u767B\u5F55\u3002\u8BF7\u5728\u7EC8\u7AEF\u8FD0\u884C agy\uFF0C\u5B8C\u6210\u767B\u5F55\u540E\u56DE\u5230 Dockyard \u626B\u63CF\u5E76\u6DFB\u52A0\u8D26\u53F7\u3002" : `agy \u5B98\u65B9\u9A8C\u8BC1\u672A\u5B8C\u6210\uFF08\u9000\u51FA\u7801 ${session.exitCode ?? "unknown"}\uFF09\u3002\u8BF7\u5728\u4EA4\u4E92\u7EC8\u7AEF\u8FD0\u884C agy \u68C0\u67E5\u767B\u5F55\u72B6\u6001\u3002`;
           return publicAntigravityAuthSession(session);
         }
         if (session.child && session.exitCode === null) session.child.kill("SIGTERM");
@@ -5816,12 +6124,13 @@ function createAntigravityOAuthAuthorizer({
     const childEnv = {
       ...environment,
       HOME: profileDir,
+      USERPROFILE: profileDir,
       XDG_CONFIG_HOME: join6(profileDir, ".config"),
       DOCKYARD_ANTIGRAVITY_TOKEN_FILE: tokenPath
     };
     delete childEnv.AGY_CLI_HIDE_ACCOUNT_INFO;
     const session = {
-      sessionId: `${PROVIDER_ID3}:${randomUUID4()}`,
+      sessionId: `${PROVIDER_ID3}:${randomUUID5()}`,
       providerId: PROVIDER_ID3,
       profileDir,
       childEnv,
@@ -5829,9 +6138,9 @@ function createAntigravityOAuthAuthorizer({
       authorizationUrl: null,
       instructions,
       startedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      // agy owns the official browser OAuth flow and opens this URL itself.
-      // The DSH host must not open the captured URL a second time.
-      browserOpened: true,
+      // Starting agy does not prove that a browser opened. The host can open
+      // a captured authorization URL and report its own launch result.
+      browserOpened: false,
       exitCode: null,
       launchError: null,
       output: "",
@@ -5871,6 +6180,7 @@ function createAntigravityOAuthAuthorizer({
     } catch (error) {
       session.launchError = redactError(error);
       session.exitCode = -1;
+      return finalize(session, {});
     }
     return publicAntigravityAuthSession(session);
   }
@@ -5967,7 +6277,8 @@ var AntigravityOfficialSessionDriver = class {
     this.quotaReader = quotaReader;
     this.tokenResolver = tokenResolver;
     this.identityFromOfficialSession = identityFromOfficialSession;
-    this.cliOAuthAuthorizer = createAntigravityOAuthAuthorizer({
+    const cliAuthorizer = process.platform === "win32" ? createAntigravityInteractiveAuthorizer : createAntigravityOAuthAuthorizer;
+    this.cliOAuthAuthorizer = cliAuthorizer({
       cliPath,
       environment: env,
       timeoutMs: authorizationTimeoutMs
@@ -6172,7 +6483,7 @@ var AntigravityOfficialSessionDriver = class {
         throw new Error("agy did not advance the Antigravity OAuth token expiry");
       }
       await mkdir4(dirname3(officialTokenPath), { recursive: true, mode: 448 });
-      const persistedPath = `${officialTokenPath}.${randomUUID4()}.tmp`;
+      const persistedPath = `${officialTokenPath}.${randomUUID5()}.tmp`;
       try {
         await writeFile3(persistedPath, JSON.stringify({
           auth_method: "consumer",
@@ -6183,7 +6494,7 @@ var AntigravityOfficialSessionDriver = class {
             ...nextCredential.expiresAt ? { expiry: nextCredential.expiresAt } : {}
           }
         }), { encoding: "utf8", mode: 384 });
-        await rename2(persistedPath, officialTokenPath);
+        await rename3(persistedPath, officialTokenPath);
       } finally {
         await rm4(persistedPath, { force: true }).catch(() => {
         });
@@ -6445,12 +6756,7 @@ var AntigravityOfficialSessionDriver = class {
     }
   }
   async startAuthorization(context = {}) {
-    if (this.oauthAuthorizer !== this.browserAuthorizer || !this.browserAuthorizer) {
-      return this.oauthAuthorizer.begin(context);
-    }
-    const started = await this.browserAuthorizer.begin(context);
-    if (started.status === "failed") return this.cliOAuthAuthorizer.begin(context);
-    return started;
+    return this.oauthAuthorizer.begin(context);
   }
   #authorizationAuthorizer(sessionId) {
     if (sessionId?.includes(":browser:")) return this.browserAuthorizer;
@@ -6665,6 +6971,7 @@ import { mkdtemp as mkdtemp3, readFile as readFile6, rm as rm5, writeFile as wri
 import { homedir as homedir6 } from "node:os";
 import { tmpdir as tmpdir3 } from "node:os";
 import { join as join7 } from "node:path";
+init_provider_utils();
 var PROVIDER_ID4 = "grok";
 var DEFAULT_AUTHORIZATION_URL2 = "https://auth.x.ai/oauth2/authorize";
 var DEFAULT_TOKEN_URL2 = "https://auth.x.ai/oauth2/token";
@@ -7616,13 +7923,13 @@ async function* streamGrokResponse(response) {
   yield { type: "finish", reason: finishReason(stop) };
 }
 function createGrokNativeExecutor({
-  endpoint: endpoint2 = process.env.DOCKYARD_GROK_ENDPOINT || DEFAULT_ENDPOINT2,
+  endpoint = process.env.DOCKYARD_GROK_ENDPOINT || DEFAULT_ENDPOINT2,
   env = process.env,
   timeoutMs = 3e5,
   fetchImpl = fetch,
   userAgent = process.env.DOCKYARD_GROK_USER_AGENT
 } = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID5 });
+  const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID5 });
   const executor = async ({ request = {}, credential, context = {} } = {}) => {
     const effectiveEnv = { ...env, ...context.env ?? {} };
     const token = firstString3(credential?.access, effectiveEnv.XAI_API_KEY, effectiveEnv.GROK_API_KEY);
@@ -7678,7 +7985,8 @@ import { createHash as createHash6 } from "node:crypto";
 import { homedir as homedir8 } from "node:os";
 
 // packages/oauth/src/cli-status-authorizer.mjs
-import { randomUUID as randomUUID5 } from "node:crypto";
+init_provider_utils();
+import { randomUUID as randomUUID6 } from "node:crypto";
 import { spawn as spawn5 } from "node:child_process";
 var CHILD_STOP_GRACE_MS2 = 2e3;
 function publicSession3(session) {
@@ -7789,7 +8097,7 @@ function createCliStatusAuthorizer({
   }
   async function begin() {
     const session = {
-      sessionId: `${providerId}:${randomUUID5()}`,
+      sessionId: `${providerId}:${randomUUID6()}`,
       providerId,
       browserOpened,
       status: "pending",
@@ -7861,113 +8169,14 @@ function createCliStatusAuthorizer({
   return Object.freeze({ begin, poll, cancel });
 }
 
-// packages/oauth/src/official-session-authorizer.mjs
-import { randomUUID as randomUUID6 } from "node:crypto";
-var DEFAULT_TIMEOUT_MS3 = 10 * 60 * 1e3;
-function publicSession4(session) {
-  return {
-    sessionId: session.sessionId,
-    providerId: session.providerId,
-    status: session.status,
-    instructions: session.instructions,
-    startedAt: session.startedAt,
-    diagnostic: session.diagnostic ?? null,
-    ...session.browserOpened ? { browserOpened: true } : {}
-  };
-}
-function createOfficialSessionAuthorizer({
-  providerId,
-  source = "official_client",
-  instructions = "\u8BF7\u5728\u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
-  timeoutMs = DEFAULT_TIMEOUT_MS3,
-  browserOpened = false,
-  readSession,
-  onCancel = null
-} = {}) {
-  if (!providerId) throw new Error("Official session authorizer requires providerId");
-  if (typeof readSession !== "function") throw new Error(`Official session authorizer requires a reader for ${providerId}`);
-  const sessions = /* @__PURE__ */ new Map();
-  function missing(sessionId) {
-    return {
-      sessionId,
-      providerId,
-      status: "missing",
-      instructions,
-      diagnostic: "\u5B98\u65B9\u5BA2\u6237\u7AEF\u767B\u5F55\u4F1A\u8BDD\u4E0D\u5B58\u5728\u6216\u5DF2\u7ED3\u675F\uFF0C\u8BF7\u91CD\u65B0\u5F00\u59CB\u6388\u6743\u3002"
-    };
-  }
-  async function begin() {
-    const session = {
-      sessionId: `${providerId}:official-session:${randomUUID6()}`,
-      providerId,
-      source,
-      browserOpened,
-      status: "pending",
-      instructions,
-      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      diagnostic: null,
-      result: null
-    };
-    sessions.set(session.sessionId, session);
-    return publicSession4(session);
-  }
-  async function poll(sessionId, context = {}) {
-    const session = sessions.get(sessionId);
-    if (!session) return missing(sessionId);
-    if (session.result) return session.result;
-    if (Date.now() - Date.parse(session.startedAt) >= timeoutMs) {
-      session.status = "failed";
-      session.diagnostic = "\u5B98\u65B9\u5BA2\u6237\u7AEF\u767B\u5F55\u8D85\u65F6\uFF0C\u8BF7\u5B8C\u6210\u767B\u5F55\u540E\u91CD\u65B0\u5F00\u59CB\u6388\u6743\u3002";
-      sessions.delete(sessionId);
-      return publicSession4(session);
-    }
-    try {
-      const value = await readSession(context);
-      const accounts = Array.isArray(value) ? value : value?.accounts;
-      if (Array.isArray(accounts) && accounts.length > 0) {
-        session.status = "completed";
-        session.result = {
-          ...publicSession4(session),
-          accounts,
-          diagnostic: null
-        };
-        sessions.delete(sessionId);
-        return session.result;
-      }
-      session.status = value?.status === "processing" ? "processing" : "pending";
-      session.diagnostic = value?.diagnostic ?? null;
-      return publicSession4(session);
-    } catch (error) {
-      session.status = "processing";
-      session.diagnostic = redactError(error);
-      return publicSession4(session);
-    }
-  }
-  async function cancel(sessionId, context = {}) {
-    const session = sessions.get(sessionId);
-    if (!session) return missing(sessionId);
-    try {
-      await onCancel?.(context);
-    } finally {
-      sessions.delete(sessionId);
-    }
-    return { sessionId, providerId, status: "cancelled" };
-  }
-  async function submitAuthorizationCode(sessionId) {
-    const session = sessions.get(sessionId);
-    if (!session) return missing(sessionId);
-    throw new Error("\u5F53\u524D\u5B98\u65B9\u5BA2\u6237\u7AEF\u6388\u6743\u6D41\u7A0B\u4E0D\u63A5\u6536\u9A8C\u8BC1\u7801");
-  }
-  return Object.freeze({ begin, poll, cancel, submitAuthorizationCode });
-}
-var officialSessionAuthorizerConstants = Object.freeze({
-  defaultTimeoutMs: DEFAULT_TIMEOUT_MS3
-});
+// modules/provider-claude/src/driver.mjs
+init_provider_utils();
 
 // modules/provider-claude/src/native-transport.mjs
 import { readFile as readFile7 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
 import { join as join8 } from "node:path";
+init_provider_utils();
 var PROVIDER_ID6 = "claude";
 var DEFAULT_ENDPOINT3 = "https://api.anthropic.com/v1/messages";
 function firstString4(...values) {
@@ -7979,11 +8188,6 @@ async function readJson(path) {
   } catch {
     return null;
   }
-}
-function oauthTokenFromJson(value) {
-  const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
-  const token = firstString4(oauth?.accessToken, oauth?.access_token, value?.accessToken, value?.access_token);
-  return token ? { token, kind: "oauth" } : null;
 }
 function claudeOAuthCredentialFromJson(value) {
   const oauth = value?.claudeAiOauth ?? value?.oauth ?? value?.credentials ?? value;
@@ -8025,14 +8229,8 @@ async function resolveClaudeAccessToken({
   if (apiKey) return { token: apiKey, kind: "apiKey" };
   const envToken = firstString4(env.CLAUDE_CODE_OAUTH_TOKEN, env.ANTHROPIC_AUTH_TOKEN);
   if (envToken) return { token: envToken, kind: "oauth" };
-  for (const path of [
-    join8(home, ".claude", ".credentials.json"),
-    join8(home, ".opencodex", "claude_desktop_auth.json")
-  ]) {
-    const found = oauthTokenFromJson(await readJson(path));
-    if (found) return found;
-  }
-  return null;
+  const persisted = await readClaudeOAuthCredential({ home });
+  return persisted ? { token: persisted.access, kind: "oauth" } : null;
 }
 function toolCallPart2(part) {
   const type = String(part?.type ?? "").toLowerCase().replace(/[_-]/g, "");
@@ -8293,14 +8491,14 @@ async function* streamClaudeResponse(response) {
   yield { type: "finish", reason: finishReason(stop) };
 }
 function createClaudeNativeExecutor({
-  endpoint: endpoint2 = process.env.DOCKYARD_CLAUDE_ENDPOINT || DEFAULT_ENDPOINT3,
+  endpoint = process.env.DOCKYARD_CLAUDE_ENDPOINT || DEFAULT_ENDPOINT3,
   env = process.env,
   home = homedir7(),
   timeoutMs = 3e5,
   fetchImpl = fetch,
   tokenResolver = resolveClaudeAccessToken
 } = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID6 });
+  const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID6 });
   const executor = async ({ request = {}, invocation, context = {} } = {}) => {
     let credential = null;
     const ref = invocation?.auth?.credentialRef ?? invocation?.account?.auth?.credentialRef ?? invocation?.account?.credentialRef;
@@ -8526,37 +8724,83 @@ function catalogModel(model) {
     ...reasoning ? { reasoning } : {}
   };
 }
-function createClaudeCatalogLoader({ registryLoader = null } = {}) {
-  let cached = null;
-  return async function loadCatalog({ force = false } = {}) {
-    if (cached && !force) return cached;
-    const registry = typeof registryLoader === "function" ? await registryLoader() : [];
-    const modelsById = /* @__PURE__ */ new Map();
-    for (const rawModel of Array.isArray(registry) ? registry : []) {
-      if (!rawModel || rawModel.provider !== "anthropic" && rawModel.api !== "anthropic-messages") continue;
-      const model = catalogModel(rawModel);
-      if (typeof model.id !== "string" || model.id.length === 0) continue;
-      const previous = modelsById.get(model.id);
-      if (!previous) {
-        modelsById.set(model.id, model);
-        continue;
+function createClaudeCatalogLoader({ registryLoader = null, fetchImpl = fetch } = {}) {
+  const cachedByAccount = /* @__PURE__ */ new Map();
+  const credentialRef = (account) => account.auth?.credentialRef ?? account.credentialRef;
+  const accountKey = (account) => JSON.stringify([account.accountId, credentialRef(account)]);
+  return async function loadCatalog(context = {}) {
+    const accounts = (context.accounts ?? []).filter((account) => account?.accountId);
+    const currentKeys = new Set(accounts.map(accountKey));
+    for (const key of cachedByAccount.keys()) if (!currentKeys.has(key)) cachedByAccount.delete(key);
+    const selectedId = context.accountId ?? (context.policy === "manual" ? context.defaultAccountId : null);
+    const selected = selectedId ? accounts.filter((account) => account.accountId === selectedId) : context.policy === "manual" ? [] : accounts;
+    const diagnostics = [];
+    if (!selected.length) return { models: [], source: "claude_account_model_selector", diagnostics: ["\u8BF7\u5148\u8FDE\u63A5\u5E76\u9009\u62E9 Claude \u8BA2\u9605\u8D26\u53F7"] };
+    const registry = typeof registryLoader === "function" ? await Promise.resolve().then(registryLoader).catch(() => []) : [];
+    const metadata = /* @__PURE__ */ new Map();
+    for (const model of Array.isArray(registry) ? registry : []) {
+      if (model?.provider === "anthropic" && typeof model.id === "string") {
+        metadata.set(model.id, { ...metadata.get(model.id), ...catalogModel(model) });
       }
-      modelsById.set(model.id, {
-        ...previous,
-        ...previous.name === model.id && model.name !== model.id ? { name: model.name } : {},
-        ...previous.inputModalities === void 0 && model.inputModalities !== void 0 ? { inputModalities: [...model.inputModalities] } : {},
-        ...previous.contextWindow === void 0 && model.contextWindow !== void 0 ? { contextWindow: model.contextWindow } : {},
-        ...previous.maxTokens === void 0 && model.maxTokens !== void 0 ? { maxTokens: model.maxTokens } : {},
-        ...previous.reasoning === void 0 && model.reasoning !== void 0 ? { reasoning: model.reasoning } : {}
-      });
     }
-    const models = [...modelsById.values()];
-    cached = {
-      models,
-      source: "dsh_live_provider_registry",
-      ...models.length ? {} : { diagnostics: ["Claude \u5B98\u65B9\u6CA1\u6709\u516C\u5F00\u6A21\u578B\u76EE\u5F55\uFF0C\u4E14\u5F53\u524D DSH registry \u672A\u8FD4\u56DE Anthropic \u6A21\u578B"] }
+    const catalogs = [];
+    const now = context.now instanceof Date ? context.now.getTime() : Date.now();
+    for (const account of selected) {
+      const key = accountKey(account);
+      let cached = cachedByAccount.get(key);
+      if (context.force || !cached || now - cached.at >= 3e5) {
+        try {
+          const credential = context.readCredential ? await context.readCredential(account) : await context.secretStore?.read(credentialRef(account));
+          if (!credential?.access || credential.type === "api_key" || credential.accountId && credential.accountId !== account.accountId || credential.providerId && credential.providerId !== PROVIDER_ID7) {
+            throw new Error("credential_unavailable");
+          }
+          const { body } = await fetchJson("https://api.anthropic.com/api/model_selector/cc", {
+            method: "GET",
+            headers: {
+              authorization: `Bearer ${credential.access}`,
+              "anthropic-beta": "oauth-2025-04-20",
+              "anthropic-client-platform": "claude_code_cli",
+              accept: "application/json"
+            },
+            signal: context.signal,
+            redirect: "error"
+          }, { fetchImpl, timeoutMs: 1e4 });
+          const rows = body?.model_selector_config?.find((surface) => surface?.id === "cc")?.models;
+          if (!Array.isArray(rows)) throw new Error("catalog_unavailable");
+          const models2 = rows.filter((row) => row && typeof row.id === "string" && row.id.length > 0 && (row.name === void 0 || typeof row.name === "string") && (row.disabled === void 0 || typeof row.disabled === "boolean") && row.disabled !== true && row.section !== "deprecated").map((row) => {
+            const model = { ...metadata.get(row.id), id: row.id, name: row.name ?? row.id };
+            const runtime = row.runtime ?? {};
+            const contextWindow = runtime.max_input_tokens ?? row.context_window;
+            if (Number.isInteger(contextWindow) && contextWindow > 0) model.contextWindow = contextWindow;
+            if (Number.isInteger(runtime.max_output_tokens) && runtime.max_output_tokens > 0) model.maxTokens = runtime.max_output_tokens;
+            if (typeof row.capabilities?.mm_images === "boolean") {
+              model.inputModalities = row.capabilities.mm_images ? ["text", "image"] : ["text"];
+            }
+            const efforts = Array.isArray(runtime.effort_levels) ? runtime.effort_levels.map((id) => ({ id, name: id })) : row.thinking?.effort_options;
+            if (Array.isArray(efforts)) model.reasoning = {
+              efforts: efforts.filter((effort) => typeof effort?.id === "string").map((effort) => ({ id: effort.id, name: effort.name ?? effort.id })),
+              ...typeof runtime.default_effort === "string" ? { defaultEffort: runtime.default_effort } : {}
+            };
+            if (row.thinking?.type === "none") delete model.reasoning;
+            const description = [row.description, row.badge?.message, row.tooltip?.content].filter((value) => typeof value === "string" && value);
+            if (description.length) model.description = description.join(" \xB7 ");
+            return model;
+          });
+          cached = { models: models2, at: now };
+          cachedByAccount.set(key, cached);
+        } catch (error) {
+          const reason = error?.status ? `HTTP ${error.status}` : error?.message === "credential_unavailable" ? "\u8D26\u53F7\u51ED\u636E\u4E0D\u53EF\u7528\uFF0C\u8BF7\u91CD\u65B0\u6388\u6743" : "\u7F51\u7EDC\u5F02\u5E38\u6216\u5B98\u65B9\u672A\u8FD4\u56DE\u8D26\u53F7\u6A21\u578B\u76EE\u5F55";
+          diagnostics.push(`Claude ${account.displayName ?? account.accountId} \u6A21\u578B\u5237\u65B0\u5931\u8D25\uFF1A${reason}${cached ? "\uFF1B\u663E\u793A\u8BE5\u8D26\u53F7\u4E0A\u6B21\u6210\u529F\u83B7\u53D6\u7684\u76EE\u5F55" : ""}`);
+        }
+      }
+      const models = cached?.models ?? [];
+      catalogs.push(models);
+    }
+    return {
+      models: commonAccountModels(catalogs),
+      source: "claude_account_model_selector",
+      diagnostics
     };
-    return cached;
   };
 }
 var ClaudeSubscriptionDriver = class {
@@ -8592,20 +8836,7 @@ var ClaudeSubscriptionDriver = class {
     this.sessionReader = sessionReader;
     this.sessionSource = sessionSource;
     this.sessionSourceKind = sessionSourceKind;
-    this.catalogLoader = catalogLoader ?? createClaudeCatalogLoader();
-    this.clientSessionAuthorizer = typeof sessionReader === "function" ? createOfficialSessionAuthorizer({
-      providerId: PROVIDER_ID7,
-      source: sessionSource,
-      instructions: "\u8BF7\u5728 Claude \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
-      readSession: async (context = {}) => {
-        const status = await this.#activeStatus(context.signal);
-        const candidate2 = candidateFromStatus(status, {
-          source: status.source,
-          sourceKind: status.sourceKind
-        });
-        return { accounts: [await this.importAccount(candidate2, context)] };
-      }
-    }) : null;
+    this.catalogLoader = catalogLoader ?? createClaudeCatalogLoader({ fetchImpl });
     this.cliAuthorizer = createCliStatusAuthorizer({
       providerId: PROVIDER_ID7,
       cliPath,
@@ -8727,6 +8958,9 @@ var ClaudeSubscriptionDriver = class {
     const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
     const credential = await context.secretStore.read(credentialRef);
     if (!credential?.access) throw activeSessionError2("Claude browser OAuth credential is missing; authorize again");
+    if (credential.type === "api_key" || credential.providerId && credential.providerId !== PROVIDER_ID7 || credential.accountId && credential.accountId !== account.accountId) {
+      throw activeSessionError2("Claude credential does not belong to the selected subscription account", { mismatch: true });
+    }
     return { ...credential, credentialRef };
   }
   async #refreshBrowserCredential(account, context = {}) {
@@ -8877,7 +9111,7 @@ var ClaudeSubscriptionDriver = class {
     return started;
   }
   async pollAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
     return authorizer.poll(sessionId, context);
   }
   async submitAuthorizationCode(sessionId, code, context = {}) {
@@ -8888,7 +9122,7 @@ var ClaudeSubscriptionDriver = class {
     return authorizer.submitAuthorizationCode(sessionId, code, context);
   }
   async cancelAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
     return authorizer.cancel(sessionId, context);
   }
   async refreshAccount(account, context = {}) {
@@ -8927,7 +9161,10 @@ var ClaudeSubscriptionDriver = class {
     };
   }
   async getCatalog(context = {}) {
-    return this.catalogLoader({ force: Boolean(context.force) });
+    return this.catalogLoader({
+      ...context,
+      readCredential: (account) => this.#refreshBrowserCredential(account, context)
+    });
   }
   async invoke(request, invocation, context = {}) {
     await this.#assertActiveSession(invocation?.account, context.signal, context);
@@ -8966,6 +9203,7 @@ function createClaudeModule({ driver = {} } = {}) {
 // modules/provider-cursor/src/driver.mjs
 import { createHash as createHash8, randomBytes as randomBytes3, randomUUID as randomUUID9 } from "node:crypto";
 import { homedir as homedir10 } from "node:os";
+init_provider_utils();
 
 // modules/provider-cursor/src/native-transport.mjs
 import { execFileSync as execFileSync2 } from "node:child_process";
@@ -9586,14 +9824,14 @@ function resolveCursorAccessToken(options = {}) {
   const session = readCursorDesktopSession(options);
   return session ? { token: session.token, kind: session.kind, ...session.expiresAt ? { expiresAt: session.expiresAt } : {} } : null;
 }
-function cursorHeaders(endpoint2, token, requestId, env) {
+function cursorHeaders(endpoint, token, requestId, env) {
   const clientVersion = env.DOCKYARD_CURSOR_CLIENT_VERSION || DEFAULT_CURSOR_CLIENT_VERSION;
   const clientKey = randomBytes2(32).toString("hex");
   return {
     ":method": "POST",
-    ":path": `${endpoint2.pathname}${endpoint2.search}`,
+    ":path": `${endpoint.pathname}${endpoint.search}`,
     ":scheme": "https",
-    ":authority": endpoint2.host,
+    ":authority": endpoint.host,
     authorization: `Bearer ${token}`,
     "content-type": "application/connect+proto",
     accept: "application/connect+proto",
@@ -9609,7 +9847,7 @@ function cursorStatusError(status) {
   return nativeProviderError(PROVIDER_ID8, `Cursor AgentService returned HTTP ${status}`, { status });
 }
 function streamCursor({
-  endpoint: endpoint2,
+  endpoint,
   token,
   request,
   context,
@@ -9640,7 +9878,7 @@ function streamCursor({
       tools: [],
       timeZone
     });
-    const url = new URL(endpoint2);
+    const url = new URL(endpoint);
     const session = http2Module.connect(url.origin);
     const queue = createAsyncQueue();
     let stream = null;
@@ -9812,7 +10050,7 @@ function streamCursor({
   })();
 }
 function createCursorNativeExecutor({
-  endpoint: endpoint2 = process.env.DOCKYARD_CURSOR_ENDPOINT || DEFAULT_ENDPOINT4,
+  endpoint = process.env.DOCKYARD_CURSOR_ENDPOINT || DEFAULT_ENDPOINT4,
   env = process.env,
   home = homedir9(),
   tokenResolver = resolveCursorAccessToken,
@@ -9820,7 +10058,7 @@ function createCursorNativeExecutor({
   timeoutMs = Number(process.env.DOCKYARD_CURSOR_TIMEOUT_MS) || DEFAULT_TOTAL_TIMEOUT_MS,
   idleTimeoutMs = Number(process.env.DOCKYARD_CURSOR_IDLE_TIMEOUT_MS) || DEFAULT_IDLE_TIMEOUT_MS
 } = {}) {
-  const safeEndpoint = validateNativeEndpoint(endpoint2, { providerId: PROVIDER_ID8 });
+  const safeEndpoint = validateNativeEndpoint(endpoint, { providerId: PROVIDER_ID8 });
   const executor = async ({ request = {}, invocation, context = {} } = {}) => {
     let credential = null;
     if (context.secretStore) {
@@ -10320,21 +10558,6 @@ var CursorSubscriptionDriver = class {
       apiBaseUrl: this.apiBaseUrl,
       fetchImpl: this.fetchImpl
     });
-    this.clientSessionAuthorizer = createOfficialSessionAuthorizer({
-      providerId: PROVIDER_ID9,
-      source: sessionSource,
-      instructions: "\u8BF7\u5728 Cursor \u5B98\u65B9\u5BA2\u6237\u7AEF\u5B8C\u6210\u767B\u5F55\uFF0C\u5B8C\u6210\u540E\u56DE\u5230 Dockyard DSH\u3002",
-      readSession: async (context = {}) => {
-        const status = this.sessionReader ? await this.#readStatus(context.signal) : (() => {
-          const desktop2 = this.#readDesktopSession();
-          return desktop2 ? statusFromDesktopSession(desktop2) : null;
-        })();
-        if (!status?.loggedIn) return { accounts: [] };
-        const desktop = status.source === "cursor_desktop_app" ? this.#readDesktopSession() : null;
-        const candidate2 = desktop ? candidateFromDesktopSession(desktop) : candidateFromStatus2(status, { source: status.source, sourceKind: status.sourceKind });
-        return { accounts: [await this.importAccount(candidate2, context)] };
-      }
-    });
     this.cliAuthorizer = createCliStatusAuthorizer({
       providerId: PROVIDER_ID9,
       cliPath,
@@ -10600,11 +10823,11 @@ var CursorSubscriptionDriver = class {
     return started;
   }
   async pollAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
     return authorizer.poll(sessionId, context);
   }
   async cancelAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:") ? this.clientSessionAuthorizer : sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:") ? this.browserAuthorizer : this.oauthAuthorizer === this.browserAuthorizer ? this.cliAuthorizer : this.oauthAuthorizer;
     return authorizer.cancel(sessionId, context);
   }
   async refreshAccount(account, context = {}) {
@@ -10696,6 +10919,7 @@ function createCursorModule({ driver = {} } = {}) {
 }
 
 // packages/runtime/src/dockyard-runtime.mjs
+init_provider_utils();
 var candidateSummarizers = /* @__PURE__ */ new Map([
   ["openai-codex", summarizeCodexCandidate],
   ["antigravity", summarizeAntigravityCandidate],
@@ -11131,11 +11355,13 @@ var DockyardRuntime = class {
   async submitAuthorizationCode(providerId, sessionId, code) {
     await this.init();
     const entry = this.#entry(providerId);
-    return entry.module.submitAuthorizationCode(sessionId, code, providerContext(this, {
+    const result = await entry.module.submitAuthorizationCode(sessionId, code, providerContext(this, {
       accounts: entry.pool.list()
     }));
+    return this.#persistAuthorizationResult(entry, providerId, result);
   }
   async refreshAccount(providerId, accountId, { force = false, tolerateFailure = false } = {}) {
+    await this.init();
     const key = `${providerId}\0${accountId}\0${force ? "force" : "auto"}\0${tolerateFailure ? "lenient" : "strict"}`;
     const existing = this.#accountRefreshPromises.get(key);
     if (existing) return existing;
@@ -11300,7 +11526,12 @@ var DockyardRuntime = class {
     await this.init();
     const entry = this.#entry(providerId);
     const accounts = entry.pool.list().map((account) => providerAccount2(entry.pool, account.accountId));
-    return entry.module.getCatalog(providerContext(this, { ...context, accounts }));
+    return entry.module.getCatalog(providerContext(this, {
+      ...context,
+      accounts,
+      policy: entry.pool.policy,
+      defaultAccountId: entry.pool.getDefaultAccountId()
+    }));
   }
   async invoke(providerId, request, context = {}) {
     await this.init();
@@ -11437,8 +11668,10 @@ var DockyardRuntime = class {
 // packages/dsh-plugin/src/codex-transport.mjs
 import { access, readFile as readFile8 } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { homedir as homedir11 } from "node:os";
 import { dirname as dirname4, join as join10, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+init_provider_utils();
 var DSH_LLM_PI_AI = "@deepseek-ai/dsh-llm-pi-ai";
 var PI_AI = "@earendil-works/pi-ai";
 var PI_AI_CODEX_API = "@earendil-works/pi-ai/api/openai-codex-responses.lazy";
@@ -11564,44 +11797,110 @@ function createPiAiModelRegistryLoader({ moduleAnchor = null } = {}) {
     return registryPromise;
   };
 }
-function reasoningFromThinkingLevelMap(thinkingLevelMap) {
-  if (!thinkingLevelMap || typeof thinkingLevelMap !== "object") return void 0;
-  const efforts = Object.entries(thinkingLevelMap).filter(([id, providerValue]) => id !== "off" && typeof providerValue === "string" && providerValue.length > 0).map(([id, providerValue]) => ({
-    id,
-    name: id.replace(/[-_]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase()),
-    ...providerValue === id ? {} : { description: `provider value: ${providerValue}` }
-  }));
-  return efforts.length > 0 ? { efforts } : void 0;
-}
-function codexModelToDshCatalog(model) {
-  const reasoning = reasoningFromThinkingLevelMap(model?.thinkingLevelMap);
-  return {
-    id: model.id,
-    name: model.name,
-    ...Array.isArray(model.input) ? { inputModalities: [...model.input] } : {},
-    ...Number.isInteger(model.contextWindow) ? { contextWindow: model.contextWindow } : {},
-    ...Number.isInteger(model.maxTokens) ? { maxTokens: model.maxTokens } : {},
-    ...reasoning ? { reasoning } : {}
-  };
-}
-function createCodexDshCatalogLoader({ moduleAnchor = null } = {}) {
-  let dependenciesPromise;
-  return async () => {
-    dependenciesPromise ??= loadDependencies(moduleAnchor);
-    const { openaiCodexProvider } = await dependenciesPromise;
-    const models = openaiCodexProvider().getModels();
-    return {
-      models: models.map(codexModelToDshCatalog),
-      source: "dsh_pi_ai_provider_catalog"
-    };
+function createCodexDshCatalogLoader({
+  fetchImpl = fetch,
+  home = homedir11(),
+  env = process.env,
+  clientVersion = null
+} = {}) {
+  const cache = /* @__PURE__ */ new Map();
+  const inflight = /* @__PURE__ */ new Map();
+  let publishedVersion;
+  let publishedVersionAt = 0;
+  return async (context = {}) => {
+    let accounts = context.accounts ?? [];
+    const accountKey = (account) => JSON.stringify([account.accountId, account.auth?.credentialRef ?? account.credentialRef]);
+    const connected = new Set(accounts.map(accountKey));
+    if (!context.accountId) {
+      for (const key of cache.keys()) if (!connected.has(key)) cache.delete(key);
+    }
+    if (context.policy === "manual") accounts = accounts.filter((account) => account.accountId === context.defaultAccountId);
+    const catalogs = await Promise.all(accounts.map(async (account) => {
+      const ref = account.auth?.credentialRef ?? account.credentialRef;
+      const key = accountKey(account);
+      const cached = cache.get(key);
+      const now = context.now instanceof Date ? context.now.getTime() : Date.now();
+      if (!context.force && cached && now - cached.fetchedAt < 3e5) return cached;
+      if (inflight.has(key)) return inflight.get(key);
+      const operation = (async () => {
+        try {
+          const credential = context.readCredential ? await context.readCredential(account) : await context.secretStore?.read(ref);
+          if (!credential?.access || credential.accountId !== account.accountId) throw new Error("Codex account credential is unavailable");
+          const metadata = clientVersion ? null : await readJsonFile(join10(env.CODEX_HOME || join10(home, ".codex"), "models_cache.json")).catch(() => null);
+          let version = clientVersion ?? metadata?.client_version;
+          if (!version) {
+            if (Date.now() - publishedVersionAt >= 3e5) publishedVersion = null;
+            publishedVersionAt = Date.now();
+            publishedVersion ??= fetchJson("https://registry.npmjs.org/@openai/codex/latest", { redirect: "error" }, { fetchImpl }).then(({ body: body2 }) => body2?.version).catch((error) => {
+              publishedVersion = null;
+              throw error;
+            });
+            version = await publishedVersion;
+          }
+          if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version)) throw new Error("Codex client version is unavailable");
+          const url = new URL("https://chatgpt.com/backend-api/codex/models");
+          url.searchParams.set("client_version", version);
+          const { body } = await fetchJson(url.toString(), {
+            redirect: "error",
+            headers: { authorization: `Bearer ${credential.access}`, "chatgpt-account-id": credential.accountId },
+            ...context.signal ? { signal: context.signal } : {}
+          }, { fetchImpl });
+          if (!Array.isArray(body?.models)) throw new Error("Codex returned an invalid model directory");
+          const models2 = body.models.filter((model) => typeof model?.slug === "string" && model.slug.length > 0 && model.visibility === "list" && model.supported_in_api !== false).map((model) => ({
+            id: model.slug,
+            name: model.display_name || model.slug,
+            ...Array.isArray(model.input_modalities) ? { inputModalities: model.input_modalities.filter((value) => value === "text" || value === "image") } : {},
+            ...Number.isInteger(model.context_window) && model.context_window > 0 ? { contextWindow: model.context_window } : {},
+            ...Array.isArray(model.supported_reasoning_levels) && model.supported_reasoning_levels.length ? {
+              reasoning: {
+                efforts: model.supported_reasoning_levels.filter((level) => typeof level?.effort === "string").map((level) => ({ id: level.effort, name: level.effort, description: level.description })),
+                ...typeof model.default_reasoning_level === "string" ? { defaultEffort: model.default_reasoning_level } : {}
+              }
+            } : {}
+          }));
+          const result = { models: models2, fetchedAt: now };
+          cache.set(key, result);
+          return result;
+        } catch (error) {
+          return { models: cached?.models ?? [], diagnostic: `Codex model directory: ${redactError(error)}${cached ? " (using this account's last successful directory)" : ""}` };
+        }
+      })().finally(() => inflight.delete(key));
+      inflight.set(key, operation);
+      return operation;
+    }));
+    const models = commonAccountModels(catalogs.map((catalog) => catalog.models));
+    const diagnostics = catalogs.map((catalog) => catalog.diagnostic).filter(Boolean);
+    return { models, source: "codex_account_models", ...diagnostics.length ? { diagnostic: diagnostics.join("; ") } : {} };
   };
 }
 
 // packages/dsh-plugin/src/dockyard-service.mjs
 import { spawn as spawn6 } from "node:child_process";
+init_provider_utils();
 var DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1e3;
 var AUTH_POLL_INTERVAL_MS = 750;
 var AUTH_URL_WAIT_MS = 2e3;
+var AUTH_RESULT_TTL_MS = 10 * 60 * 1e3;
+var AUTH_RESULT_MAX_ENTRIES = 128;
+function authorizationKey(providerId, sessionId) {
+  return JSON.stringify([providerId, sessionId]);
+}
+function authorizationReceipt(providerId, sessionId, result) {
+  const safeText = (value) => value ? redactError(String(value).replace(/https?:\/\/[^\s"'<>]+/gi, "[OAuth URL omitted]").replace(/\b(code|authorization_code|token|state|code_verifier|code_challenge)["']?\s*[:=]\s*["']?[^\s,}"']+/gi, "$1=[redacted]")) : null;
+  return {
+    providerId,
+    sessionId,
+    status: result.status,
+    ...result.diagnostic ? { diagnostic: safeText(result.diagnostic) } : {},
+    ...result.instructions ? { instructions: safeText(result.instructions) } : {},
+    ...Array.isArray(result.accounts) ? { accounts: result.accounts.map((account) => ({
+      accountId: account.accountId,
+      ...account.providerId ? { providerId: account.providerId } : {},
+      ...account.email ? { email: account.email } : {},
+      ...account.displayName ? { displayName: account.displayName } : {}
+    })) } : {}
+  };
+}
 var POLICY_ALIASES = /* @__PURE__ */ new Map([
   ["manual", ACCOUNT_SELECTION_POLICY.MANUAL],
   ["sticky", ACCOUNT_SELECTION_POLICY.STICKY_SESSION],
@@ -11677,14 +11976,18 @@ function commandSuccess(text3) {
 function commandError(text3) {
   return { kind: "error", text: text3 };
 }
-function openDefaultBrowser(url) {
+async function openDefaultBrowser(url) {
   if (!url) return;
-  try {
-    const command = process.platform === "win32" ? { file: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : process.platform === "darwin" ? { file: "open", args: [url] } : { file: "xdg-open", args: [url] };
-    const child = spawn6(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true });
-    child.unref();
-  } catch {
+  if (!["http:", "https:"].includes(new URL(url).protocol)) {
+    throw new Error("Authorization URL must use HTTP or HTTPS");
   }
+  const command = process.platform === "win32" ? { file: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] } : process.platform === "darwin" ? { file: "open", args: [url] } : { file: "xdg-open", args: [url] };
+  const child = spawn6(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true });
+  await new Promise((resolve2, reject) => {
+    child.once("error", reject);
+    child.once("spawn", resolve2);
+    child.unref();
+  });
 }
 var DockyardDshService = class {
   #refreshTimer = null;
@@ -11692,14 +11995,15 @@ var DockyardDshService = class {
   #started = false;
   #disposed = false;
   #authSessions = /* @__PURE__ */ new Map();
-  #authOpened = /* @__PURE__ */ new Set();
+  #authOpened = /* @__PURE__ */ new Map();
   #authStartPromises = /* @__PURE__ */ new Map();
+  #authOperations = /* @__PURE__ */ new Map();
+  #authResults = /* @__PURE__ */ new Map();
   constructor({
     runtime,
     refreshIntervalMs = numericOption2(process.env.DOCKYARD_DSH_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_INTERVAL_MS),
     autoRefresh = true,
     openBrowser = openDefaultBrowser,
-    nativeKeyPool = null,
     logger = console
   } = {}) {
     if (!runtime) throw new Error("Dockyard DSH service requires a runtime");
@@ -11707,33 +12011,8 @@ var DockyardDshService = class {
     this.refreshIntervalMs = refreshIntervalMs;
     this.autoRefresh = autoRefresh;
     this.openBrowser = openBrowser;
-    this.nativeKeyPool = nativeKeyPool;
     this.logger = logger;
     this.ready = runtime.init();
-  }
-  /**
-   * The native Key pool is started after this service, so the DSH plugin entry
-   * hands it over once the Cordis fiber is active instead of at construction.
-   */
-  setNativeKeyPool(nativeKeyPool) {
-    this.nativeKeyPool = nativeKeyPool ?? null;
-    return this;
-  }
-  #requireNativeKeyPool() {
-    if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool \u5C1A\u672A\u6302\u8F7D");
-    return this.nativeKeyPool;
-  }
-  /** Secret-free list of the domestic coding-plan presets Dockyard can import. */
-  async keyPresets() {
-    if (!this.nativeKeyPool) {
-      const { NATIVE_KEY_PRESETS: NATIVE_KEY_PRESETS2, nativeKeyPresetView: nativeKeyPresetView2 } = await Promise.resolve().then(() => (init_native_key_presets(), native_key_presets_exports));
-      return { presets: NATIVE_KEY_PRESETS2.map((preset) => ({ ...nativeKeyPresetView2(preset), declared: false, credentialConfigured: false })) };
-    }
-    return this.nativeKeyPool.listKeyPresets();
-  }
-  /** Import one preset: store its Key in DSH and declare its `llm-pi-ai` route. */
-  async importKeyPreset(presetId, options = {}) {
-    return this.#requireNativeKeyPool().importKeyPreset(presetId, options);
   }
   async start() {
     await this.ready;
@@ -11753,6 +12032,7 @@ var DockyardDshService = class {
     this.#refreshTimer = null;
     this.#refreshPromises.clear();
     this.#authStartPromises.clear();
+    for (const operation of this.#authOperations.values()) operation.cancelled = true;
     for (const { providerId, sessionId, timer } of this.#authSessions.values()) {
       if (timer) clearTimeout(timer);
       await this.runtime.cancelAuthorization(providerId, sessionId).catch(() => {
@@ -11760,6 +12040,8 @@ var DockyardDshService = class {
     }
     this.#authSessions.clear();
     this.#authOpened.clear();
+    this.#authResults.clear();
+    this.#authOperations.clear();
   }
   async snapshot() {
     await this.ready;
@@ -11819,11 +12101,22 @@ var DockyardDshService = class {
     this.#refreshPromises.set(refreshKey, promise);
     return promise;
   }
-  async catalog(providerInput) {
+  async catalog(providerInput = null, { force = false } = {}) {
     await this.ready;
+    const providers = (await this.runtime.snapshot()).providers ?? [];
+    if (!providerInput) {
+      const connected2 = providers.filter((provider) => provider.accounts?.length > 0);
+      const results = await Promise.allSettled(connected2.map((provider) => this.catalog(provider.providerId, { force })));
+      return results.map((result, index) => result.status === "fulfilled" ? result.value : {
+        providerId: connected2[index].providerId,
+        catalog: { models: [], diagnostic: redactError(result.reason) }
+      });
+    }
     const providerId = providerIdFor(this.runtime, providerInput);
     if (!providerId) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
-    return { providerId, manifest: manifestFor2(this.runtime, providerInput), catalog: await this.runtime.getCatalog(providerId) };
+    const connected = providers.some((provider) => provider.providerId === providerId && provider.accounts?.length > 0);
+    const catalog = connected ? await this.runtime.getCatalog(providerId, { force }) : { models: [], source: "no_connected_accounts" };
+    return { providerId, manifest: manifestFor2(this.runtime, providerInput), catalog };
   }
   async setPolicy(providerInput, policyInput, defaultAccountId = void 0) {
     await this.ready;
@@ -11858,6 +12151,7 @@ var DockyardDshService = class {
     await this.ready;
     const manifest = manifestFor2(this.runtime, providerInput);
     if (!manifest) throw new Error(`\u672A\u77E5 provider\uFF1A${providerInput}`);
+    if (this.#disposed) return { providerId: manifest.id, status: "cancelled" };
     if (!manifest.capabilities?.includes("oauth_authorization")) {
       return {
         status: "unsupported",
@@ -11879,6 +12173,7 @@ var DockyardDshService = class {
   async #startAuthorization(manifest, { openBrowser = true } = {}) {
     const existing = this.#activeAuthSession(manifest.id);
     if (existing) {
+      if (openBrowser) existing.openBrowser = true;
       let current;
       try {
         current = await this.pollAuthorization(manifest.id, existing.sessionId);
@@ -11900,8 +12195,14 @@ var DockyardDshService = class {
         };
       }
     }
-    const started = await this.runtime.startAuthorization(manifest.id);
-    this.#authSessions.set(started.sessionId, {
+    const started = { ...await this.runtime.startAuthorization(manifest.id), providerId: manifest.id };
+    if (this.#disposed) {
+      await this.runtime.cancelAuthorization(manifest.id, started.sessionId).catch(() => {
+      });
+      return { providerId: manifest.id, sessionId: started.sessionId, status: "cancelled" };
+    }
+    const key = authorizationKey(manifest.id, started.sessionId);
+    this.#authSessions.set(key, {
       providerId: manifest.id,
       sessionId: started.sessionId,
       status: started.status,
@@ -11909,62 +12210,111 @@ var DockyardDshService = class {
       openBrowser
     });
     const result = await this.#waitForAuthorizationUrl(manifest.id, started, openBrowser);
-    const tracked = this.#authSessions.get(started.sessionId);
-    if (tracked) Object.assign(tracked, {
-      status: result.status,
-      authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null
-    });
-    if (result.status === "pending" || result.status === "processing") this.#scheduleAuthorization(manifest.id, started.sessionId);
-    else if (result.status === "completed") {
-      this.#authSessions.delete(started.sessionId);
-      await this.refresh(manifest.id).catch((error) => this.#warn("post-login quota refresh failed", error));
-    }
-    return result;
+    const accepted = await this.#acceptAuthorizationResult(manifest.id, started.sessionId, result);
+    if (["pending", "processing"].includes(accepted.status)) this.#scheduleAuthorization(manifest.id, started.sessionId);
+    return accepted;
   }
   async pollAuthorization(providerId, sessionId) {
-    const tracked = this.#authSessions.get(sessionId);
-    const result = await this.runtime.pollAuthorization(providerId, sessionId);
-    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
-    if (tracked) Object.assign(tracked, {
-      status: result.status,
-      authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null
-    });
-    if (result.status === "completed") {
-      this.#authSessions.delete(sessionId);
-      await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
-    } else if (!["pending", "processing"].includes(result.status)) {
-      this.#authSessions.delete(sessionId);
-    }
-    return result;
+    return this.#runAuthorizationOperation(providerId, sessionId, () => this.runtime.pollAuthorization(providerId, sessionId));
   }
   async cancelAuthorization(providerInput, sessionId) {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput) ?? String(providerInput);
-    const tracked = this.#authSessions.get(sessionId);
-    if (tracked?.timer) clearTimeout(tracked.timer);
-    const result = await this.runtime.cancelAuthorization(providerId, sessionId);
-    this.#authSessions.delete(sessionId);
-    this.#authOpened.delete(sessionId);
-    return result;
+    const key = authorizationKey(providerId, sessionId);
+    const cached = this.#cachedAuthorization(key);
+    if (cached) return cached;
+    const operation = this.#authOperations.get(key);
+    if (operation) operation.cancelled = true;
+    const cancelled = this.#rememberAuthorization(providerId, sessionId, { status: "cancelled" });
+    this.#clearAuthorization(key);
+    await this.runtime.cancelAuthorization(providerId, sessionId);
+    return cancelled;
   }
   async submitAuthorizationCode(providerInput, sessionId, code) {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput) ?? String(providerInput);
-    const tracked = this.#authSessions.get(sessionId);
-    const result = await this.runtime.submitAuthorizationCode(providerId, sessionId, code);
-    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
-    if (tracked) Object.assign(tracked, {
-      status: result.status,
-      authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null
-    });
-    if (result.status === "pending" || result.status === "processing") this.#scheduleAuthorization(providerId, sessionId);
-    else if (result.status === "completed") {
-      this.#authSessions.delete(sessionId);
-      await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
-    } else if (result.status !== "pending" && result.status !== "processing") {
-      this.#authSessions.delete(sessionId);
-    }
+    const key = authorizationKey(providerId, sessionId);
+    const existing = this.#authOperations.get(key);
+    if (existing) await existing.promise;
+    const result = await this.#runAuthorizationOperation(
+      providerId,
+      sessionId,
+      () => this.runtime.submitAuthorizationCode(providerId, sessionId, code)
+    );
+    if (["pending", "processing"].includes(result.status)) this.#scheduleAuthorization(providerId, sessionId);
     return result;
+  }
+  #cachedAuthorization(key) {
+    const now = Date.now();
+    for (const [entryKey, entry] of this.#authResults) {
+      if (entry.expiresAt <= now) this.#authResults.delete(entryKey);
+    }
+    const cached = this.#authResults.get(key);
+    return cached ? structuredClone(cached.result) : null;
+  }
+  #rememberAuthorization(providerId, sessionId, result) {
+    const key = authorizationKey(providerId, sessionId);
+    this.#cachedAuthorization(key);
+    const receipt = authorizationReceipt(providerId, sessionId, result);
+    this.#authResults.set(key, { result: receipt, expiresAt: Date.now() + AUTH_RESULT_TTL_MS });
+    while (this.#authResults.size > AUTH_RESULT_MAX_ENTRIES) {
+      this.#authResults.delete(this.#authResults.keys().next().value);
+    }
+    return structuredClone(receipt);
+  }
+  #clearAuthorization(key) {
+    const tracked = this.#authSessions.get(key);
+    if (tracked?.timer) clearTimeout(tracked.timer);
+    this.#authSessions.delete(key);
+    this.#authOpened.delete(key);
+  }
+  async #acceptAuthorizationResult(providerId, sessionId, result) {
+    const key = authorizationKey(providerId, sessionId);
+    const cached = this.#cachedAuthorization(key);
+    if (cached) return cached;
+    if (this.#disposed) return { providerId, sessionId, status: "cancelled" };
+    if (["pending", "processing"].includes(result.status)) {
+      const tracked = this.#authSessions.get(key);
+      if (tracked) Object.assign(tracked, {
+        status: result.status,
+        authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null
+      });
+      return result;
+    }
+    const receipt = this.#rememberAuthorization(providerId, sessionId, result);
+    this.#clearAuthorization(key);
+    if (receipt.status === "completed") {
+      await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
+    }
+    return receipt;
+  }
+  #runAuthorizationOperation(providerId, sessionId, run) {
+    const key = authorizationKey(providerId, sessionId);
+    const cached = this.#cachedAuthorization(key);
+    if (cached) return Promise.resolve(cached);
+    if (this.#disposed) return Promise.resolve({ providerId, sessionId, status: "cancelled" });
+    const existing = this.#authOperations.get(key);
+    if (existing) return existing.promise;
+    const operation = { cancelled: false, promise: null };
+    operation.promise = (async () => {
+      let result;
+      try {
+        result = await run();
+      } catch (error) {
+        result = { status: "failed", diagnostic: `OAuth \u767B\u5F55\u7ED3\u679C\u5904\u7406\u5931\u8D25\uFF1A${redactError(error)}` };
+        await Promise.resolve().then(() => this.runtime.cancelAuthorization(providerId, sessionId)).catch((cleanupError) => this.#warn("OAuth authorization cleanup failed", cleanupError));
+      }
+      if (operation.cancelled || this.#disposed) return this.#cachedAuthorization(key) ?? { providerId, sessionId, status: "cancelled" };
+      result = { ...result, providerId, sessionId };
+      const tracked = this.#authSessions.get(key);
+      result = await this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
+      if (operation.cancelled || this.#disposed) return this.#cachedAuthorization(key) ?? { providerId, sessionId, status: "cancelled" };
+      return this.#acceptAuthorizationResult(providerId, sessionId, result);
+    })().finally(() => {
+      if (this.#authOperations.get(key) === operation) this.#authOperations.delete(key);
+    });
+    this.#authOperations.set(key, operation);
+    return operation.promise;
   }
   helpText() {
     const providers = (this.runtime.listProviderManifests?.() ?? []).map((manifest) => `${manifest.id} (${providerName(manifest)})`);
@@ -11980,35 +12330,38 @@ var DockyardDshService = class {
       "/dockyard use <provider> <accountId>      \u624B\u52A8\u6307\u5B9A\u8D26\u53F7",
       "/dockyard remove <provider> <accountId>   \u4ECE\u8D26\u53F7\u6C60\u79FB\u9664\u8D26\u53F7\u5E76\u6E05\u7406\u672C\u673A Keychain \u5F15\u7528",
       "/dockyard cancel <provider> <sessionId>  \u53D6\u6D88 OAuth \u767B\u5F55",
-      "/dockyard import [\u9884\u8BBE] [API Key]        \u5BFC\u5165\u56FD\u4EA7\u8BA2\u9605\u5957\u9910\uFF08GLM Coding Plan / Kimi Code / ModelStudio\uFF09",
       `\u5F53\u524D providers\uFF1A${providers.length ? providers.join("\u3001") : "\u6682\u65E0"}`
     ].join("\n");
   }
-  #openAuthorizationUrl(result, openBrowser = true) {
-    if (!openBrowser || !result?.authorizationUrl || this.#authOpened.has(result.sessionId)) return;
-    this.#authOpened.add(result.sessionId);
-    if (result.browserOpened) return;
-    void Promise.resolve(this.openBrowser(result.authorizationUrl)).catch((error) => {
-      this.#warn("could not open authorization URL", error);
-    });
+  async #openAuthorizationUrl(result, openBrowser = true) {
+    if (!openBrowser || !result?.authorizationUrl || result.browserOpened === true || !["pending", "processing"].includes(result.status)) return result;
+    const key = authorizationKey(result.providerId, result.sessionId);
+    let launch = this.#authOpened.get(key);
+    if (!launch) {
+      launch = Promise.resolve().then(() => this.openBrowser(result.authorizationUrl)).then(() => ({ browserOpened: true })).catch(() => ({ browserOpened: false, diagnostic: "\u65E0\u6CD5\u81EA\u52A8\u6253\u5F00\u6D4F\u89C8\u5668\uFF0C\u8BF7\u624B\u52A8\u6253\u5F00\u6388\u6743\u94FE\u63A5\u7EE7\u7EED\u767B\u5F55\u3002" }));
+      this.#authOpened.set(key, launch);
+    }
+    const outcome = await launch;
+    return { ...result, ...outcome, diagnostic: outcome.diagnostic ?? result.diagnostic ?? null };
   }
   #activeAuthSession(providerId) {
     return [...this.#authSessions.values()].find((session) => session.providerId === providerId && ["pending", "processing"].includes(session.status ?? "pending")) ?? null;
   }
   async #waitForAuthorizationUrl(providerId, started, openBrowser = true) {
-    this.#openAuthorizationUrl(started, openBrowser);
+    started = await this.#openAuthorizationUrl(started, openBrowser);
     if (started.authorizationUrl || !["pending", "processing"].includes(started.status)) return started;
     const deadline = Date.now() + AUTH_URL_WAIT_MS;
     let result = started;
     while (Date.now() < deadline && ["pending", "processing"].includes(result.status)) {
       await sleep(100);
-      result = await this.runtime.pollAuthorization(providerId, started.sessionId);
-      this.#openAuthorizationUrl(result, openBrowser);
+      result = await this.pollAuthorization(providerId, started.sessionId);
+      if (result.authorizationUrl) break;
     }
     return result;
   }
   #scheduleAuthorization(providerId, sessionId) {
-    const current = this.#authSessions.get(sessionId);
+    const key = authorizationKey(providerId, sessionId);
+    const current = this.#authSessions.get(key);
     if (!current || current.timer) return;
     current.timer = setTimeout(async () => {
       current.timer = null;
@@ -12017,7 +12370,7 @@ var DockyardDshService = class {
         const result = await this.pollAuthorization(providerId, sessionId);
         if (["pending", "processing"].includes(result.status)) this.#scheduleAuthorization(providerId, sessionId);
       } catch (error) {
-        this.#authSessions.delete(sessionId);
+        this.#clearAuthorization(key);
         this.#warn("OAuth authorization polling failed", error);
       }
     }, AUTH_POLL_INTERVAL_MS);
@@ -12031,7 +12384,7 @@ function createDockyardCommand(service) {
   return {
     name: "dockyard",
     description: "Manage Dockyard DSH providers, OAuth accounts, quotas, models, and account selection",
-    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel | import" },
+    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel" },
     handler: async ({ rawInput, signal }) => {
       if (signal?.aborted) return commandError("Dockyard \u547D\u4EE4\u5DF2\u53D6\u6D88\u3002");
       const [verb = "help", ...args] = commandTokens(rawInput);
@@ -12125,36 +12478,6 @@ ${providerName(provider.manifest)} [${provider.providerId}]`);
             const result = await service.cancelAuthorization(args[0], args[1]);
             return commandSuccess(`OAuth \u4F1A\u8BDD ${result.sessionId}\uFF1A${result.status}`);
           }
-          // Domestic coding plans that DSH itself serves as `llm-pi-ai` routes.
-          // Listed without any key so a bare `/dockyard import` is a safe read.
-          case "import": {
-            if (!args[0]) {
-              const { presets } = await service.keyPresets();
-              const lines2 = ["\u53EF\u5BFC\u5165\u7684\u56FD\u4EA7\u8BA2\u9605\u5957\u9910\uFF08\u5199\u5165 DSH \u51ED\u636E\u5E93 + \u58F0\u660E llm-pi-ai \u8DEF\u7531\uFF09\uFF1A"];
-              for (const preset of presets) {
-                lines2.push(`- ${preset.id}\uFF1A${preset.name}`);
-                lines2.push(`  \u7AEF\u70B9 ${preset.baseURL}\uFF1B\u6A21\u578B ${preset.modelCount} \u4E2A\uFF1B\u8DEF\u7531${preset.declared ? "\u5DF2\u58F0\u660E" : "\u672A\u58F0\u660E"}\uFF1BKey ${preset.credentialConfigured ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}`);
-                if (preset.notice) lines2.push(`  \u63D0\u793A\uFF1A${preset.notice}`);
-              }
-              lines2.push("");
-              lines2.push("\u7528\u6CD5\uFF1A/dockyard import <\u9884\u8BBE id> [API Key]");
-              lines2.push("\u4E0D\u5E26 Key \u65F6\u590D\u7528 DSH \u51ED\u636E\u5E93\u91CC\u5DF2\u6709\u7684\u540C\u540D\u5F15\u7528\uFF08\u4F8B\u5982 dsh-AuthInOne \u5199\u8FC7\u7684 Key\uFF09\u3002");
-              return commandSuccess(lines2.join("\n"));
-            }
-            const presetId = args[0];
-            const apiKey = args.slice(1).join(" ").trim();
-            const result = await service.importKeyPreset(presetId, { apiKey });
-            const lines = [
-              `\u5DF2\u5BFC\u5165 ${result.preset.name}\uFF08${result.preset.id}\uFF09`,
-              `provider \u8DEF\u7531\uFF1A${result.providerId}`,
-              `\u51ED\u636E\u5F15\u7528\uFF1A${result.credentialRef}${result.credentialWritten ? "\uFF08\u672C\u6B21\u5DF2\u5199\u5165 Key\uFF09" : ""}`,
-              `Key \u72B6\u6001\uFF1A${result.credentialConfigured ? "\u5DF2\u914D\u7F6E" : "\u672A\u914D\u7F6E"}`,
-              `\u8DEF\u7531\u72B6\u6001\uFF1A${result.declared ? `\u5DF2\u58F0\u660E\uFF08${result.declaration}\uFF09` : `\u672A\u58F0\u660E\uFF08${result.declaration}\uFF09`}`
-            ];
-            if (!result.credentialConfigured) lines.push(`\u8865 Key\uFF1A/dockyard import ${result.preset.id} <API Key>`);
-            lines.push("\u5728\u300C\u8BBE\u7F6E \u2192 \u6A21\u578B\u300D\u7684\u6A21\u578B\u9009\u62E9\u5668\u91CC\u9009\u62E9\u8BE5 provider \u7684\u6A21\u578B\u5373\u53EF\u4F7F\u7528\u3002");
-            return commandSuccess(lines.join("\n"));
-          }
           default:
             return commandError(`\u672A\u77E5 Dockyard \u5B50\u547D\u4EE4\uFF1A${verb}
 
@@ -12168,7 +12491,9 @@ ${service.helpText()}`);
 }
 var dockyardDshConstants = Object.freeze({
   defaultRefreshIntervalMs: DEFAULT_REFRESH_INTERVAL_MS,
-  authPollIntervalMs: AUTH_POLL_INTERVAL_MS
+  authPollIntervalMs: AUTH_POLL_INTERVAL_MS,
+  authResultTtlMs: AUTH_RESULT_TTL_MS,
+  authResultMaxEntries: AUTH_RESULT_MAX_ENTRIES
 });
 
 // packages/dsh-plugin/src/dockyard-credential-store.mjs
@@ -12218,8 +12543,10 @@ import { join as join11 } from "node:path";
 
 // packages/dsh-plugin/src/native-usage.mjs
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+init_provider_utils();
 var DEFAULT_DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance";
 var DEFAULT_OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+var USAGE_REQUEST_TIMEOUT_MS = 12e3;
 var builtinBaseUrls = /* @__PURE__ */ new Map();
 for (const provider of builtinProviders()) {
   if (typeof provider?.id === "string" && typeof provider?.baseUrl === "string") {
@@ -12230,11 +12557,6 @@ function baseUrlFor(providerId, profile) {
   const configured = typeof profile?.baseURL === "string" ? profile.baseURL.trim() : "";
   const baseUrl = configured || builtinBaseUrls.get(providerId) || null;
   return baseUrl ? validateNativeEndpoint(baseUrl, { providerId }) : null;
-}
-function endpoint(baseUrl, path) {
-  if (!baseUrl) throw new Error("provider \u6CA1\u6709\u8FD4\u56DE\u53EF\u7528\u7684 base URL");
-  const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
-  return new URL(path.replace(/^\//, ""), base).toString();
 }
 function pathnameWithoutSlash(url) {
   return url.pathname.replace(/\/+$/, "");
@@ -12296,19 +12618,35 @@ async function readJson2(response) {
   }
   if (!response.ok) {
     const detail = typeof body?.error === "string" ? body.error : body?.error?.message ?? body?.message ?? response.statusText;
-    throw new Error(`${response.status} ${detail || "provider usage \u8BF7\u6C42\u5931\u8D25"}`);
+    throw Object.assign(new Error(`${response.status} ${detail || "provider usage \u8BF7\u6C42\u5931\u8D25"}`), { status: response.status });
   }
   if (!body || typeof body !== "object") throw new Error("provider usage \u8FD4\u56DE\u4E86\u65E0\u6548 JSON");
   return body;
 }
-function bearerHeaders(apiKey) {
-  return { Authorization: `Bearer ${apiKey}`, Accept: "application/json" };
+async function requestUsage(url, apiKey, signal) {
+  const timeout = AbortSignal.timeout(USAGE_REQUEST_TIMEOUT_MS);
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  try {
+    return await readJson2(await fetch(url, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "Content-Type": "application/json" },
+      signal: requestSignal,
+      redirect: "error"
+    }));
+  } catch (error) {
+    if (timeout.aborted) throw new Error("\u4F59\u989D/\u989D\u5EA6\u67E5\u8BE2\u8D85\u65F6\uFF0C\u8BF7\u5237\u65B0\u91CD\u8BD5\u3002");
+    const message = error instanceof Error ? error.message : String(error);
+    throw Object.assign(
+      new Error(redactError(apiKey ? message.split(apiKey).join("[redacted]") : message)),
+      Number.isInteger(error?.status) ? { status: error.status } : {}
+    );
+  }
 }
 function updatedAt() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
 function balanceAmount(value) {
-  return typeof value === "string" || typeof value === "number" ? value : null;
+  return finiteNumber2(value) !== null ? value : null;
 }
 function deepseekBalanceWindows(balance, refreshedAt) {
   const currency = balance.currency ?? null;
@@ -12331,13 +12669,10 @@ function deepseekBalanceModule() {
     id: "deepseek-balance",
     supports: ["deepseek", "deepseek-official"],
     async fetch({ providerId, profile, apiKey, signal }) {
-      const body = await readJson2(await fetch(deepseekBalanceUrl(providerId, profile), {
-        method: "GET",
-        headers: bearerHeaders(apiKey),
-        signal
-      }));
+      const body = await requestUsage(deepseekBalanceUrl(providerId, profile), apiKey, signal);
       const refreshedAt = updatedAt();
-      const balances = Array.isArray(body.balance_infos) ? body.balance_infos : [];
+      const balances = Array.isArray(body.balance_infos) ? body.balance_infos.filter((balance) => balance && finiteNumber2(balance.total_balance) !== null) : [];
+      if (!balances.length) throw new Error("DeepSeek \u672A\u8FD4\u56DE\u6709\u6548\u4F59\u989D\uFF0C\u8BF7\u5237\u65B0\u91CD\u8BD5\u3002");
       return {
         status: "ok",
         source: "DeepSeek /user/balance",
@@ -12397,11 +12732,7 @@ function openCodeGoUsageModule() {
     id: "opencode-go-usage",
     supports: ["opencode-go"],
     async fetch({ providerId, profile, apiKey, signal }) {
-      const body = await readJson2(await fetch(openCodeGoUsageUrl(providerId, profile), {
-        method: "GET",
-        headers: bearerHeaders(apiKey),
-        signal
-      }));
+      const body = await requestUsage(openCodeGoUsageUrl(providerId, profile), apiKey, signal);
       const refreshedAt = updatedAt();
       const usage = openCodeUsageRoot(body);
       const windows = [
@@ -12432,14 +12763,15 @@ function openRouterCreditsModule() {
     id: "openrouter-credits",
     supports: ["openrouter"],
     async fetch({ providerId, profile, apiKey, signal }) {
-      const body = await readJson2(await fetch(endpoint(baseUrlFor(providerId, profile), "credits"), {
-        method: "GET",
-        headers: bearerHeaders(apiKey),
-        signal
-      }));
+      const url = officialUrl(profile, providerId, "https://openrouter.ai/api/v1/credits", (path) => {
+        const root = path === "" || path === "/api" ? "/api/v1" : path;
+        return path.endsWith("/credits") ? path : joinPath(root, "/credits");
+      });
+      const body = await requestUsage(url, apiKey, signal);
       const data = body.data ?? body;
-      const total = typeof data.total_credits === "number" ? data.total_credits : null;
-      const used = typeof data.total_usage === "number" ? data.total_usage : null;
+      const total = finiteNumber2(data.total_credits);
+      const used = finiteNumber2(data.total_usage);
+      if (total === null || used === null) throw new Error("OpenRouter \u672A\u8FD4\u56DE\u6709\u6548\u4F59\u989D\uFF0C\u8BF7\u5237\u65B0\u91CD\u8BD5\u3002");
       const refreshedAt = updatedAt();
       return {
         status: "ok",
@@ -12457,6 +12789,77 @@ function openRouterCreditsModule() {
           }]
         },
         details: { totalCredits: total, totalUsage: used }
+      };
+    }
+  };
+}
+function moonshotBalanceModule() {
+  return {
+    id: "moonshot-balance",
+    supports: ["moonshotai", "moonshotai-cn"],
+    async fetch({ providerId, profile, apiKey, signal }) {
+      const base = baseUrlFor(providerId, profile);
+      const origin = base ? new URL(base).origin : null;
+      if (!["https://api.moonshot.cn", "https://api.moonshot.ai"].includes(origin)) {
+        throw new Error("Moonshot \u4F59\u989D\u67E5\u8BE2\u9700\u8981\u5339\u914D Key \u6240\u5C5E\u5730\u533A\u7684\u5B98\u65B9\u7AEF\u70B9\u3002");
+      }
+      const body = await requestUsage(`${origin}/v1/users/me/balance`, apiKey, signal);
+      const data = body.data;
+      if (body.status === false || body.code !== void 0 && body.code !== 0 || finiteNumber2(data?.available_balance) === null) {
+        throw new Error("Moonshot \u672A\u8FD4\u56DE\u6709\u6548\u4F59\u989D\uFF0C\u8BF7\u68C0\u67E5 Key \u4E0E\u7AEF\u70B9\u662F\u5426\u5339\u914D\u3002");
+      }
+      const refreshedAt = updatedAt();
+      const unit = origin.endsWith(".cn") ? "CNY" : "USD";
+      const windows = [
+        ["balance", "\u8D26\u6237\u4F59\u989D", data.available_balance],
+        ["voucher", "\u4EE3\u91D1\u5238\u4F59\u989D", data.voucher_balance],
+        ["cash", "\u73B0\u91D1\u4F59\u989D", data.cash_balance]
+      ].filter(([, , value]) => finiteNumber2(value) !== null).map(([id, name2, remaining]) => ({
+        id,
+        name: name2,
+        remaining,
+        limit: null,
+        unit,
+        resetAt: null,
+        updatedAt: refreshedAt
+      }));
+      return {
+        status: "ok",
+        source: "Moonshot /v1/users/me/balance",
+        updatedAt: refreshedAt,
+        available: finiteNumber2(data.available_balance) > 0,
+        quota: { windows }
+      };
+    }
+  };
+}
+function officialBalanceModule({ id, supports, origin, path, field, unit, scale = 1, basePaths }) {
+  return {
+    id,
+    supports,
+    async fetch({ providerId, profile, apiKey, signal }) {
+      const base = baseUrlFor(providerId, profile) ?? origin;
+      const url = new URL(base);
+      if (url.origin !== origin || !basePaths.includes(pathnameWithoutSlash(url))) {
+        throw new Error("\u4F59\u989D\u67E5\u8BE2\u9700\u8981\u4F9B\u5E94\u5546\u5B98\u65B9 API \u7AEF\u70B9\u3002");
+      }
+      const body = await requestUsage(`${origin}${path}`, apiKey, signal);
+      const amount = finiteNumber2(body[field]);
+      if (amount === null) throw new Error("\u4F9B\u5E94\u5546\u672A\u8FD4\u56DE\u6709\u6548\u4F59\u989D\uFF0C\u8BF7\u5237\u65B0\u91CD\u8BD5\u3002");
+      const refreshedAt = updatedAt();
+      return {
+        status: "ok",
+        source: `${url.hostname} ${path}`,
+        updatedAt: refreshedAt,
+        quota: { windows: [{
+          id: "balance",
+          name: "\u8D26\u6237\u4F59\u989D",
+          remaining: amount * scale,
+          limit: null,
+          unit,
+          resetAt: null,
+          updatedAt: refreshedAt
+        }] }
       };
     }
   };
@@ -12481,6 +12884,26 @@ var MODULES = [
   deepseekBalanceModule(),
   openCodeGoUsageModule(),
   openRouterCreditsModule(),
+  moonshotBalanceModule(),
+  officialBalanceModule({
+    id: "stepfun-balance",
+    supports: ["stepfun"],
+    origin: "https://api.stepfun.com",
+    path: "/v1/accounts",
+    field: "balance",
+    unit: "CNY",
+    basePaths: ["", "/v1"]
+  }),
+  officialBalanceModule({
+    id: "novita-balance",
+    supports: ["novita"],
+    origin: "https://api.novita.ai",
+    path: "/openapi/v1/billing/balance/detail",
+    field: "availableBalance",
+    unit: "USD",
+    scale: 1e-4,
+    basePaths: ["", "/v3", "/v3/openai", "/openai"]
+  }),
   unsupportedModule(
     ["opencode"],
     "OpenCode Zen \u76EE\u524D\u516C\u5F00\u6A21\u578B\u76EE\u5F55\u548C\u63A7\u5236\u53F0\u7528\u91CF\uFF0C\u6CA1\u6709\u516C\u5F00\u7ED9 API Key \u8C03\u7528\u7684\u5B9E\u65F6\u4F59\u989D/\u989D\u5EA6\u63A5\u53E3\u3002",
@@ -12492,12 +12915,31 @@ for (const module of MODULES) {
   for (const providerId of module.supports) modulesByProvider.set(providerId, module);
 }
 var genericUnsupported = unsupportedModule([], "\u8BE5 provider \u5F53\u524D\u6CA1\u6709\u53EF\u9A8C\u8BC1\u7684\u5B98\u65B9\u4F59\u989D/\u989D\u5EA6\u63A5\u53E3\uFF1B\u4E0D\u4F1A\u7528\u8BF7\u6C42\u6B21\u6570\u6216\u56FA\u5B9A\u767E\u5206\u6BD4\u66FF\u4EE3\u3002", null);
-function usageModuleFor(providerId) {
-  return modulesByProvider.get(providerId) ?? genericUnsupported;
+function usageModuleFor(providerId, profile = null) {
+  const direct = modulesByProvider.get(providerId);
+  if (direct) return direct;
+  let url;
+  try {
+    url = new URL(baseUrlFor(providerId, profile));
+  } catch {
+    return genericUnsupported;
+  }
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) return genericUnsupported;
+  const path = pathnameWithoutSlash(url);
+  const official = [
+    ["https://api.deepseek.com", ["", "/v1"], "deepseek"],
+    ["https://openrouter.ai", ["", "/api", "/api/v1"], "openrouter"],
+    ["https://opencode.ai", ["/zen/go", "/zen/go/v1"], "opencode-go"],
+    ["https://api.moonshot.cn", ["", "/v1"], "moonshotai-cn"],
+    ["https://api.moonshot.ai", ["", "/v1"], "moonshotai"],
+    ["https://api.stepfun.com", ["", "/v1"], "stepfun"],
+    ["https://api.novita.ai", ["", "/v3", "/v3/openai", "/openai"], "novita"]
+  ];
+  const match = official.find(([origin, paths]) => url.origin === origin && paths.includes(path));
+  return match ? modulesByProvider.get(match[2]) : genericUnsupported;
 }
 
 // packages/dsh-plugin/src/native-key-pool-host.mjs
-init_native_key_presets();
 var POLICIES = /* @__PURE__ */ new Set(["manual", "round_robin", "failover"]);
 var PATCH_MARK = Symbol("dockyard-native-key-pool");
 var VISIBLE_STREAM_CHUNKS = /* @__PURE__ */ new Set(["text-delta", "reasoning-delta", "tool-call-delta"]);
@@ -12599,7 +13041,9 @@ function nativeProfile(ctx, providerId) {
   const llm = hasGetter ? ctx.get("llm") : ctx.llm;
   const settings = hasGetter ? ctx.get("settings") : ctx.settings;
   const entry = llm?.listConfigurableProviders?.().find((candidate2) => candidate2.provider === providerId) ?? null;
-  const profile = entry && settings?.get ? pathValue(settings.get(entry.settingsNs), entry.settingsPath) : null;
+  const namespace = entry && typeof settings?.describe === "function" ? settings.describe({ redactSecrets: true }).find((view) => view.ns === entry.settingsNs) : null;
+  const config = namespace?.value ?? (entry && typeof settings?.get === "function" ? settings.get(entry.settingsNs) : null);
+  const profile = entry ? pathValue(config, entry.settingsPath) : null;
   if (!entry || !profile || typeof profile !== "object") return { entry, profile: null };
   const native = entry.settingsNs === "llm-pi-ai" || text2(profile.apiKeyEnv) !== null;
   return { entry, profile: native ? profile : null };
@@ -12793,99 +13237,6 @@ var NativeKeyPoolHost = class {
     await this.saveState();
     return this.status(providerId);
   }
-  /** One `llm-pi-ai` provider profile from the live settings document, if declared. */
-  nativeProfile(providerId) {
-    try {
-      if (typeof this.settings?.get !== "function") return null;
-      const namespace = this.settings.get("llm-pi-ai");
-      const profile = namespace && typeof namespace === "object" ? namespace.providers?.[providerId] : null;
-      return profile && typeof profile === "object" ? profile : null;
-    } catch {
-      return null;
-    }
-  }
-  /**
-   * Declare the preset's `llm-pi-ai` route when the profile does not have one.
-   *
-   * `settings.update` merges plain objects recursively, so writing one entry
-   * under `providers` never touches the routes the user already configured. An
-   * existing profile is left exactly as it is — it may carry a different
-   * endpoint, model list, or credential reference this import has no business
-   * rewriting.
-   */
-  async declarePresetProfile(preset) {
-    if (this.nativeProfile(preset.provider)) {
-      return { declared: true, written: false, reason: "already-declared" };
-    }
-    if (typeof this.settings?.update !== "function") {
-      return { declared: false, written: false, reason: "settings-read-only" };
-    }
-    await this.settings.update("llm-pi-ai", {
-      providers: {
-        [preset.provider]: {
-          displayName: preset.name,
-          apiKeyEnv: preset.credentialRef,
-          api: preset.api,
-          baseURL: preset.baseURL,
-          models: preset.models.map((model) => ({ ...model }))
-        }
-      }
-    });
-    return { declared: true, written: true, reason: "written" };
-  }
-  /** Secret-free preset list plus whether each route and Key already exist. */
-  async listKeyPresets() {
-    await this.readyPromise;
-    this.resolveServices();
-    const presets = [];
-    for (const preset of NATIVE_KEY_PRESETS) {
-      const profile = this.nativeProfile(preset.provider);
-      const credential = await this.credentialInfo(preset.credentialRef);
-      presets.push({
-        ...nativeKeyPresetView(preset),
-        credentialRef: preset.credentialRef,
-        credentialConfigured: credential.configured === true,
-        declared: profile !== null
-      });
-    }
-    return { presets };
-  }
-  /**
-   * Import one domestic coding-plan preset into DSH.
-   *
-   * Either half may already exist: a key the user stored earlier (or that
-   * `dsh-AuthInOne` wrote under the same reference) is reused when no key is
-   * supplied, and an already-declared route keeps its own profile. The Key
-   * itself only ever travels through `credentials.set`.
-   */
-  async importKeyPreset(presetId, { apiKey = "", label = "" } = {}) {
-    await this.readyPromise;
-    this.resolveServices();
-    const preset = nativeKeyPreset(presetId);
-    if (!preset) throw new Error(`\u672A\u77E5\u7684\u56FD\u4EA7\u5957\u9910\u9884\u8BBE\uFF1A${String(presetId ?? "")}`);
-    const key = text2(apiKey);
-    let credentialWritten = false;
-    if (key) {
-      if (typeof this.credentials?.set !== "function") {
-        throw new Error("\u5F53\u524D DSH \u672A\u63D0\u4F9B\u53EF\u5199\u5165\u7684\u51ED\u636E\u670D\u52A1\uFF0C\u65E0\u6CD5\u4FDD\u5B58 API Key");
-      }
-      await this.credentials.set(preset.credentialRef, key);
-      credentialWritten = true;
-    }
-    const declaration = await this.declarePresetProfile(preset);
-    const status = await this.register(preset.provider, preset.credentialRef, text2(label) ?? preset.name);
-    const credential = await this.credentialInfo(preset.credentialRef);
-    return {
-      preset: nativeKeyPresetView(preset),
-      providerId: preset.provider,
-      credentialRef: preset.credentialRef,
-      credentialWritten,
-      credentialConfigured: credential.configured === true,
-      declared: declaration.declared,
-      declaration: declaration.reason,
-      status
-    };
-  }
   async credentialInfo(ref) {
     try {
       if (typeof this.credentials?.describe !== "function") return { configured: false };
@@ -12905,24 +13256,30 @@ var NativeKeyPoolHost = class {
   async status(providerId) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
-    const cached = this.usageCache.get(providerId);
+    const module = usageModuleFor(providerId, synced.profile);
+    const previous = this.usageCache.get(providerId);
+    const cached = previous?.profileKey === JSON.stringify([module.id, synced.profile?.baseURL ?? null]) ? previous : null;
+    const quotaSupported = !module.id.startsWith("unsupported-");
     const cachedByRef = new Map((cached?.keys ?? []).map((entry) => [entry.ref, entry]));
+    const active = rows.find((entry) => entry.ref === synced.activeRef && entry.configured);
+    const activeCached = active ? cachedByRef.get(active.ref) : null;
     return {
       providerId,
+      quotaSupported,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
       runtimeMode: this.patches.length > 0 ? "request-key-pool" : "native-single-key",
       keys: rows.map((entry) => {
-        const previous = cachedByRef.get(entry.ref);
+        const previous2 = cachedByRef.get(entry.ref);
         return {
           ...entry,
           active: entry.ref === synced.activeRef,
-          ...previous?.usage ? { usage: previous.usage, quota: previous.quota ?? previous.usage?.quota ?? null } : {}
+          ...entry.configured && previous2?.usage ? { usage: previous2.usage, quota: previous2.quota ?? previous2.usage?.quota ?? null } : {}
         };
       }),
-      quota: cached?.quota ?? null,
-      usage: cached?.usage ?? null,
-      ...cached?.updatedAt ? { updatedAt: cached.updatedAt } : {}
+      quota: activeCached?.quota ?? null,
+      usage: activeCached?.usage ?? (quotaSupported ? null : await module.fetch({ providerId })),
+      ...activeCached?.usage?.updatedAt ? { updatedAt: activeCached.usage.updatedAt } : {}
     };
   }
   async pickKey(providerId, record, activeRef, { excluded = [] } = {}) {
@@ -13066,11 +13423,14 @@ var NativeKeyPoolHost = class {
   async refreshUsage(providerId, signal) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
-    const module = usageModuleFor(providerId);
+    const module = usageModuleFor(providerId, synced.profile);
+    const quotaSupported = !module.id.startsWith("unsupported-");
     const nextRows = [];
     for (const row of rows) {
       let usage;
-      if (!row.configured || typeof this.credentials?.resolve !== "function") {
+      if (!quotaSupported) {
+        usage = await module.fetch({ providerId });
+      } else if (!row.configured || typeof this.credentials?.resolve !== "function") {
         usage = { status: "unconfigured", message: "\u8BE5 Key \u5C1A\u672A\u914D\u7F6E" };
       } else {
         try {
@@ -13083,18 +13443,19 @@ var NativeKeyPoolHost = class {
       }
       nextRows.push({ ...row, active: row.ref === synced.activeRef, usage, quota: usage?.quota ?? null });
     }
-    const active = nextRows.find((entry) => entry.active) ?? nextRows[0] ?? null;
+    const active = nextRows.find((entry) => entry.active && entry.configured) ?? null;
     const result = {
       providerId,
+      quotaSupported,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
       runtimeMode: this.patches.length > 0 ? "request-key-pool" : "native-single-key",
       keys: nextRows,
-      usage: active?.usage ?? { status: "unsupported", message: "provider \u5C1A\u672A\u8FD4\u56DE\u989D\u5EA6\u6570\u636E" },
+      usage: active?.usage ?? (quotaSupported ? { status: "unconfigured", message: "\u5F53\u524D Key \u5C1A\u672A\u914D\u7F6E" } : await module.fetch({ providerId })),
       quota: active?.quota ?? null,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    this.usageCache.set(providerId, result);
+    this.usageCache.set(providerId, { ...result, profileKey: JSON.stringify([module.id, synced.profile?.baseURL ?? null]) });
     return result;
   }
 };
@@ -13134,13 +13495,13 @@ function apply(ctx, config = {}) {
     };
     runtimeOptions.catalogLoaders = {
       ...runtimeOptions.catalogLoaders ?? {},
-      "openai-codex": createCodexDshCatalogLoader(),
+      "openai-codex": runtimeOptions.catalogLoaders?.["openai-codex"] ?? createCodexDshCatalogLoader(runtimeOptions.codex ?? {}),
       antigravity: antigravityCatalogLoader,
       grok: runtimeOptions.catalogLoaders?.grok ?? createGrokCatalogLoader({
         ...runtimeOptions.grok ?? {},
         commandRunner: runtimeOptions.grok?.commandRunner ?? runCliCommand
       }),
-      claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ registryLoader: modelRegistryLoader }),
+      claude: runtimeOptions.catalogLoaders?.claude ?? createClaudeCatalogLoader({ ...runtimeOptions.claude ?? {}, registryLoader: modelRegistryLoader }),
       cursor: runtimeOptions.catalogLoaders?.cursor ?? createCursorCatalogLoader(runtimeOptions.cursor ?? {})
     };
     runtimeOptions.providers = createDefaultProviderEntries(runtimeOptions);
@@ -13154,8 +13515,7 @@ function apply(ctx, config = {}) {
       const connected = new Set(
         providers.filter((provider) => Array.isArray(provider.accounts) && provider.accounts.length > 0).map((provider) => provider.providerId)
       );
-      const accountsByProvider = new Map(providers.map((provider) => [provider.providerId, provider.accounts ?? []]));
-      await Promise.all(catalogWarmers.filter(([providerId]) => providerId === "openai-codex" || connected.has(providerId)).map(([providerId, loader]) => loader({ accounts: accountsByProvider.get(providerId) ?? [] }).catch(() => null)));
+      await Promise.all(catalogWarmers.filter(([providerId]) => connected.has(providerId)).map(([providerId]) => runtime.getCatalog(providerId).catch(() => null)));
     })().catch((error) => {
       contextLogger(ctx, "dockyard-dsh").warn?.(error);
     });
@@ -13212,7 +13572,6 @@ function apply(ctx, config = {}) {
         logger: config.serviceOptions?.logger ?? contextLogger(ctx, "dockyard-dsh"),
         contextWindowOverrides: runtime.contextWindowOverrides
       });
-      service.setNativeKeyPool?.(nativeKeyPool);
       const nativeKeyPoolReady = nativeKeyPool.start();
       void nativeKeyPoolReady.catch((error) => {
         contextLogger(ctx, "dockyard-dsh").warn?.(error);

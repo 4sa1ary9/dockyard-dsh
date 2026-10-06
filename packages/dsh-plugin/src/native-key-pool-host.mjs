@@ -3,7 +3,6 @@ import { isAgentLoopRequest, markAgentLoopRequest } from "@deepseek-ai/dsh-llm";
 import { JsonStateStore, defaultDockyardHome } from "../../runtime/src/state-store.mjs";
 import { join } from "node:path";
 import { usageModuleFor } from "./native-usage.mjs";
-import { NATIVE_KEY_PRESETS, nativeKeyPreset, nativeKeyPresetView } from "./native-key-presets.mjs";
 
 const POLICIES = new Set(["manual", "round_robin", "failover"]);
 const PATCH_MARK = Symbol("dockyard-native-key-pool");
@@ -139,7 +138,13 @@ function nativeProfile(ctx, providerId) {
   const llm = hasGetter ? ctx.get("llm") : ctx.llm;
   const settings = hasGetter ? ctx.get("settings") : ctx.settings;
   const entry = llm?.listConfigurableProviders?.().find((candidate) => candidate.provider === providerId) ?? null;
-  const profile = entry && settings?.get ? pathValue(settings.get(entry.settingsNs), entry.settingsPath) : null;
+  // Current DSH exposes redacted descriptors, not Settings.get(). Only refs
+  // and endpoint metadata are needed here; secrets still come from credentials.
+  const namespace = entry && typeof settings?.describe === "function"
+    ? settings.describe({ redactSecrets: true }).find((view) => view.ns === entry.settingsNs)
+    : null;
+  const config = namespace?.value ?? (entry && typeof settings?.get === "function" ? settings.get(entry.settingsNs) : null);
+  const profile = entry ? pathValue(config, entry.settingsPath) : null;
   if (!entry || !profile || typeof profile !== "object") return { entry, profile: null };
   const native = entry.settingsNs === "llm-pi-ai" || text(profile.apiKeyEnv) !== null;
   return { entry, profile: native ? profile : null };
@@ -369,107 +374,6 @@ export class NativeKeyPoolHost {
     return this.status(providerId);
   }
 
-  /** One `llm-pi-ai` provider profile from the live settings document, if declared. */
-  nativeProfile(providerId) {
-    try {
-      if (typeof this.settings?.get !== "function") return null;
-      const namespace = this.settings.get("llm-pi-ai");
-      const profile = namespace && typeof namespace === "object"
-        ? namespace.providers?.[providerId]
-        : null;
-      return profile && typeof profile === "object" ? profile : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Declare the preset's `llm-pi-ai` route when the profile does not have one.
-   *
-   * `settings.update` merges plain objects recursively, so writing one entry
-   * under `providers` never touches the routes the user already configured. An
-   * existing profile is left exactly as it is — it may carry a different
-   * endpoint, model list, or credential reference this import has no business
-   * rewriting.
-   */
-  async declarePresetProfile(preset) {
-    if (this.nativeProfile(preset.provider)) {
-      return { declared: true, written: false, reason: "already-declared" };
-    }
-    if (typeof this.settings?.update !== "function") {
-      return { declared: false, written: false, reason: "settings-read-only" };
-    }
-    await this.settings.update("llm-pi-ai", {
-      providers: {
-        [preset.provider]: {
-          displayName: preset.name,
-          apiKeyEnv: preset.credentialRef,
-          api: preset.api,
-          baseURL: preset.baseURL,
-          models: preset.models.map((model) => ({ ...model })),
-        },
-      },
-    });
-    return { declared: true, written: true, reason: "written" };
-  }
-
-  /** Secret-free preset list plus whether each route and Key already exist. */
-  async listKeyPresets() {
-    await this.readyPromise;
-    this.resolveServices();
-    const presets = [];
-    for (const preset of NATIVE_KEY_PRESETS) {
-      const profile = this.nativeProfile(preset.provider);
-      const credential = await this.credentialInfo(preset.credentialRef);
-      presets.push({
-        ...nativeKeyPresetView(preset),
-        credentialRef: preset.credentialRef,
-        credentialConfigured: credential.configured === true,
-        declared: profile !== null,
-      });
-    }
-    return { presets };
-  }
-
-  /**
-   * Import one domestic coding-plan preset into DSH.
-   *
-   * Either half may already exist: a key the user stored earlier (or that
-   * `dsh-AuthInOne` wrote under the same reference) is reused when no key is
-   * supplied, and an already-declared route keeps its own profile. The Key
-   * itself only ever travels through `credentials.set`.
-   */
-  async importKeyPreset(presetId, { apiKey = "", label = "" } = {}) {
-    await this.readyPromise;
-    this.resolveServices();
-    const preset = nativeKeyPreset(presetId);
-    if (!preset) throw new Error(`未知的国产套餐预设：${String(presetId ?? "")}`);
-
-    const key = text(apiKey);
-    let credentialWritten = false;
-    if (key) {
-      if (typeof this.credentials?.set !== "function") {
-        throw new Error("当前 DSH 未提供可写入的凭据服务，无法保存 API Key");
-      }
-      await this.credentials.set(preset.credentialRef, key);
-      credentialWritten = true;
-    }
-
-    const declaration = await this.declarePresetProfile(preset);
-    const status = await this.register(preset.provider, preset.credentialRef, text(label) ?? preset.name);
-    const credential = await this.credentialInfo(preset.credentialRef);
-    return {
-      preset: nativeKeyPresetView(preset),
-      providerId: preset.provider,
-      credentialRef: preset.credentialRef,
-      credentialWritten,
-      credentialConfigured: credential.configured === true,
-      declared: declaration.declared,
-      declaration: declaration.reason,
-      status,
-    };
-  }
-
   async credentialInfo(ref) {
     try {
       if (typeof this.credentials?.describe !== "function") return { configured: false };
@@ -491,10 +395,16 @@ export class NativeKeyPoolHost {
   async status(providerId) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
-    const cached = this.usageCache.get(providerId);
+    const module = usageModuleFor(providerId, synced.profile);
+    const previous = this.usageCache.get(providerId);
+    const cached = previous?.profileKey === JSON.stringify([module.id, synced.profile?.baseURL ?? null]) ? previous : null;
+    const quotaSupported = !module.id.startsWith("unsupported-");
     const cachedByRef = new Map((cached?.keys ?? []).map((entry) => [entry.ref, entry]));
+    const active = rows.find((entry) => entry.ref === synced.activeRef && entry.configured);
+    const activeCached = active ? cachedByRef.get(active.ref) : null;
     return {
       providerId,
+      quotaSupported,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
       runtimeMode: this.patches.length > 0 ? "request-key-pool" : "native-single-key",
@@ -503,12 +413,12 @@ export class NativeKeyPoolHost {
         return {
           ...entry,
           active: entry.ref === synced.activeRef,
-          ...(previous?.usage ? { usage: previous.usage, quota: previous.quota ?? previous.usage?.quota ?? null } : {}),
+          ...(entry.configured && previous?.usage ? { usage: previous.usage, quota: previous.quota ?? previous.usage?.quota ?? null } : {}),
         };
       }),
-      quota: cached?.quota ?? null,
-      usage: cached?.usage ?? null,
-      ...(cached?.updatedAt ? { updatedAt: cached.updatedAt } : {}),
+      quota: activeCached?.quota ?? null,
+      usage: activeCached?.usage ?? (quotaSupported ? null : await module.fetch({ providerId })),
+      ...(activeCached?.usage?.updatedAt ? { updatedAt: activeCached.usage.updatedAt } : {}),
     };
   }
 
@@ -683,11 +593,14 @@ export class NativeKeyPoolHost {
   async refreshUsage(providerId, signal) {
     const synced = await this.syncProvider(providerId);
     const rows = await this.configuredKeys(synced.record);
-    const module = usageModuleFor(providerId);
+    const module = usageModuleFor(providerId, synced.profile);
+    const quotaSupported = !module.id.startsWith("unsupported-");
     const nextRows = [];
     for (const row of rows) {
       let usage;
-      if (!row.configured || typeof this.credentials?.resolve !== "function") {
+      if (!quotaSupported) {
+        usage = await module.fetch({ providerId });
+      } else if (!row.configured || typeof this.credentials?.resolve !== "function") {
         usage = { status: "unconfigured", message: "该 Key 尚未配置" };
       } else {
         try {
@@ -702,18 +615,21 @@ export class NativeKeyPoolHost {
       }
       nextRows.push({ ...row, active: row.ref === synced.activeRef, usage, quota: usage?.quota ?? null });
     }
-    const active = nextRows.find((entry) => entry.active) ?? nextRows[0] ?? null;
+    const active = nextRows.find((entry) => entry.active && entry.configured) ?? null;
     const result = {
       providerId,
+      quotaSupported,
       policy: synced.record.policy,
       activeRef: synced.activeRef,
       runtimeMode: this.patches.length > 0 ? "request-key-pool" : "native-single-key",
       keys: nextRows,
-      usage: active?.usage ?? { status: "unsupported", message: "provider 尚未返回额度数据" },
+      usage: active?.usage ?? (quotaSupported
+        ? { status: "unconfigured", message: "当前 Key 尚未配置" }
+        : await module.fetch({ providerId })),
       quota: active?.quota ?? null,
       updatedAt: new Date().toISOString(),
     };
-    this.usageCache.set(providerId, result);
+    this.usageCache.set(providerId, { ...result, profileKey: JSON.stringify([module.id, synced.profile?.baseURL ?? null]) });
     return result;
   }
 }

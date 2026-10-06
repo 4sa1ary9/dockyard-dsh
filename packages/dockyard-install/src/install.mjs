@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import process from "node:process";
 
 export const DEFAULT_PLUGIN_SPEC = "@dockyard-dsh/plugin@latest";
-export const DEFAULT_DSH_SPEC = "@deepseek-ai/dsh@0.1.1-rc.2";
+export const DEFAULT_DSH_SPEC = "@deepseek-ai/dsh@0.1.5-rc.2";
 export const DEFAULT_PROFILE = "web";
 
 function printUsage() {

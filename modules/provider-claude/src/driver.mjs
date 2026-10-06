@@ -4,7 +4,6 @@ import { homedir } from "node:os";
 import { createCredentialRef } from "../../../packages/vault/src/index.mjs";
 import { createBrowserOAuthAuthorizer } from "../../../packages/oauth/src/browser-oauth-authorizer.mjs";
 import { createCliStatusAuthorizer } from "../../../packages/oauth/src/cli-status-authorizer.mjs";
-import { createOfficialSessionAuthorizer } from "../../../packages/oauth/src/official-session-authorizer.mjs";
 import {
   cliRequestPrompt,
   createCliAgentExecutor,
@@ -13,6 +12,8 @@ import {
 } from "../../../packages/providers/src/cli-agent-transport.mjs";
 import {
   assertSecureEndpointUrl,
+  commonAccountModels,
+  fetchJson,
   finiteNumber,
   recursiveQuotaWindows,
   selectPrimaryQuotaWindow,
@@ -253,48 +254,97 @@ function catalogModel(model) {
   };
 }
 
-export function createClaudeCatalogLoader({ registryLoader = null } = {}) {
-  let cached = null;
-  return async function loadCatalog({ force = false } = {}) {
-    if (cached && !force) return cached;
-    const registry = typeof registryLoader === "function" ? await registryLoader() : [];
-    const modelsById = new Map();
-    for (const rawModel of (Array.isArray(registry) ? registry : [])) {
-      if (!rawModel || (rawModel.provider !== "anthropic" && rawModel.api !== "anthropic-messages")) continue;
-      const model = catalogModel(rawModel);
-      if (typeof model.id !== "string" || model.id.length === 0) continue;
-      const previous = modelsById.get(model.id);
-      if (!previous) {
-        modelsById.set(model.id, model);
-        continue;
+export function createClaudeCatalogLoader({ registryLoader = null, fetchImpl = fetch } = {}) {
+  const cachedByAccount = new Map();
+  const credentialRef = (account) => account.auth?.credentialRef ?? account.credentialRef;
+  const accountKey = (account) => JSON.stringify([account.accountId, credentialRef(account)]);
+  return async function loadCatalog(context = {}) {
+    const accounts = (context.accounts ?? []).filter((account) => account?.accountId);
+    const currentKeys = new Set(accounts.map(accountKey));
+    for (const key of cachedByAccount.keys()) if (!currentKeys.has(key)) cachedByAccount.delete(key);
+    const selectedId = context.accountId ?? (context.policy === "manual" ? context.defaultAccountId : null);
+    const selected = selectedId ? accounts.filter((account) => account.accountId === selectedId)
+      : context.policy === "manual" ? [] : accounts;
+    const diagnostics = [];
+    if (!selected.length) return { models: [], source: "claude_account_model_selector", diagnostics: ["请先连接并选择 Claude 订阅账号"] };
+    // The registry only enriches IDs returned by this account's server-side picker.
+    const registry = typeof registryLoader === "function" ? await Promise.resolve().then(registryLoader).catch(() => []) : [];
+    const metadata = new Map();
+    for (const model of Array.isArray(registry) ? registry : []) {
+      if (model?.provider === "anthropic" && typeof model.id === "string") {
+        metadata.set(model.id, { ...metadata.get(model.id), ...catalogModel(model) });
       }
-      // The installed registry can expose the same Claude model through more
-      // than one provider alias. Keep one DSH row, while retaining any richer
-      // metadata returned by the duplicate row.
-      modelsById.set(model.id, {
-        ...previous,
-        ...(previous.name === model.id && model.name !== model.id ? { name: model.name } : {}),
-        ...(previous.inputModalities === undefined && model.inputModalities !== undefined
-          ? { inputModalities: [...model.inputModalities] }
-          : {}),
-        ...(previous.contextWindow === undefined && model.contextWindow !== undefined
-          ? { contextWindow: model.contextWindow }
-          : {}),
-        ...(previous.maxTokens === undefined && model.maxTokens !== undefined
-          ? { maxTokens: model.maxTokens }
-          : {}),
-        ...(previous.reasoning === undefined && model.reasoning !== undefined
-          ? { reasoning: model.reasoning }
-          : {}),
-      });
     }
-    const models = [...modelsById.values()]
-    cached = {
-      models,
-      source: "dsh_live_provider_registry",
-      ...(models.length ? {} : { diagnostics: ["Claude 官方没有公开模型目录，且当前 DSH registry 未返回 Anthropic 模型"] }),
+    const catalogs = [];
+    const now = context.now instanceof Date ? context.now.getTime() : Date.now();
+    for (const account of selected) {
+      const key = accountKey(account);
+      let cached = cachedByAccount.get(key);
+      if (context.force || !cached || now - cached.at >= 300_000) {
+        try {
+          const credential = context.readCredential
+            ? await context.readCredential(account)
+            : await context.secretStore?.read(credentialRef(account));
+          if (!credential?.access || credential.type === "api_key"
+            || (credential.accountId && credential.accountId !== account.accountId)
+            || (credential.providerId && credential.providerId !== PROVIDER_ID)) {
+            throw new Error("credential_unavailable");
+          }
+          const { body } = await fetchJson("https://api.anthropic.com/api/model_selector/cc", {
+            method: "GET",
+            headers: {
+              authorization: `Bearer ${credential.access}`,
+              "anthropic-beta": "oauth-2025-04-20",
+              "anthropic-client-platform": "claude_code_cli",
+              accept: "application/json",
+            },
+            signal: context.signal,
+            redirect: "error",
+          }, { fetchImpl, timeoutMs: 10_000 });
+          const rows = body?.model_selector_config?.find((surface) => surface?.id === "cc")?.models;
+          if (!Array.isArray(rows)) throw new Error("catalog_unavailable");
+          const models = rows.filter((row) => row && typeof row.id === "string" && row.id.length > 0
+            && (row.name === undefined || typeof row.name === "string")
+            && (row.disabled === undefined || typeof row.disabled === "boolean")
+            && row.disabled !== true && row.section !== "deprecated").map((row) => {
+            const model = { ...metadata.get(row.id), id: row.id, name: row.name ?? row.id };
+            const runtime = row.runtime ?? {};
+            const contextWindow = runtime.max_input_tokens ?? row.context_window;
+            if (Number.isInteger(contextWindow) && contextWindow > 0) model.contextWindow = contextWindow;
+            if (Number.isInteger(runtime.max_output_tokens) && runtime.max_output_tokens > 0) model.maxTokens = runtime.max_output_tokens;
+            if (typeof row.capabilities?.mm_images === "boolean") {
+              model.inputModalities = row.capabilities.mm_images ? ["text", "image"] : ["text"];
+            }
+            const efforts = Array.isArray(runtime.effort_levels)
+              ? runtime.effort_levels.map((id) => ({ id, name: id })) : row.thinking?.effort_options;
+            if (Array.isArray(efforts)) model.reasoning = {
+              efforts: efforts.filter((effort) => typeof effort?.id === "string")
+                .map((effort) => ({ id: effort.id, name: effort.name ?? effort.id })),
+              ...(typeof runtime.default_effort === "string" ? { defaultEffort: runtime.default_effort } : {}),
+            };
+            if (row.thinking?.type === "none") delete model.reasoning;
+            const description = [row.description, row.badge?.message, row.tooltip?.content].filter((value) => typeof value === "string" && value);
+            if (description.length) model.description = description.join(" · ");
+            return model;
+          });
+          cached = { models, at: now };
+          cachedByAccount.set(key, cached);
+        } catch (error) {
+          const reason = error?.status ? `HTTP ${error.status}` : error?.message === "credential_unavailable"
+            ? "账号凭据不可用，请重新授权" : "网络异常或官方未返回账号模型目录";
+          diagnostics.push(`Claude ${account.displayName ?? account.accountId} 模型刷新失败：${reason}${cached ? "；显示该账号上次成功获取的目录" : ""}`);
+        }
+      }
+      const models = cached?.models ?? [];
+      catalogs.push(models);
+    }
+    // The pool rotates without checking model entitlements, so every routed
+    // account must expose the model before it can be offered in automatic mode.
+    return {
+      models: commonAccountModels(catalogs),
+      source: "claude_account_model_selector",
+      diagnostics,
     };
-    return cached;
   };
 }
 
@@ -357,22 +407,7 @@ export class ClaudeSubscriptionDriver {
     this.sessionReader = sessionReader;
     this.sessionSource = sessionSource;
     this.sessionSourceKind = sessionSourceKind;
-    this.catalogLoader = catalogLoader ?? createClaudeCatalogLoader();
-    this.clientSessionAuthorizer = typeof sessionReader === "function"
-      ? createOfficialSessionAuthorizer({
-        providerId: PROVIDER_ID,
-        source: sessionSource,
-        instructions: "请在 Claude 官方客户端完成登录，完成后回到 Dockyard DSH。",
-        readSession: async (context = {}) => {
-          const status = await this.#activeStatus(context.signal);
-          const candidate = candidateFromStatus(status, {
-            source: status.source,
-            sourceKind: status.sourceKind,
-          });
-          return { accounts: [await this.importAccount(candidate, context)] };
-        },
-      })
-      : null;
+    this.catalogLoader = catalogLoader ?? createClaudeCatalogLoader({ fetchImpl });
     this.cliAuthorizer = createCliStatusAuthorizer({
       providerId: PROVIDER_ID,
       cliPath,
@@ -506,6 +541,10 @@ export class ClaudeSubscriptionDriver {
     const credentialRef = account.auth?.credentialRef ?? account.credentialRef;
     const credential = await context.secretStore.read(credentialRef);
     if (!credential?.access) throw activeSessionError("Claude browser OAuth credential is missing; authorize again");
+    if (credential.type === "api_key" || (credential.providerId && credential.providerId !== PROVIDER_ID)
+      || (credential.accountId && credential.accountId !== account.accountId)) {
+      throw activeSessionError("Claude credential does not belong to the selected subscription account", { mismatch: true });
+    }
     return { ...credential, credentialRef };
   }
 
@@ -671,13 +710,11 @@ export class ClaudeSubscriptionDriver {
   }
 
   async pollAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:")
-      ? this.clientSessionAuthorizer
-      : sessionId?.includes(":browser:")
-        ? this.browserAuthorizer
-        : this.oauthAuthorizer === this.browserAuthorizer
-          ? this.cliAuthorizer
-          : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
     return authorizer.poll(sessionId, context);
   }
 
@@ -694,13 +731,11 @@ export class ClaudeSubscriptionDriver {
   }
 
   async cancelAuthorization(sessionId, context = {}) {
-    const authorizer = sessionId?.includes(":official-session:")
-      ? this.clientSessionAuthorizer
-      : sessionId?.includes(":browser:")
-        ? this.browserAuthorizer
-        : this.oauthAuthorizer === this.browserAuthorizer
-          ? this.cliAuthorizer
-          : this.oauthAuthorizer;
+    const authorizer = sessionId?.includes(":browser:")
+      ? this.browserAuthorizer
+      : this.oauthAuthorizer === this.browserAuthorizer
+        ? this.cliAuthorizer
+        : this.oauthAuthorizer;
     return authorizer.cancel(sessionId, context);
   }
 
@@ -745,7 +780,12 @@ export class ClaudeSubscriptionDriver {
     };
   }
 
-  async getCatalog(context = {}) { return this.catalogLoader({ force: Boolean(context.force) }); }
+  async getCatalog(context = {}) {
+    return this.catalogLoader({
+      ...context,
+      readCredential: (account) => this.#refreshBrowserCredential(account, context),
+    });
+  }
 
   async invoke(request, invocation, context = {}) {
     await this.#assertActiveSession(invocation?.account, context.signal, context);

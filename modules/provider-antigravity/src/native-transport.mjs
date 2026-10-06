@@ -29,6 +29,37 @@ const MACOS_SECURITY_BIN = "/usr/bin/security";
 const AGY_KEYCHAIN_SERVICE = "gemini";
 const AGY_KEYCHAIN_ACCOUNT = "antigravity";
 const AGY_KEYCHAIN_VALUE_PREFIX = "go-keyring-base64:";
+// agy's go-keyring Windows backend uses service + ":" + account. Read only
+// that official item; never enumerate or modify the Credential Manager.
+const WINDOWS_AGY_CREDENTIAL_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class DockyardAgyCredential {
+  [DllImport("Advapi32.dll", EntryPoint="CredReadW", CharSet=CharSet.Unicode, SetLastError=true)]
+  private static extern bool CredRead(string target, uint type, int flags, out IntPtr credential);
+  [DllImport("Advapi32.dll")] private static extern void CredFree(IntPtr credential);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct Credential {
+    public uint Flags; public uint Type; public string TargetName; public string Comment;
+    public long LastWritten; public uint BlobSize; public IntPtr Blob; public uint Persist;
+    public uint AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
+  }
+  public static byte[] Read() {
+    IntPtr pointer;
+    if (!CredRead("${AGY_KEYCHAIN_SERVICE}:${AGY_KEYCHAIN_ACCOUNT}", 1, 0, out pointer)) return null;
+    try {
+      var credential = Marshal.PtrToStructure<Credential>(pointer);
+      var bytes = new byte[credential.BlobSize];
+      Marshal.Copy(credential.Blob, bytes, 0, bytes.Length);
+      return bytes;
+    } finally { CredFree(pointer); }
+  }
+}
+'@
+$bytes = [DockyardAgyCredential]::Read()
+if ($null -ne $bytes) { [Console]::Out.Write([System.Text.Encoding]::UTF8.GetString($bytes)) }
+`;
 const ANTIGRAVITY_INFO_PATHS = [
   "/Applications/Antigravity.app/Contents/Info.plist",
   join(homedir(), "Applications/Antigravity.app/Contents/Info.plist"),
@@ -316,11 +347,29 @@ let cachedKeychainToken = null;
 let lastKeychainReadTime = 0;
 const KEYCHAIN_CACHE_TTL_MS = 60_000; // Cache Keychain result for 1 minute to avoid synchronous IPC lag
 
-/** Read agy's current macOS Keychain session without displaying its secret. */
-export function readAntigravityKeychainToken({ home = homedir() } = {}) {
-  if (process.platform !== "darwin") return null;
+/** Read the exact official Windows item; stdout stays inside the parser. */
+export function readAntigravityWindowsCredential({ execFileImpl = execFileSync } = {}) {
+  try {
+    const value = execFileImpl("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_AGY_CREDENTIAL_SCRIPT], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+      timeout: 10_000, maxBuffer: 1_048_576,
+    });
+    return parseAntigravityKeychainValue(value);
+  } catch {
+    return null;
+  }
+}
+
+/** Read agy's current OS credential store without displaying its secret. */
+export function readAntigravityKeychainToken({ home = homedir(), force = false } = {}) {
+  if (process.platform !== "darwin" && process.platform !== "win32") return null;
   const now = Date.now();
-  if (cachedKeychainToken && now - lastKeychainReadTime < KEYCHAIN_CACHE_TTL_MS) {
+  if (!force && lastKeychainReadTime && now - lastKeychainReadTime < KEYCHAIN_CACHE_TTL_MS) {
+    return cachedKeychainToken;
+  }
+  if (process.platform === "win32") {
+    cachedKeychainToken = readAntigravityWindowsCredential();
+    lastKeychainReadTime = now;
     return cachedKeychainToken;
   }
   try {
@@ -498,8 +547,6 @@ async function geminiParts(content, attachments, { signedToolCallIds = new Set()
           functionCall: {
             name,
             args,
-            thoughtSignature: signature,
-            thought_signature: signature,
           },
           thoughtSignature: signature,
           thought_signature: signature,
@@ -524,14 +571,32 @@ function modelRequiresThoughtSignatures(model) {
 }
 
 const DEFAULT_SLIDING_WINDOW_MESSAGES = 40;
+const SLIDING_WINDOW_QUANTUM = 20;
 
-function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WINDOW_MESSAGES } = {}) {
+function resolveMaxMessages(request) {
+  const envLimit = Number.parseInt(process.env.DOCKYARD_ANTIGRAVITY_MAX_MESSAGES ?? "", 10);
+  if (Number.isSafeInteger(envLimit) && envLimit > 0) return envLimit;
+  if (Number.isSafeInteger(request?.maxMessages) && request.maxMessages > 0) return request.maxMessages;
+  const contextWindow = request?.modelContext?.contextWindow;
+  if (Number.isSafeInteger(contextWindow) && contextWindow >= 500_000) {
+    return 500;
+  }
+  return DEFAULT_SLIDING_WINDOW_MESSAGES;
+}
+
+function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WINDOW_MESSAGES, quantum = SLIDING_WINDOW_QUANTUM } = {}) {
   if (!Array.isArray(messages) || messages.length <= maxMessages) return messages;
 
   const initialIndex = messages.findIndex((m) => m?.role === "user" || m?.role === "system");
   const prefix = initialIndex >= 0 ? [messages[initialIndex]] : [];
 
-  const windowCount = Math.max(10, maxMessages - prefix.length - 1);
+  // Quantize the window count so the cut position does not advance on every turn.
+  // Stepping in blocks of `quantum` messages freezes the prefix across turns,
+  // keeping Gemini prefix cache hit rate above 90%+.
+  const rawWindowCount = Math.max(10, maxMessages - prefix.length - 1);
+  const excess = messages.length - maxMessages;
+  const quantOffset = excess > 0 ? Math.floor(excess / quantum) * quantum : 0;
+  const windowCount = Math.max(10, rawWindowCount + (excess - quantOffset));
   const recent = messages.slice(-windowCount);
 
   const startIndex = messages.length - windowCount;
@@ -547,9 +612,12 @@ function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WIN
   const compactedCount = messages.length - prefix.length - recent.length;
   if (compactedCount <= 0) return messages;
 
+  // IMPORTANT FOR GEMINI PROMPT CACHE:
+  // The milestone text MUST be static. Dynamic variables (e.g. message count)
+  // in Message 1 break prefix matching for all subsequent tokens.
   const milestone = {
     role: "user",
-    content: `[System Note: Context sliding window active. ${compactedCount} intermediate messages were dynamically compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]`,
+    content: "[System Note: Context sliding window active. Intermediate messages were compacted to maintain low latency and prevent token exhaustion. Initial requirements and recent active turns are preserved.]",
   };
 
   return [...prefix, milestone, ...recent];
@@ -557,41 +625,79 @@ function compactMessagesForContext(messages, { maxMessages = DEFAULT_SLIDING_WIN
 
 function sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures) {
   if (!requireThoughtSignatures || !Array.isArray(contents)) return contents;
-  const hasUnsignedFunctionCall = contents.some((content) =>
-    (content?.parts ?? []).some((part) => part?.functionCall && !thoughtSignatureFrom(part)),
-  );
-  if (hasUnsignedFunctionCall) {
+
+  // Identify unsigned function calls
+  const unsignedCallNames = new Set();
+  for (const content of contents) {
+    for (const part of content?.parts ?? []) {
+      const rawCall = part?.functionCall ?? part?.function_call;
+      if (rawCall && !thoughtSignatureFrom(part)) {
+        unsignedCallNames.add(rawCall.name);
+      }
+    }
+  }
+
+  if (unsignedCallNames.size === 0) {
     return contents.map((content) => ({
       ...content,
       parts: (content?.parts ?? []).map((part) => {
-        if (part?.functionCall) {
-          return { text: toolCallText(part.functionCall.name, part.functionCall.args) };
-        }
-        if (part?.functionResponse) {
-          const name = part.functionResponse.name ?? "tool";
-          const result = part.functionResponse.response?.content ?? part.functionResponse.response ?? "";
-          return { text: `[tool result: ${name}] ${typeof result === "string" ? result : JSON.stringify(result)}` };
+        const rawCall = part?.functionCall ?? part?.function_call;
+        if (rawCall) {
+          const signature = thoughtSignatureFrom(part);
+          const {
+            thoughtSignature: _ignoredTs1,
+            thought_signature: _ignoredTs2,
+            ...cleanedCall
+          } = rawCall;
+          const callKey = part.functionCall ? "functionCall" : "function_call";
+          if (signature) {
+            return {
+              ...part,
+              thoughtSignature: signature,
+              thought_signature: signature,
+              [callKey]: cleanedCall,
+            };
+          }
+          return {
+            ...part,
+            [callKey]: cleanedCall,
+          };
         }
         return part;
       }),
     }));
   }
+
+  // Surgical sanitization: convert only the unsigned calls and their matching responses to text,
+  // keeping previously signed calls native with signatures to preserve prefix cache continuity.
   return contents.map((content) => ({
     ...content,
     parts: (content?.parts ?? []).map((part) => {
-      if (part?.functionCall) {
+      const rawCall = part?.functionCall ?? part?.function_call;
+      if (rawCall) {
         const signature = thoughtSignatureFrom(part);
-        if (signature) {
-          return {
-            ...part,
-            thoughtSignature: signature,
-            thought_signature: signature,
-            functionCall: {
-              ...part.functionCall,
-              thoughtSignature: signature,
-              thought_signature: signature,
-            },
-          };
+        if (!signature) {
+          return { text: toolCallText(rawCall.name, rawCall.args ?? rawCall.arguments) };
+        }
+        const {
+          thoughtSignature: _ignoredTs1,
+          thought_signature: _ignoredTs2,
+          ...cleanedCall
+        } = rawCall;
+        const callKey = part.functionCall ? "functionCall" : "function_call";
+        return {
+          ...part,
+          thoughtSignature: signature,
+          thought_signature: signature,
+          [callKey]: cleanedCall,
+        };
+      }
+      const resp = part?.functionResponse ?? part?.function_response;
+      if (resp) {
+        const name = resp.name ?? "tool";
+        if (unsignedCallNames.has(name)) {
+          const result = resp.response?.content ?? resp.response ?? "";
+          return { text: `[tool result: ${name}] ${typeof result === "string" ? result : JSON.stringify(result)}` };
         }
       }
       return part;
@@ -601,7 +707,8 @@ function sanitizeContentsForThoughtSignatures(contents, requireThoughtSignatures
 
 async function buildGeminiContents(request, attachments) {
   const rawMessages = Array.isArray(request.messages) ? request.messages : [];
-  const messages = compactMessagesForContext(rawMessages);
+  const maxMessages = resolveMaxMessages(request);
+  const messages = compactMessagesForContext(rawMessages, { maxMessages });
   const signedToolCallIds = collectSignedToolCallIds(messages);
   const requireThoughtSignatures = modelRequiresThoughtSignatures(request.model);
   const contents = [];
@@ -638,7 +745,83 @@ function buildGeminiTools(tools) {
     ...(tool?.description ? { description: String(tool.description) } : {}),
     parameters: sanitizeSchema(tool?.parameters ?? tool?.input_schema ?? tool?.function?.parameters ?? { type: "object" }),
   }));
+  declarations.sort((a, b) => a.name.localeCompare(b.name));
   return declarations.length > 0 ? [{ functionDeclarations: declarations }] : undefined;
+}
+
+export function resolveAntigravityThinkingConfig(request = {}) {
+  if (request.thinkingConfig && typeof request.thinkingConfig === "object") {
+    return {
+      includeThoughts: true,
+      ...request.thinkingConfig,
+    };
+  }
+
+  const effort = String(
+    request.reasoningEffort
+      ?? request.reasoning_effort
+      ?? (typeof request.thinking === "string" ? request.thinking : null)
+      ?? ""
+  ).toLowerCase().trim();
+
+  if (effort === "none" || effort === "off" || request.thinking === false) {
+    return {
+      includeThoughts: false,
+      thinkingBudget: 0,
+    };
+  }
+
+  if (effort === "low") {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 1024,
+    };
+  }
+
+  if (effort === "medium") {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 8192,
+    };
+  }
+
+  if (effort === "high") {
+    return {
+      includeThoughts: true,
+      thinkingBudget: -1,
+    };
+  }
+
+  if (Number.isInteger(request.thinkingBudget)) {
+    return {
+      includeThoughts: request.thinkingBudget > 0,
+      thinkingBudget: request.thinkingBudget,
+    };
+  }
+
+  const modelName = String(request.model ?? "").toLowerCase();
+  if (modelName.endsWith("-low")) {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 1024,
+    };
+  }
+  if (modelName.endsWith("-medium")) {
+    return {
+      includeThoughts: true,
+      thinkingBudget: 8192,
+    };
+  }
+  if (modelName.endsWith("-high")) {
+    return {
+      includeThoughts: true,
+      thinkingBudget: -1,
+    };
+  }
+
+  return {
+    includeThoughts: true,
+  };
 }
 
 export async function buildAntigravityRequest(request = {}, context = {}) {
@@ -656,13 +839,21 @@ export async function buildAntigravityRequest(request = {}, context = {}) {
   }
   nativeRequest.generationConfig = {
     temperature: request.temperature ?? 0.7,
-    maxOutputTokens: request.maxTokens ?? 4096,
+    maxOutputTokens: Number.isInteger(request.maxTokens) && request.maxTokens > 0
+      ? request.maxTokens
+      : (Number.isInteger(request.modelContext?.maxTokens) && request.modelContext.maxTokens > 0
+        ? request.modelContext.maxTokens
+        : 65536),
     ...(Array.isArray(request.responseModalities)
       ? { responseModalities: request.responseModalities }
       : request.modalities
         ? { responseModalities: request.modalities }
         : {}),
   };
+  const thinkingConfig = resolveAntigravityThinkingConfig(request);
+  if (thinkingConfig) {
+    nativeRequest.generationConfig.thinkingConfig = thinkingConfig;
+  }
   return nativeRequest;
 }
 
@@ -712,14 +903,24 @@ function saveInlineImageToArtifacts(inlineData, workingDir = process.cwd()) {
 
 function parseTextToolCall(value) {
   if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  const match = trimmed.match(/^\[(?:tool call|Tool Call):\s*([a-zA-Z0-9_.:-]+)\]\s*([\s\S]*)$/i);
+  const match = value.match(/(?:^|\n)\s*\[(?:tool call|Tool Call):\s*([a-zA-Z0-9_.:-]+)\]\s*([\s\S]*)$/i);
   if (!match) return null;
-  const name = match[1];
+  const leadingText = value.slice(0, match.index).trim();
+  let name = match[1];
+  if (name.startsWith("default_api:")) {
+    name = name.slice("default_api:".length);
+  }
+  if (name === "run_command") {
+    name = "bash";
+  }
   let argumentsValue = match[2].trim();
   if (argumentsValue.startsWith("{") && argumentsValue.endsWith("}")) {
     try {
-      JSON.parse(argumentsValue);
+      const parsed = JSON.parse(argumentsValue);
+      if (name === "bash" && !parsed.command && parsed.CommandLine) {
+        parsed.command = parsed.CommandLine;
+      }
+      argumentsValue = JSON.stringify(parsed);
     } catch {
       argumentsValue = JSON.stringify({ input: argumentsValue });
     }
@@ -728,15 +929,18 @@ function parseTextToolCall(value) {
   } else {
     argumentsValue = "{}";
   }
-  return { name, argumentsValue };
+  return { name, argumentsValue, leadingText };
 }
 
 function isPotentialTextToolCall(text) {
   if (typeof text !== "string" || text.length === 0) return false;
-  if (!text.startsWith("[")) return false;
-  const prefix = "[tool call:";
-  const lower = text.toLowerCase();
-  return prefix.startsWith(lower) || lower.startsWith(prefix);
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("[")) {
+    const prefix = "[tool call:";
+    const lower = trimmed.toLowerCase();
+    if (prefix.startsWith(lower) || lower.startsWith(prefix)) return true;
+  }
+  return /\[(?:tool call|Tool Call):/i.test(text);
 }
 
 async function* streamAntigravityResponse(response, context) {
@@ -861,6 +1065,15 @@ async function* streamAntigravityResponse(response, context) {
       if (textOpen) {
         const textTool = parseTextToolCall(text);
         if (textTool) {
+          if (!textStarted) {
+            if (textTool.leadingText) {
+              yield { type: "block-start", index: textIndex, blockType: "text" };
+              yield { type: "text-delta", index: textIndex, text: textTool.leadingText };
+              yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText } };
+            }
+          } else {
+            yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText || text } };
+          }
           const toolIndex = nextIndex++;
           const toolId = firstString(textTool.name, `tool-${toolIndex}`);
           const toolBlock = { type: "tool-call", id: toolId, name: textTool.name, arguments: textTool.argumentsValue };
@@ -900,6 +1113,15 @@ async function* streamAntigravityResponse(response, context) {
   if (textOpen) {
     const textTool = parseTextToolCall(text);
     if (textTool) {
+      if (!textStarted) {
+        if (textTool.leadingText) {
+          yield { type: "block-start", index: textIndex, blockType: "text" };
+          yield { type: "text-delta", index: textIndex, text: textTool.leadingText };
+          yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText } };
+        }
+      } else {
+        yield { type: "block-end", index: textIndex, block: { type: "text", text: textTool.leadingText || text } };
+      }
       const toolIndex = nextIndex++;
       const toolId = firstString(textTool.name, `tool-${toolIndex}`);
       const toolBlock = { type: "tool-call", id: toolId, name: textTool.name, arguments: textTool.argumentsValue };
@@ -914,6 +1136,9 @@ async function* streamAntigravityResponse(response, context) {
       }
       yield { type: "block-end", index: textIndex, block: { type: "text", text } };
     }
+  } else if (stop !== "tool_calls") {
+    yield { type: "block-start", index: 0, blockType: "text" };
+    yield { type: "block-end", index: 0, block: { type: "text", text: "" } };
   }
   if (usage) yield { type: "usage", usage };
   yield { type: "finish", reason: finishReason(stop) };

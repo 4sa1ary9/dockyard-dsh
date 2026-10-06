@@ -6,6 +6,32 @@ import { redactError } from "../../providers/src/provider-utils.mjs";
 const DEFAULT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 const AUTH_POLL_INTERVAL_MS = 750;
 const AUTH_URL_WAIT_MS = 2_000;
+const AUTH_RESULT_TTL_MS = 10 * 60 * 1000;
+const AUTH_RESULT_MAX_ENTRIES = 128;
+
+function authorizationKey(providerId, sessionId) {
+  return JSON.stringify([providerId, sessionId]);
+}
+
+// Terminal receipts must not retain callback URLs, authorization codes, or
+// credential-bearing provider payloads. Accounts are already persisted by the
+// runtime; the UI obtains their current state from the separate snapshot.
+function authorizationReceipt(providerId, sessionId, result) {
+  const safeText = (value) => value ? redactError(String(value)
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[OAuth URL omitted]")
+    .replace(/\b(code|authorization_code|token|state|code_verifier|code_challenge)["']?\s*[:=]\s*["']?[^\s,}"']+/gi, "$1=[redacted]")) : null;
+  return {
+    providerId, sessionId, status: result.status,
+    ...(result.diagnostic ? { diagnostic: safeText(result.diagnostic) } : {}),
+    ...(result.instructions ? { instructions: safeText(result.instructions) } : {}),
+    ...(Array.isArray(result.accounts) ? { accounts: result.accounts.map((account) => ({
+      accountId: account.accountId,
+      ...(account.providerId ? { providerId: account.providerId } : {}),
+      ...(account.email ? { email: account.email } : {}),
+      ...(account.displayName ? { displayName: account.displayName } : {}),
+    })) } : {}),
+  };
+}
 
 const POLICY_ALIASES = new Map([
   ["manual", ACCOUNT_SELECTION_POLICY.MANUAL],
@@ -106,19 +132,22 @@ function commandError(text) {
   return { kind: "error", text };
 }
 
-function openDefaultBrowser(url) {
+async function openDefaultBrowser(url) {
   if (!url) return;
-  try {
-    const command = process.platform === "win32"
-      ? { file: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] }
-      : process.platform === "darwin"
-        ? { file: "open", args: [url] }
-        : { file: "xdg-open", args: [url] };
-    const child = spawn(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true });
-    child.unref();
-  } catch {
-    // The authorization URL is still returned in the command result.
+  if (!["http:", "https:"].includes(new URL(url).protocol)) {
+    throw new Error("Authorization URL must use HTTP or HTTPS");
   }
+  const command = process.platform === "win32"
+    ? { file: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] }
+    : process.platform === "darwin"
+      ? { file: "open", args: [url] }
+      : { file: "xdg-open", args: [url] };
+  const child = spawn(command.file, command.args, { detached: true, stdio: "ignore", windowsHide: true });
+  await new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("spawn", resolve);
+    child.unref();
+  });
 }
 
 export class DockyardDshService {
@@ -127,15 +156,16 @@ export class DockyardDshService {
   #started = false;
   #disposed = false;
   #authSessions = new Map();
-  #authOpened = new Set();
+  #authOpened = new Map();
   #authStartPromises = new Map();
+  #authOperations = new Map();
+  #authResults = new Map();
 
   constructor({
     runtime,
     refreshIntervalMs = numericOption(process.env.DOCKYARD_DSH_REFRESH_INTERVAL_MS, DEFAULT_REFRESH_INTERVAL_MS),
     autoRefresh = true,
     openBrowser = openDefaultBrowser,
-    nativeKeyPool = null,
     logger = console,
   } = {}) {
     if (!runtime) throw new Error("Dockyard DSH service requires a runtime");
@@ -143,37 +173,8 @@ export class DockyardDshService {
     this.refreshIntervalMs = refreshIntervalMs;
     this.autoRefresh = autoRefresh;
     this.openBrowser = openBrowser;
-    this.nativeKeyPool = nativeKeyPool;
     this.logger = logger;
     this.ready = runtime.init();
-  }
-
-  /**
-   * The native Key pool is started after this service, so the DSH plugin entry
-   * hands it over once the Cordis fiber is active instead of at construction.
-   */
-  setNativeKeyPool(nativeKeyPool) {
-    this.nativeKeyPool = nativeKeyPool ?? null;
-    return this;
-  }
-
-  #requireNativeKeyPool() {
-    if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool 尚未挂载");
-    return this.nativeKeyPool;
-  }
-
-  /** Secret-free list of the domestic coding-plan presets Dockyard can import. */
-  async keyPresets() {
-    if (!this.nativeKeyPool) {
-      const { NATIVE_KEY_PRESETS, nativeKeyPresetView } = await import("./native-key-presets.mjs");
-      return { presets: NATIVE_KEY_PRESETS.map((preset) => ({ ...nativeKeyPresetView(preset), declared: false, credentialConfigured: false })) };
-    }
-    return this.nativeKeyPool.listKeyPresets();
-  }
-
-  /** Import one preset: store its Key in DSH and declare its `llm-pi-ai` route. */
-  async importKeyPreset(presetId, options = {}) {
-    return this.#requireNativeKeyPool().importKeyPreset(presetId, options);
   }
 
   async start() {
@@ -198,12 +199,15 @@ export class DockyardDshService {
     this.#refreshTimer = null;
     this.#refreshPromises.clear();
     this.#authStartPromises.clear();
+    for (const operation of this.#authOperations.values()) operation.cancelled = true;
     for (const { providerId, sessionId, timer } of this.#authSessions.values()) {
       if (timer) clearTimeout(timer);
       await this.runtime.cancelAuthorization(providerId, sessionId).catch(() => {});
     }
     this.#authSessions.clear();
     this.#authOpened.clear();
+    this.#authResults.clear();
+    this.#authOperations.clear();
   }
 
   async snapshot() {
@@ -270,11 +274,24 @@ export class DockyardDshService {
     return promise;
   }
 
-  async catalog(providerInput) {
+  async catalog(providerInput = null, { force = false } = {}) {
     await this.ready;
+    const providers = (await this.runtime.snapshot()).providers ?? [];
+    if (!providerInput) {
+      const connected = providers.filter((provider) => provider.accounts?.length > 0);
+      const results = await Promise.allSettled(connected.map((provider) => this.catalog(provider.providerId, { force })));
+      return results.map((result, index) => result.status === "fulfilled" ? result.value : {
+        providerId: connected[index].providerId,
+        catalog: { models: [], diagnostic: redactError(result.reason) },
+      });
+    }
     const providerId = providerIdFor(this.runtime, providerInput);
     if (!providerId) throw new Error(`未知 provider：${providerInput}`);
-    return { providerId, manifest: manifestFor(this.runtime, providerInput), catalog: await this.runtime.getCatalog(providerId) };
+    const connected = providers.some((provider) => provider.providerId === providerId && provider.accounts?.length > 0);
+    const catalog = connected
+      ? await this.runtime.getCatalog(providerId, { force })
+      : { models: [], source: "no_connected_accounts" };
+    return { providerId, manifest: manifestFor(this.runtime, providerInput), catalog };
   }
 
   async setPolicy(providerInput, policyInput, defaultAccountId = undefined) {
@@ -315,6 +332,7 @@ export class DockyardDshService {
     await this.ready;
     const manifest = manifestFor(this.runtime, providerInput);
     if (!manifest) throw new Error(`未知 provider：${providerInput}`);
+    if (this.#disposed) return { providerId: manifest.id, status: "cancelled" };
     if (!manifest.capabilities?.includes("oauth_authorization")) {
       return {
         status: "unsupported",
@@ -344,6 +362,9 @@ export class DockyardDshService {
     // try to write the same local login state.
     const existing = this.#activeAuthSession(manifest.id);
     if (existing) {
+      // A reconnected local desktop client may now need the Host fallback for
+      // a session originally owned by a browser popup. Launch stays deduplicated.
+      if (openBrowser) existing.openBrowser = true;
       let current;
       try {
         current = await this.pollAuthorization(manifest.id, existing.sessionId);
@@ -365,8 +386,13 @@ export class DockyardDshService {
         };
       }
     }
-    const started = await this.runtime.startAuthorization(manifest.id);
-    this.#authSessions.set(started.sessionId, {
+    const started = { ...await this.runtime.startAuthorization(manifest.id), providerId: manifest.id };
+    if (this.#disposed) {
+      await this.runtime.cancelAuthorization(manifest.id, started.sessionId).catch(() => {});
+      return { providerId: manifest.id, sessionId: started.sessionId, status: "cancelled" };
+    }
+    const key = authorizationKey(manifest.id, started.sessionId);
+    this.#authSessions.set(key, {
       providerId: manifest.id,
       sessionId: started.sessionId,
       status: started.status,
@@ -374,65 +400,129 @@ export class DockyardDshService {
       openBrowser,
     });
     const result = await this.#waitForAuthorizationUrl(manifest.id, started, openBrowser);
-    const tracked = this.#authSessions.get(started.sessionId);
-    if (tracked) Object.assign(tracked, {
-      status: result.status,
-      authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null,
-    });
-    if (result.status === "pending" || result.status === "processing") this.#scheduleAuthorization(manifest.id, started.sessionId);
-    else if (result.status === "completed") {
-      this.#authSessions.delete(started.sessionId);
-      await this.refresh(manifest.id).catch((error) => this.#warn("post-login quota refresh failed", error));
-    }
-    return result;
+    const accepted = await this.#acceptAuthorizationResult(manifest.id, started.sessionId, result);
+    if (["pending", "processing"].includes(accepted.status)) this.#scheduleAuthorization(manifest.id, started.sessionId);
+    return accepted;
   }
 
   async pollAuthorization(providerId, sessionId) {
-    const tracked = this.#authSessions.get(sessionId);
-    const result = await this.runtime.pollAuthorization(providerId, sessionId);
-    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
-    if (tracked) Object.assign(tracked, {
-      status: result.status,
-      authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null,
-    });
-    if (result.status === "completed") {
-      this.#authSessions.delete(sessionId);
-      await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
-    } else if (!["pending", "processing"].includes(result.status)) {
-      this.#authSessions.delete(sessionId);
-    }
-    return result;
+    return this.#runAuthorizationOperation(providerId, sessionId, () => this.runtime.pollAuthorization(providerId, sessionId));
   }
 
   async cancelAuthorization(providerInput, sessionId) {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput) ?? String(providerInput);
-    const tracked = this.#authSessions.get(sessionId);
-    if (tracked?.timer) clearTimeout(tracked.timer);
-    const result = await this.runtime.cancelAuthorization(providerId, sessionId);
-    this.#authSessions.delete(sessionId);
-    this.#authOpened.delete(sessionId);
-    return result;
+    const key = authorizationKey(providerId, sessionId);
+    const cached = this.#cachedAuthorization(key);
+    if (cached) return cached;
+    const operation = this.#authOperations.get(key);
+    if (operation) operation.cancelled = true;
+    // Publish cancellation before awaiting the provider; a late poll must not
+    // reopen the URL, schedule another timer, or replace this terminal receipt.
+    const cancelled = this.#rememberAuthorization(providerId, sessionId, { status: "cancelled" });
+    this.#clearAuthorization(key);
+    await this.runtime.cancelAuthorization(providerId, sessionId);
+    return cancelled;
   }
 
   async submitAuthorizationCode(providerInput, sessionId, code) {
     await this.ready;
     const providerId = providerIdFor(this.runtime, providerInput) ?? String(providerInput);
-    const tracked = this.#authSessions.get(sessionId);
-    const result = await this.runtime.submitAuthorizationCode(providerId, sessionId, code);
-    this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
-    if (tracked) Object.assign(tracked, {
-      status: result.status,
-      authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null,
-    });
-    if (result.status === "pending" || result.status === "processing") this.#scheduleAuthorization(providerId, sessionId);
-    else if (result.status === "completed") {
-      this.#authSessions.delete(sessionId);
-      await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
-    } else if (result.status !== "pending" && result.status !== "processing") {
-      this.#authSessions.delete(sessionId);
-    }
+    const key = authorizationKey(providerId, sessionId);
+    // Unlike a duplicate poll, submitting a code must not be discarded just
+    // because a pre-callback poll is in flight. Wait for it, then recheck state.
+    const existing = this.#authOperations.get(key);
+    if (existing) await existing.promise;
+    const result = await this.#runAuthorizationOperation(providerId, sessionId,
+      () => this.runtime.submitAuthorizationCode(providerId, sessionId, code));
+    if (["pending", "processing"].includes(result.status)) this.#scheduleAuthorization(providerId, sessionId);
     return result;
+  }
+
+  #cachedAuthorization(key) {
+    const now = Date.now();
+    for (const [entryKey, entry] of this.#authResults) {
+      if (entry.expiresAt <= now) this.#authResults.delete(entryKey);
+    }
+    const cached = this.#authResults.get(key);
+    return cached ? structuredClone(cached.result) : null;
+  }
+
+  #rememberAuthorization(providerId, sessionId, result) {
+    const key = authorizationKey(providerId, sessionId);
+    this.#cachedAuthorization(key); // prune expired entries before enforcing the cap
+    const receipt = authorizationReceipt(providerId, sessionId, result);
+    this.#authResults.set(key, { result: receipt, expiresAt: Date.now() + AUTH_RESULT_TTL_MS });
+    while (this.#authResults.size > AUTH_RESULT_MAX_ENTRIES) {
+      this.#authResults.delete(this.#authResults.keys().next().value);
+    }
+    return structuredClone(receipt);
+  }
+
+  #clearAuthorization(key) {
+    const tracked = this.#authSessions.get(key);
+    if (tracked?.timer) clearTimeout(tracked.timer);
+    this.#authSessions.delete(key);
+    this.#authOpened.delete(key);
+  }
+
+  async #acceptAuthorizationResult(providerId, sessionId, result) {
+    const key = authorizationKey(providerId, sessionId);
+    const cached = this.#cachedAuthorization(key);
+    if (cached) return cached;
+    if (this.#disposed) return { providerId, sessionId, status: "cancelled" };
+    if (["pending", "processing"].includes(result.status)) {
+      const tracked = this.#authSessions.get(key);
+      if (tracked) Object.assign(tracked, {
+        status: result.status,
+        authorizationUrl: result.authorizationUrl ?? tracked.authorizationUrl ?? null,
+      });
+      return result;
+    }
+    // The runtime has finished its import transaction before returning here.
+    // Cache that durable outcome before the optional quota refresh can await.
+    const receipt = this.#rememberAuthorization(providerId, sessionId, result);
+    this.#clearAuthorization(key);
+    if (receipt.status === "completed") {
+      await this.refresh(providerId).catch((error) => this.#warn("post-login quota refresh failed", error));
+    }
+    return receipt;
+  }
+
+  #runAuthorizationOperation(providerId, sessionId, run) {
+    const key = authorizationKey(providerId, sessionId);
+    const cached = this.#cachedAuthorization(key);
+    if (cached) return Promise.resolve(cached);
+    if (this.#disposed) return Promise.resolve({ providerId, sessionId, status: "cancelled" });
+    const existing = this.#authOperations.get(key);
+    if (existing) return existing.promise;
+    const operation = { cancelled: false, promise: null };
+    operation.promise = (async () => {
+      let result;
+      try {
+        result = await run();
+      } catch (error) {
+        // Import/persistence errors occur after a one-shot provider completion
+        // was consumed. Preserve the original failure instead of later missing.
+        result = { status: "failed", diagnostic: `OAuth 登录结果处理失败：${redactError(error)}` };
+        // A thrown poll can leave the provider's callback listener alive. We
+        // stop polling after recording failure, so release that listener too.
+        await Promise.resolve().then(() => this.runtime.cancelAuthorization(providerId, sessionId))
+          .catch((cleanupError) => this.#warn("OAuth authorization cleanup failed", cleanupError));
+      }
+      if (operation.cancelled || this.#disposed) return this.#cachedAuthorization(key)
+        ?? { providerId, sessionId, status: "cancelled" };
+      result = { ...result, providerId, sessionId };
+      const tracked = this.#authSessions.get(key);
+      result = await this.#openAuthorizationUrl(result, tracked?.openBrowser ?? true);
+      if (operation.cancelled || this.#disposed) return this.#cachedAuthorization(key)
+        ?? { providerId, sessionId, status: "cancelled" };
+      return this.#acceptAuthorizationResult(providerId, sessionId, result);
+    })().finally(() => {
+      if (this.#authOperations.get(key) === operation) this.#authOperations.delete(key);
+    });
+    this.#authOperations.set(key, operation);
+    return operation.promise;
   }
 
   helpText() {
@@ -449,22 +539,26 @@ export class DockyardDshService {
       "/dockyard use <provider> <accountId>      手动指定账号",
       "/dockyard remove <provider> <accountId>   从账号池移除账号并清理本机 Keychain 引用",
       "/dockyard cancel <provider> <sessionId>  取消 OAuth 登录",
-      "/dockyard import [预设] [API Key]        导入国产订阅套餐（GLM Coding Plan / Kimi Code / ModelStudio）",
       `当前 providers：${providers.length ? providers.join("、") : "暂无"}`,
     ].join("\n");
   }
 
-  #openAuthorizationUrl(result, openBrowser = true) {
-    if (!openBrowser || !result?.authorizationUrl || this.#authOpened.has(result.sessionId)) return;
-    this.#authOpened.add(result.sessionId);
-    // Provider-owned CLI sessions may need the host-level browser fallback;
-    // direct GUI OAuth passes openBrowser=false and navigates its synchronous
-    // popup itself. Providers that already opened a browser are never opened
-    // a second time.
-    if (result.browserOpened) return;
-    void Promise.resolve(this.openBrowser(result.authorizationUrl)).catch((error) => {
-      this.#warn("could not open authorization URL", error);
-    });
+  async #openAuthorizationUrl(result, openBrowser = true) {
+    if (!openBrowser || !result?.authorizationUrl || result.browserOpened === true
+      || !["pending", "processing"].includes(result.status)) return result;
+    // Keep the launch outcome, not an optimistic "opened" marker. Polling
+    // must preserve a failed launch's manual-link fallback without reopening
+    // the browser every time or racing concurrent polls.
+    const key = authorizationKey(result.providerId, result.sessionId);
+    let launch = this.#authOpened.get(key);
+    if (!launch) {
+      launch = Promise.resolve().then(() => this.openBrowser(result.authorizationUrl))
+        .then(() => ({ browserOpened: true }))
+        .catch(() => ({ browserOpened: false, diagnostic: "无法自动打开浏览器，请手动打开授权链接继续登录。" }));
+      this.#authOpened.set(key, launch);
+    }
+    const outcome = await launch;
+    return { ...result, ...outcome, diagnostic: outcome.diagnostic ?? result.diagnostic ?? null };
   }
 
   #activeAuthSession(providerId) {
@@ -475,20 +569,21 @@ export class DockyardDshService {
   }
 
   async #waitForAuthorizationUrl(providerId, started, openBrowser = true) {
-    this.#openAuthorizationUrl(started, openBrowser);
+    started = await this.#openAuthorizationUrl(started, openBrowser);
     if (started.authorizationUrl || !["pending", "processing"].includes(started.status)) return started;
     const deadline = Date.now() + AUTH_URL_WAIT_MS;
     let result = started;
     while (Date.now() < deadline && ["pending", "processing"].includes(result.status)) {
       await sleep(100);
-      result = await this.runtime.pollAuthorization(providerId, started.sessionId);
-      this.#openAuthorizationUrl(result, openBrowser);
+      result = await this.pollAuthorization(providerId, started.sessionId);
+      if (result.authorizationUrl) break;
     }
     return result;
   }
 
   #scheduleAuthorization(providerId, sessionId) {
-    const current = this.#authSessions.get(sessionId);
+    const key = authorizationKey(providerId, sessionId);
+    const current = this.#authSessions.get(key);
     if (!current || current.timer) return;
     current.timer = setTimeout(async () => {
       current.timer = null;
@@ -497,7 +592,7 @@ export class DockyardDshService {
         const result = await this.pollAuthorization(providerId, sessionId);
         if (["pending", "processing"].includes(result.status)) this.#scheduleAuthorization(providerId, sessionId);
       } catch (error) {
-        this.#authSessions.delete(sessionId);
+        this.#clearAuthorization(key);
         this.#warn("OAuth authorization polling failed", error);
       }
     }, AUTH_POLL_INTERVAL_MS);
@@ -513,7 +608,7 @@ export function createDockyardCommand(service) {
   return {
     name: "dockyard",
     description: "Manage Dockyard DSH providers, OAuth accounts, quotas, models, and account selection",
-    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel | import" },
+    input: { hint: "status | scan | add | login | refresh | models | policy | use | cancel" },
     handler: async ({ rawInput, signal }) => {
       if (signal?.aborted) return commandError("Dockyard 命令已取消。");
       const [verb = "help", ...args] = commandTokens(rawInput);
@@ -607,36 +702,6 @@ export function createDockyardCommand(service) {
             const result = await service.cancelAuthorization(args[0], args[1]);
             return commandSuccess(`OAuth 会话 ${result.sessionId}：${result.status}`);
           }
-          // Domestic coding plans that DSH itself serves as `llm-pi-ai` routes.
-          // Listed without any key so a bare `/dockyard import` is a safe read.
-          case "import": {
-            if (!args[0]) {
-              const { presets } = await service.keyPresets();
-              const lines = ["可导入的国产订阅套餐（写入 DSH 凭据库 + 声明 llm-pi-ai 路由）："];
-              for (const preset of presets) {
-                lines.push(`- ${preset.id}：${preset.name}`);
-                lines.push(`  端点 ${preset.baseURL}；模型 ${preset.modelCount} 个；路由${preset.declared ? "已声明" : "未声明"}；Key ${preset.credentialConfigured ? "已配置" : "未配置"}`);
-                if (preset.notice) lines.push(`  提示：${preset.notice}`);
-              }
-              lines.push("");
-              lines.push("用法：/dockyard import <预设 id> [API Key]");
-              lines.push("不带 Key 时复用 DSH 凭据库里已有的同名引用（例如 dsh-AuthInOne 写过的 Key）。");
-              return commandSuccess(lines.join("\n"));
-            }
-            const presetId = args[0];
-            const apiKey = args.slice(1).join(" ").trim();
-            const result = await service.importKeyPreset(presetId, { apiKey });
-            const lines = [
-              `已导入 ${result.preset.name}（${result.preset.id}）`,
-              `provider 路由：${result.providerId}`,
-              `凭据引用：${result.credentialRef}${result.credentialWritten ? "（本次已写入 Key）" : ""}`,
-              `Key 状态：${result.credentialConfigured ? "已配置" : "未配置"}`,
-              `路由状态：${result.declared ? `已声明（${result.declaration}）` : `未声明（${result.declaration}）`}`,
-            ];
-            if (!result.credentialConfigured) lines.push(`补 Key：/dockyard import ${result.preset.id} <API Key>`);
-            lines.push("在「设置 → 模型」的模型选择器里选择该 provider 的模型即可使用。");
-            return commandSuccess(lines.join("\n"));
-          }
           default:
             return commandError(`未知 Dockyard 子命令：${verb}\n\n${service.helpText()}`);
         }
@@ -650,4 +715,6 @@ export function createDockyardCommand(service) {
 export const dockyardDshConstants = Object.freeze({
   defaultRefreshIntervalMs: DEFAULT_REFRESH_INTERVAL_MS,
   authPollIntervalMs: AUTH_POLL_INTERVAL_MS,
+  authResultTtlMs: AUTH_RESULT_TTL_MS,
+  authResultMaxEntries: AUTH_RESULT_MAX_ENTRIES,
 });

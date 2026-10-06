@@ -23,10 +23,7 @@ The native command surface is:
 /dockyard models <provider>
 /dockyard policy <provider> <manual|sticky_session|round_robin|failover> [accountId]
 /dockyard use <provider> <accountId>
-/dockyard import [preset] [apiKey]
 ```
-
-`/dockyard import` is the one verb that writes DSH's own configuration instead of the provider account pool: it declares the preset's `llm-pi-ai` route with `settings.update` (recursive merge, so sibling routes survive) and stores the plan key through `credentials.set`. Presets match the domestic coding plans `dsh-AuthInOne` ships under the same provider route and credential reference. Both halves are merge-shaped: an existing route profile or stored key is reused, never overwritten, and a bare `/dockyard import` only reads state.
 
 `/dockyard login` opens the provider's official browser authorization page and imports the completed account into the pool. Codex, Antigravity, Grok, Claude, and Cursor use provider-verified browser flows; CLI/desktop/OAuth-file sources remain compatibility or scan fallbacks. Claude can request a manual authorization-code paste when its official hosted callback does not return to localhost. The GUI Login/Add action always starts a new authorization flow, even when accounts already exist, instead of silently re-importing the active account. Use `/dockyard scan` plus `/dockyard add` only when importing an existing local session. Completed credentials are written to the host secure store and only opaque references reach the account pool or page state.
 

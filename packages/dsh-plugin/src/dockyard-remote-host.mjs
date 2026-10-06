@@ -1,4 +1,5 @@
 import { Remote, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
+import { redactError } from "../../providers/src/provider-utils.mjs";
 
 export function publicAuthResult(result) {
   if (!result || typeof result !== "object") return result;
@@ -9,6 +10,7 @@ export function publicAuthResult(result) {
     ...(result.authorizationUrl ? { authorizationUrl: result.authorizationUrl } : {}),
     ...(result.instructions ? { instructions: result.instructions } : {}),
     ...(result.browserOpened ? { browserOpened: true } : {}),
+    ...(result.terminalOpened ? { terminalOpened: true } : {}),
     ...(result.inputRequired ? { inputRequired: true } : {}),
     ...(result.authorizationCodeRequired ? { authorizationCodeRequired: true } : {}),
     ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
@@ -47,6 +49,21 @@ export class DockyardRemoteService extends TypertRemoteService {
     return envelope(result, await this.dockyard.snapshot());
   }
 
+  async catalog(request = {}) {
+    try {
+      const result = await this.dockyard.catalog(request?.providerId ?? null, { force: request?.force ?? false });
+      const providers = (Array.isArray(result) ? result : [result]).map(({ providerId, catalog }) => ({
+        providerId,
+        count: Array.isArray(catalog?.models) ? catalog.models.length : 0,
+        source: typeof catalog?.source === "string" ? redactError(catalog.source) : null,
+        diagnostic: redactError(catalog?.diagnostic ?? (Array.isArray(catalog?.diagnostics) ? catalog.diagnostics.join("；") : null)),
+      }));
+      return { providers, count: providers.reduce((sum, provider) => sum + provider.count, 0) };
+    } finally {
+      this.ctx.emit("llm/adapters-updated");
+    }
+  }
+
   async scan(request = {}) {
     const result = await this.dockyard.scan(request?.providerId ?? null);
     return envelope(result, await this.dockyard.snapshot());
@@ -58,9 +75,12 @@ export class DockyardRemoteService extends TypertRemoteService {
   }
 
   async login(request) {
-    // The browser client opens a synchronous popup before this RPC call;
-    // suppress the host-level `open` fallback to avoid a duplicate tab.
-    const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId, { openBrowser: false }));
+    // A Web client normally owns its reserved popup. Desktop Electron denies
+    // about:blank, so local clients explicitly request the Host browser fallback.
+    // The Host opens only the provider-generated URL, never an arbitrary RPC URL.
+    const result = publicAuthResult(await this.dockyard.startAuthorization(request.providerId, {
+      openBrowser: request.openBrowser === true,
+    }));
     return envelope(result, await this.dockyard.snapshot());
   }
 
@@ -123,21 +143,6 @@ export class DockyardRemoteService extends TypertRemoteService {
     return this.nativeKeyPool.setPolicy(request.providerId, request.policy);
   }
 
-  // Domestic coding-plan presets. The Key rides only through the host-side
-  // credential write; the browser receives the secret-free status envelope.
-  async nativeKeyPresets() {
-    if (!this.nativeKeyPool) return { presets: [] };
-    return this.nativeKeyPool.listKeyPresets();
-  }
-
-  async nativeKeyImportPreset(request = {}) {
-    if (!this.nativeKeyPool) throw new Error("Dockyard Native Key Pool 尚未挂载");
-    return this.nativeKeyPool.importKeyPreset(request.presetId, {
-      apiKey: request.apiKey ?? "",
-      label: request.label ?? "",
-    });
-  }
-
   async getContextWindowOverride(request = {}) {
     return this.dockyard.getContextWindowOverride(request);
   }
@@ -150,9 +155,8 @@ export class DockyardRemoteService extends TypertRemoteService {
 function markRemoteMethods() {
   const target = Object.create(DockyardRemoteService.prototype);
   for (const name of [
-    "snapshot", "refresh", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
+    "snapshot", "refresh", "catalog", "scan", "add", "login", "poll", "submitAuthorizationCode", "cancel", "setPolicy", "use", "removeAccount",
     "nativeKeyStatus", "nativeKeyRefresh", "nativeKeyRegister", "nativeKeyUnregister", "nativeKeySetPolicy",
-    "nativeKeyPresets", "nativeKeyImportPreset",
     "getContextWindowOverride", "setContextWindowOverride",
   ]) {
     let initializer;

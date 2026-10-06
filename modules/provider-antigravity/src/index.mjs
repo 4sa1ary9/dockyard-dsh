@@ -45,4 +45,5 @@ export {
   readAntigravityKeychainToken,
   readAntigravityTokenFile,
   resolveAntigravityAccessToken,
+  resolveAntigravityThinkingConfig,
 } from "./native-transport.mjs";
